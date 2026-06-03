@@ -1,0 +1,20 @@
+[project]
+name = "TA_main2main_workflow"
+version = "0.1.0"
+description = "TA_main2main_workflow — Triton-Ascend upstream sync using CrewAI"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "crewai[tools]==1.14.5"
+]
+
+[project.scripts]
+ta-kickoff = "TA_main2main_workflow.main:kickoff"
+ta-plot = "TA_main2main_workflow.main:plot"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.crewai]
+type = "flow"
