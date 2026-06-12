@@ -27,15 +27,19 @@ from crewai.flow import Flow, listen, start, router
 from TA_main2main_workflow.agent.opencode_adapter import AIResult, run_opencode_adapter
 from TA_main2main_workflow.scripts.build_test import build_triton_ascend, run_tests
 from TA_main2main_workflow.scripts.detect_commits import detect
-from TA_main2main_workflow.scripts.merge_upstream import run_merge
-from TA_main2main_workflow.scripts.pre_ci_check import run_pre_ci_check
-from TA_main2main_workflow.scripts.push_to_github import push_and_create_pr
+from TA_main2main_workflow.scripts.merge_upstream import run_merge, run_merge_incremental
+from TA_main2main_workflow.scripts.plan_steps import run_plan
+from TA_main2main_workflow.scripts.pre_ci_check import run_pre_ci_check, cleanup_temp_files
+from TA_main2main_workflow.scripts.push_to_github import (
+    push_and_create_pr,
+)
 
 from TA_main2main_workflow.utils import (
-    BUILD_RESULT_FILE, CONFLICT_LOG_DIR,
+    BUILD_LOG_FILE, BUILD_RESULT_FILE, CONFLICT_LOG_DIR,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE,
     FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE, FIX_LOG_DIR,
     HasNewCommits, HasNoNewCommits,
+    STEPS_DIR, STEPS_FILE, LINE_BUDGET, commit_count_budget,
     TEST_RESULT_FILE, UpgradeCompleted, UpgradeFailed,
     WORKSPACE_DIR, has_merge_conflicts, run_git, get_conflict_files,
     print_header, print_section, print_step, print_status, print_info,
@@ -77,6 +81,14 @@ class TA_Main2MainState(BaseModel):
     conda_env: str = ""
     test_dir: str = "third_party/ascend/unittest/pytest_ut"
     num_procs: int = 16
+
+    # ── Progressive step-by-step merge ──
+    steps: list = []
+    total_steps: int = 0
+    current_step: int = 0
+    step_start_ascend_head: str = ""  # ascend HEAD before current step
+    progressive_merge: bool = True
+    step_pr_descriptions: list = []  # accumulated step descriptions for PR body
 
     summary_rows: list = []
 
@@ -168,7 +180,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     @router(initialize)
     def detect_commits(self) -> Literal["HasNewCommits", "HasNoNewCommits"]:
         start_timer("detect")
-        print_header("Phase 1: Detect Upstream Commits")
+        print_header("Phase 1: Detect Upstream Commits & Plan Steps")
 
         ascend_path = Path(self.state.triton_ascend_path)
         triton_path = Path(self.state.triton_path)
@@ -197,16 +209,72 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             if len(commits) > 20:
                 print(f"    ... and {len(commits) - 20} more")
 
-        stop_timer("detect")
-
         if not has_new:
             print_status(True, "Already up to date — nothing to merge")
             self.state.summary_rows.append(("Detect commits", "PASS", "No new commits"))
+            stop_timer("detect")
             return HasNoNewCommits
 
-        print_status(True, f"Found {self.state.upstream_commits_count} upstream commits to merge")
+        # ── Check if progressive merge is enabled ──
+        progressive_env = os.getenv("TA_PROGRESSIVE_MERGE", "true").lower()
+        self.state.progressive_merge = progressive_env != "false"
+
+        # ── Plan steps: split commits into chunks based on line/commit budget ──
+        if self.state.progressive_merge and self.state.upstream_commits_count > 1:
+            print_section("Step Planning")
+            line_budget = int(os.getenv("TA_LINE_BUDGET", str(LINE_BUDGET)))
+            ccb = commit_count_budget(line_budget)
+            print_key_value("line budget", str(line_budget))
+            print_key_value("commit-count budget", str(ccb))
+
+            plan = run_plan(
+                triton_path,
+                self.state.merge_base,
+                self.state.target_commit,
+                line_budget=line_budget,
+            )
+            self.state.steps = plan["steps"]
+            self.state.total_steps = len(plan["steps"])
+
+            # ── Guard: if planner produced 0 steps (e.g., all commits filtered
+            # out), fall back to single-step mode so something still gets merged ──
+            if self.state.total_steps == 0:
+                print_warn("Plan returned 0 steps — falling back to single-step merge")
+                self.state.total_steps = 1
+                self.state.steps = [{
+                    "index": 1,
+                    "id": "step-1",
+                    "commit_count": self.state.upstream_commits_count,
+                    "start_commit": self.state.merge_base,
+                    "end_commit": self.state.target_commit,
+                    "source_changed_lines": result["changed_lines"]["total"],
+                }]
+
+            print_status(True, f"Planned {self.state.total_steps} step(s) "
+                         f"from {plan['total_source_commits']} source-touching commits "
+                         f"({plan['total_commits']} total upstream commits)")
+        else:
+            # Single-step mode: treat everything as one step
+            self.state.total_steps = 1
+            self.state.steps = [{
+                "index": 1,
+                "id": "step-1",
+                "commit_count": self.state.upstream_commits_count,
+                "start_commit": self.state.merge_base,
+                "end_commit": self.state.target_commit,
+                "source_changed_lines": result["changed_lines"]["total"],
+            }]
+            if not self.state.progressive_merge:
+                print_info("TA_PROGRESSIVE_MERGE=false — using single-step mode")
+            else:
+                print_info("Only 1 upstream commit — using single-step mode")
+
+        stop_timer("detect")
+        print_status(True, f"Found {self.state.upstream_commits_count} upstream commits to merge "
+                     f"across {self.state.total_steps} step(s)")
         self.state.summary_rows.append(
-            ("Detect commits", "PASS", f"{self.state.upstream_commits_count} commits found")
+            ("Detect commits", "PASS",
+             f"{self.state.upstream_commits_count} commits, {self.state.total_steps} step(s)")
         )
         return HasNewCommits
 
@@ -226,37 +294,87 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
     @router(detect_commits)
     def execute_sync(self) -> Literal["UpgradeCompleted", "UpgradeFailed"]:
-        """Orchestrate the full sync pipeline.
+        """Orchestrate the full sync pipeline — progressively or single-step.
 
-        IMPORTANT: This is a SINGLE @router node that internally calls all
-        sub-steps as plain Python methods. We do NOT rely on CrewAI's
-        @listen → @listen signal chaining because:
-          - In some CrewAI versions, @listen method return values are NOT
-            forwarded as routing signals.
-          - Only @router method return values reliably route.
-          - This caused resolve_conflicts to never be triggered even when
-            merge_upstream returned MergeConflict.
+        When progressive_merge is True (default), each planned step is merged
+        and validated independently before moving to the next. This keeps
+        AI conflict resolution and fix scopes small and manageable.
 
-        The internal call chain is:
-          _do_merge → _do_resolve_conflicts → _do_build_and_fix_loop → _do_finalize
+        The internal per-step call chain is:
+          _do_step_merge → _do_resolve_conflicts → _do_build_and_fix_loop → _do_commit_step → _push_step_progress
         """
-        # ── Step A: git merge upstream ──
-        if not self._do_merge():
-            self.state.final_status = UpgradeFailed
-            return UpgradeFailed
+        # ── Iterate over each planned step ──
+        while self.state.current_step < self.state.total_steps:
+            step = self.state.steps[self.state.current_step]
+            step_id = step["id"]
+            self.state.retry_count = 0
 
-        # ── Step B: AI resolve conflict (if merge has conflicts) ──
-        if self.state.merge_has_conflicts:
-            if not self._do_resolve_conflicts():
+            print_header(f"Step {self.state.current_step + 1}/{self.state.total_steps}: {step_id}")
+            print_key_value("commits in step", str(step["commit_count"]))
+            print_key_value("end commit", step["end_commit"][:12])
+            if "source_changed_lines" in step:
+                print_key_value("source lines", str(step["source_changed_lines"]))
+
+            ascend_path = Path(self.state.triton_ascend_path)
+
+            # ── Work-branch guard: verify we're on the right branch ──
+            if self.state.current_step > 0 and self.state.work_branch:
+                current_branch = run_git(ascend_path, "branch", "--show-current").strip()
+                if current_branch != self.state.work_branch:
+                    print_warn(f"Expected work branch '{self.state.work_branch}' "
+                               f"but currently on '{current_branch}' — switching back")
+                    run_git(ascend_path, "checkout", self.state.work_branch)
+                print_info(f"Same work branch: '{self.state.work_branch}' "
+                           f"(step {self.state.current_step + 1}/{self.state.total_steps})")
+
+            # Record ascend HEAD before this step (for per-step patch generation)
+            self.state.step_start_ascend_head = run_git(
+                ascend_path, "rev-parse", "HEAD"
+            ).strip()
+
+            # ── Step A: git merge this step's end commit ──
+            result = self._do_step_merge(step)
+            if result == UpgradeFailed:
                 self.state.final_status = UpgradeFailed
                 return UpgradeFailed
 
-        # ── Step C: build → test → AI fix bug loop ──
-        if not self._do_build_and_fix_loop():
-            self.state.final_status = UpgradeFailed
-            return UpgradeFailed
+            # ── Step B: AI resolve conflict (if merge had conflicts) ──
+            if self.state.merge_has_conflicts:
+                if not self._do_resolve_conflicts():
+                    self.state.final_status = UpgradeFailed
+                    return UpgradeFailed
 
-        # ── Step D: finalize (update version, generate patch & summary) ──
+            # ── Step C: build → test → AI fix bug loop ──
+            try:
+                build_ok = self._do_build_and_fix_loop()
+            except Exception as exc:
+                print_error(f"_do_build_and_fix_loop crashed: {exc}")
+                import traceback
+                traceback.print_exc()
+                self.state.final_status = UpgradeFailed
+                return UpgradeFailed
+
+            if not build_ok:
+                self.state.final_status = UpgradeFailed
+                return UpgradeFailed
+
+            # ── Step D: commit step progress ──
+            self._do_commit_step(step)
+
+            # ── Record step description for final PR body ──
+            desc = (
+                f"✅ **{step_id}**: {step['commit_count']} commits, "
+                f"end_commit=`{step['end_commit'][:12]}`, "
+                f"source lines={step.get('source_changed_lines', '?')}"
+            )
+            self.state.step_pr_descriptions.append(desc)
+
+            # Move to next step
+            self.state.current_step += 1
+            print_status(True, f"Step {step_id} completed successfully "
+                         f"({self.state.current_step}/{self.state.total_steps})")
+
+        # ── Finalize: generate cumulative patch & summary ──
         self._do_finalize()
         self.state.final_status = UpgradeCompleted
         return UpgradeCompleted
@@ -265,41 +383,105 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     # Internal step implementations
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _do_merge(self) -> bool:
+    def _do_step_merge(self, step: dict) -> Literal["HasNewCommits"] | Literal["UpgradeFailed"]:
+        """Merge this step's end_commit into triton-ascend.
+
+        The first step creates a fresh work branch from upstream-ascend/main
+        and merges its end_commit. Subsequent steps merge their end_commit
+        on top of the SAME work branch — git handles the incremental merge
+        automatically by computing the diff between the previous end_commit
+        and the new one.
+
+        ALL steps share ONE work branch. This is critical: we accumulate
+        changes on a single branch so the final PR contains the full history.
+        """
         start_timer("merge")
-        print_header("Phase 2: Merge Upstream Triton")
+        step_id = step["id"]
+        is_first_step = self.state.current_step == 0
 
         ascend_path = Path(self.state.triton_ascend_path)
         triton_path = Path(self.state.triton_path)
 
-        print_flow_progress("merge", f"merging {self.state.target_commit[:12]} into triton-ascend")
+        # ── Verify / log work branch consistency ──
+        if is_first_step:
+            print_info(f"No work branch yet — will create one for step {step_id}")
+        else:
+            current_branch = run_git(ascend_path, "branch", "--show-current").strip()
+            if current_branch != self.state.work_branch:
+                print_warn(f"Expected work branch '{self.state.work_branch}' "
+                           f"but currently on '{current_branch}' — switching back")
+                run_git(ascend_path, "checkout", self.state.work_branch)
+            print_info(f"Continuing on work branch: '{self.state.work_branch}' "
+                       f"(verified same branch as step 1)")
 
-        merge_result = run_merge(
-            ascend_path,
-            triton_path,
-            self.state.target_commit,
-        )
+        print_flow_progress("merge", f"[{step_id}] merging {step['end_commit'][:12]}")
 
-        self.state.work_branch = merge_result["work_branch"]
+        try:
+            if is_first_step:
+                # First step: create work branch and do full merge
+                merge_result = run_merge(
+                    ascend_path,
+                    triton_path,
+                    step["end_commit"],
+                )
+                self.state.work_branch = merge_result["work_branch"]
+                print_info(f"Created work branch: '{self.state.work_branch}' "
+                           f"(all {self.state.total_steps} step(s) will use this branch)")
+            else:
+                # Subsequent step: merge on top of existing work branch
+                # fetch the new target if it's not already present
+                try:
+                    run_git(ascend_path, "fetch", "upstream-triton", "--prune")
+                except Exception:
+                    print_info("Could not fetch upstream-triton, assuming target is reachable")
+
+                merge_result = run_merge_incremental(
+                    ascend_path,
+                    triton_path,
+                    step["end_commit"],
+                    self.state.work_branch,
+                )
+        except Exception as exc:
+            print_error(f"Merge failed with exception: {exc}")
+            stop_timer("merge")
+            self.state.summary_rows.append(
+                (f"Merge step {step_id}", "FAIL", str(exc)[:60])
+            )
+            return UpgradeFailed
+
         self.state.merge_has_conflicts = merge_result["has_conflicts"]
         self.state.conflict_files = merge_result.get("conflict_files", [])
 
         print_key_value("work branch", self.state.work_branch)
         print_key_value("has conflicts", str(self.state.merge_has_conflicts))
         print_key_value("exit code", str(merge_result["merge_exit_code"]))
+        print_key_value("step", f"{self.state.current_step + 1}/{self.state.total_steps}")
+
+        # If merge had non-zero exit but no conflict markers, that's a hard failure
+        if merge_result["merge_exit_code"] != 0 and not self.state.merge_has_conflicts:
+            print_error(f"Merge exited with code {merge_result['merge_exit_code']} "
+                        f"but no conflict markers found — this is an unexpected failure")
+            stop_timer("merge")
+            self.state.summary_rows.append(
+                (f"Merge step {step_id}", "FAIL",
+                 f"exit code {merge_result['merge_exit_code']}")
+            )
+            return UpgradeFailed
 
         if self.state.merge_has_conflicts:
             print_conflict_list(self.state.conflict_files)
             stop_timer("merge")
             self.state.summary_rows.append(
-                ("Merge upstream", "WARN", f"{len(self.state.conflict_files)} conflicts")
+                (f"Merge step {step_id}", "WARN", f"{len(self.state.conflict_files)} conflicts")
             )
         else:
             stop_timer("merge")
-            print_status(True, "Merge succeeded with no conflicts")
-            self.state.summary_rows.append(("Merge upstream", "PASS", "Clean merge"))
+            print_status(True, f"Step {step_id} merge succeeded with no conflicts")
+            self.state.summary_rows.append(
+                (f"Merge step {step_id}", "PASS", f"{step['commit_count']} commits")
+            )
 
-        return True
+        return HasNewCommits
 
     def _do_resolve_conflicts(self) -> bool:
         """AI-driven merge conflict resolution with retry loop.
@@ -309,6 +491,10 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
           2. Call opencode/claude with the conflict snapshots
           3. Check if all conflicts are resolved
           4. If not, retry with refreshed conflict list
+
+        AI context includes: step index (N/total), is_last_step flag,
+        previous_step_id and previous_step_summary_path for continuity
+        (matching vllm-ascend's main2main_flow pattern).
 
         After all conflicts are resolved:
           - git commit the resolution
@@ -321,8 +507,28 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_header("Phase 3: AI Conflict Resolution")
 
         ascend_path = Path(self.state.triton_ascend_path)
-        step_dir = WORKSPACE_DIR / "step-0"
+
+        step = self.state.steps[self.state.current_step] if self.state.steps else None
+        current_step_id = step["id"] if step else "step-0"
+        is_last_step = self.state.current_step == self.state.total_steps - 1
+
+        # Use step-specific directory in progressive mode, fall back to step-0
+        if self.state.total_steps > 1 and self.state.steps:
+            step_dir = WORKSPACE_DIR / STEPS_DIR / current_step_id
+        else:
+            step_dir = WORKSPACE_DIR / "step-0"
         step_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Previous step context (matching vllm-ascend pattern) ──
+        previous_step = (
+            self.state.steps[self.state.current_step - 1]
+            if self.state.current_step > 0 and self.state.steps else None
+        )
+        previous_step_id = previous_step["id"] if previous_step else ""
+        previous_step_summary_path = (
+            str(WORKSPACE_DIR / STEPS_DIR / previous_step_id / EACH_STEP_SUMMARY_FILE)
+            if previous_step_id else ""
+        )
 
         conflict_dir = WORKSPACE_DIR / CONFLICT_LOG_DIR
 
@@ -373,11 +579,15 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             )
 
             # AI resolve conflict: invoke opencode/claude
+            # Context matches vllm-ascend pattern: is_last_step,
+            # previous_step_id, previous_step_summary_path, step index
             try:
                 ai_result = run_opencode_adapter({
-                    "step_id": f"conflict-resolution-{attempt}",
-                    "previous_step_id": "",
-                    "previous_step_summary_path": "",
+                    "step_id": f"{current_step_id}-conflict-{attempt}",
+                    "previous_step_id": previous_step_id,
+                    "previous_step_summary_path": previous_step_summary_path,
+                    "is_last_step": str(is_last_step).lower(),
+                    "step_index": f"{self.state.current_step + 1}/{self.state.total_steps}",
                     "step_dir": str(step_dir),
                     "conflict_dir": str(conflict_dir),
                     "ascend_path": str(ascend_path),
@@ -453,9 +663,20 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         return True
 
     def _do_build_and_fix_loop(self) -> bool:
-        """build → test → AI fix bug loop (up to max_retries rounds)."""
+        """build → test → AI fix bug loop (up to max_retries rounds).
+
+        Step-aware: uses step-specific directory and includes step context
+        in fix attempts (matching vllm-ascend's per-step AI context pattern).
+        """
         ascend_path = Path(self.state.triton_ascend_path)
-        step_dir = WORKSPACE_DIR / "step-0"
+        step = self.state.steps[self.state.current_step] if self.state.steps else None
+        current_step_id = step["id"] if step else "step-0"
+
+        # Use step-specific directory in progressive mode, fall back to step-0
+        if self.state.total_steps > 1 and self.state.steps:
+            step_dir = WORKSPACE_DIR / STEPS_DIR / current_step_id
+        else:
+            step_dir = WORKSPACE_DIR / "step-0"
         step_dir.mkdir(parents=True, exist_ok=True)
 
         test_passed = False
@@ -475,6 +696,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
                     return False
                 self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
+                print_warn(f"Build failed (attempt {attempt + 1}/{self.state.max_retries + 1}) — "
+                           f"skipping tests, will retry after AI fix")
+                print_info(f"Build log: {WORKSPACE_DIR / BUILD_LOG_FILE}")
                 continue
 
             # run pytest
@@ -583,12 +807,26 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             self.state.summary_rows.append(("Tests", "SKIP", "SKIP_E2E_TEST set"))
             return None
 
-        test_result = run_tests(
-            ascend_path,
-            test_dir=self.state.test_dir,
-            num_procs=self.state.num_procs,
-            conda_env=self.state.conda_env,
-        )
+        test_dir_path = ascend_path / self.state.test_dir
+        print_info(f"Test directory: {test_dir_path}")
+        print_info(f"Python: {os.getenv('TA_PYTHON', 'python3')}, procs: {self.state.num_procs}")
+
+        try:
+            test_result = run_tests(
+                ascend_path,
+                test_dir=self.state.test_dir,
+                num_procs=self.state.num_procs,
+                conda_env=self.state.conda_env,
+            )
+        except Exception as exc:
+            print_error(f"run_tests raised exception: {exc}")
+            import traceback
+            traceback.print_exc()
+            self.state.test_passed = False
+            stop_timer("test")
+            self.state.summary_rows.append(("Tests", "FAIL", f"Exception: {exc}"))
+            return False
+
         self.state.test_passed = test_result["passed"]
         stop_timer("test")
 
@@ -600,17 +838,42 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         else:
             failed_count = test_result.get("failed_count", "?")
             error_count = test_result.get("error_count", 0)
-            print_error(f"Tests FAILED ({failed_count} failed, {error_count} errors)")
+            error_msg = test_result.get("error", "")
+            if error_msg:
+                print_error(f"Tests FAILED — {error_msg}")
+            else:
+                print_error(f"Tests FAILED ({failed_count} failed, {error_count} errors)")
             self.state.summary_rows.append(
                 ("Tests", "FAIL", f"{failed_count} failed, {error_count} errors")
             )
             return False
 
     def _do_ai_fix(self, ascend_path: Path, step_dir: Path, attempt: int) -> bool:
-        """AI fix bug: invoke opencode/claude to fix build/test failures."""
+        """AI fix bug: invoke opencode/claude to fix build/test failures.
+
+        AI context includes: step index, is_last_step, previous_step_summary
+        (matching vllm-ascend's main2main_flow pattern).
+        """
         print_step(attempt, self.state.max_retries, "AI fix attempt")
 
-        fix_dir = WORKSPACE_DIR / FIX_LOG_DIR / f"fix-{attempt}"
+        step = self.state.steps[self.state.current_step] if self.state.steps else None
+        current_step_id = step["id"] if step else "step-0"
+        is_last_step = self.state.current_step == self.state.total_steps - 1
+
+        # ── Previous step context (matching vllm-ascend pattern) ──
+        previous_step = (
+            self.state.steps[self.state.current_step - 1]
+            if self.state.current_step > 0 and self.state.steps else None
+        )
+        previous_step_id = previous_step["id"] if previous_step else ""
+        previous_step_summary_path = (
+            str(WORKSPACE_DIR / STEPS_DIR / previous_step_id / EACH_STEP_SUMMARY_FILE)
+            if previous_step_id else ""
+        )
+
+        # Per-attempt fix directory for logs/artifacts. The step_dir is the
+        # canonical per-step directory (matching vllm-ascend pattern).
+        fix_dir = WORKSPACE_DIR / FIX_LOG_DIR / f"{current_step_id}-fix-{attempt}"
         fix_dir.mkdir(parents=True, exist_ok=True)
 
         print_info(f"Error sources ({len(self.state.fix_errors)}):")
@@ -633,13 +896,20 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         )
 
         # AI fix bug: invoke opencode/claude with error logs
+        # Context matches vllm-ascend pattern: is_last_step,
+        # previous_step_id, previous_step_summary_path, step index.
+        # step_dir points to the canonical step directory (like vllm-ascend);
+        # fix_dir captures per-attempt fix artifacts separately.
         error_logs = json.dumps(self.state.fix_errors, ensure_ascii=False)
         try:
             ai_result = run_opencode_adapter({
-                "step_id": f"fix-{attempt}",
-                "previous_step_id": "",
-                "previous_step_summary_path": str(step_dir / EACH_STEP_SUMMARY_FILE),
-                "step_dir": str(fix_dir),
+                "step_id": f"{current_step_id}-fix-{attempt}",
+                "previous_step_id": previous_step_id,
+                "previous_step_summary_path": previous_step_summary_path,
+                "is_last_step": str(is_last_step).lower(),
+                "step_index": f"{self.state.current_step + 1}/{self.state.total_steps}",
+                "step_dir": str(step_dir),
+                "fix_dir": str(fix_dir),
                 "conflict_dir": "",
                 "ascend_path": str(ascend_path),
                 "triton_path": self.state.triton_path,
@@ -664,36 +934,109 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_error(f"AI fix call failed: {e}")
             return False
 
+    def _do_commit_step(self, step: dict) -> None:
+        """Commit the current step's progress with a descriptive message.
+
+        Only commits if there are uncommitted changes. Uses "git add -u" to
+        avoid staging test artifacts or transient files.
+        """
+        ascend_path = Path(self.state.triton_ascend_path)
+        step_id = step["id"]
+        status = run_git(ascend_path, "status", "--porcelain").strip()
+
+        if not status:
+            print_info(f"[{step_id}] No uncommitted changes — nothing to commit")
+            self.state.summary_rows.append(
+                (f"Commit {step_id}", "PASS", "No changes (clean merge)")
+            )
+            return
+
+        print_section(f"Commit Step {step_id}")
+
+        # Clean up temp artifacts before staging to avoid committing them
+        cleanup_temp_files(ascend_path)
+
+        end_commit_short = step["end_commit"][:12]
+        commit_msg = (
+            f"sync: merge upstream commits for step {step_id}\n\n"
+            f"Upstream range: {step.get('start_commit', '?')[:12]}..{end_commit_short}\n"
+            f"Step: {self.state.current_step + 1}/{self.state.total_steps}\n"
+            f"Commits in step: {step['commit_count']}\n"
+            f"Work branch: {self.state.work_branch}\n"
+            f"All steps on single branch: {self.state.work_branch}\n"
+        )
+
+        try:
+            run_git(ascend_path, "add", "-u")
+            run_git(ascend_path, "commit", "-s", "-m", commit_msg)
+            print_status(True, f"Committed step {step_id}")
+            self.state.summary_rows.append(
+                (f"Commit {step_id}", "PASS", f"{step['commit_count']} commits")
+            )
+        except Exception as e:
+            print_warn(f"Could not commit step {step_id}: {e}")
+            self.state.summary_rows.append(
+                (f"Commit {step_id}", "WARN", str(e)[:40])
+            )
+
     def _do_finalize(self):
-        """Generate patch & summary → restore branch."""
+        """Generate patch, summary & print final report.
+
+        Does NOT restore the original branch — the work branch must stay
+        checked out so push_to_github can push it. Branch restore happens
+        at the end of push_to_github (or handle_failure).
+        """
         print_header("Phase Final: Finalize & Summary")
 
         ascend_path = Path(self.state.triton_ascend_path)
-        step_dir = WORKSPACE_DIR / "step-0"
 
-        # generate final summary & cumulative patch
+        # ── Generate final summary ──
         print_section("Generate Final Summary")
         final_summary_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
-        last_summary_path = step_dir / EACH_STEP_SUMMARY_FILE
 
-        if last_summary_path.exists():
-            shutil.copy2(last_summary_path, final_summary_path)
-            print_info(f"Final summary: {final_summary_path}")
+        # Collect step summaries if available
+        steps_dir = WORKSPACE_DIR / STEPS_DIR
+        if self.state.total_steps > 1 and steps_dir.exists():
+            summaries = []
+            for step in self.state.steps:
+                step_dir = steps_dir / step["id"]
+                summary_file = step_dir / EACH_STEP_SUMMARY_FILE
+                if summary_file.exists():
+                    summaries.append(
+                        f"## {step['id']}\n\n"
+                        f"{summary_file.read_text(encoding='utf-8').strip()}"
+                    )
+            if summaries:
+                final_summary_path.write_text("\n\n".join(summaries), encoding="utf-8")
+            else:
+                final_summary_path.write_text(
+                    f"# Triton-Ascend Upstream Sync\n\n"
+                    f"- **Target**: `{self.state.target_commit[:12]}`\n"
+                    f"- **Steps**: {self.state.total_steps}\n"
+                    f"- **Work branch**: `{self.state.work_branch}`\n"
+                    f"- **Status**: Success\n"
+                    f"- **Date**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+                    encoding="utf-8",
+                )
         else:
-            summary_text = (
-                f"# Triton-Ascend Upstream Sync\n\n"
-                f"- **Target**: `{self.state.target_commit[:12]}`\n"
-                f"- **Work branch**: `{self.state.work_branch}`\n"
-                f"- **Status**: Success\n"
-                f"- **Upstream commits merged**: {self.state.upstream_commits_count}\n"
-                f"- **Merge conflicts**: {len(self.state.conflict_files) > 0}\n"
-                f"- **Retries needed**: {self.state.retry_count}\n"
-                f"- **Date**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            )
-            final_summary_path.write_text(summary_text, encoding="utf-8")
-            print_info(f"Generated summary: {final_summary_path}")
+            step_dir = WORKSPACE_DIR / "step-0"
+            last_summary_path = step_dir / EACH_STEP_SUMMARY_FILE
+            if last_summary_path.exists():
+                shutil.copy2(last_summary_path, final_summary_path)
+            else:
+                final_summary_path.write_text(
+                    f"# Triton-Ascend Upstream Sync\n\n"
+                    f"- **Target**: `{self.state.target_commit[:12]}`\n"
+                    f"- **Work branch**: `{self.state.work_branch}`\n"
+                    f"- **Status**: Success\n"
+                    f"- **Upstream commits merged**: {self.state.upstream_commits_count}\n"
+                    f"- **Date**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+                    encoding="utf-8",
+                )
 
-        # ── Generate cumulative patch ──
+        print_info(f"Final summary: {final_summary_path}")
+
+        # ── Generate cumulative patch (from original ascend HEAD to latest) ──
         try:
             patch = run_git(ascend_path, "diff", self.state.ascend_head, "HEAD")
             patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
@@ -702,21 +1045,14 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         except Exception as e:
             print_warn(f"Could not generate final patch: {e}")
 
-        self.state.summary_rows.append(("Finalize", "PASS", "Summary and patch generated"))
-
-        # restore original branch (keep work branch for inspection)
-        print_section("Restore Original Branch")
-        try:
-            run_git(ascend_path, "checkout", self.state.original_branch)
-            print_status(True, f"Restored to '{self.state.original_branch}'")
-        except Exception as e:
-            print_warn(f"Could not restore branch: {e}")
-            print_info(f"Work branch '{self.state.work_branch}' left checked out")
+        self.state.summary_rows.append(
+            ("Finalize", "PASS", f"{self.state.total_steps} step(s) completed")
+        )
 
         # ── Print final summary table ──
         print_header("Sync Complete — Success!")
         print_elapsed_total()
-        self.state.summary_rows.append(("OVERALL", "PASS", "Upgrade completed"))
+        self.state.summary_rows.append(("OVERALL", "PASS", f"{self.state.total_steps} step(s) completed"))
         print_summary_table(self.state.summary_rows)
 
         print_section("Output Files")
@@ -732,7 +1068,12 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
     @listen(UpgradeCompleted)
     def push_to_github(self):
-        """push work branch & create GitHub PR (optional, gated by PUSH_TO_GITHUB env)."""
+        """Push work branch & create a single GitHub PR after ALL steps complete.
+
+        In the vllm-ascend step-by-step merge style, all step commits accumulate
+        on the work branch locally. Only after every step passes (merge →
+        resolve → build → test → fix → commit) do we push and open one PR.
+        """
         if os.getenv("PUSH_TO_GITHUB", "false").lower() != "true":
             print_info("PUSH_TO_GITHUB is not 'true' — skipping PR creation")
             print_info("To push manually:")
@@ -742,28 +1083,113 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             self.state.summary_rows.append(("Push & PR", "SKIP", "PUSH_TO_GITHUB not set"))
             return "SKIP_PUSH"
 
-        print_section("Push to GitHub & Create PR")
-        github_repo = os.getenv("GITHUB_REPO", "triton-lang/triton-ascend")
+        print_header("Push to GitHub & Create PR")
+        github_repo = os.getenv("GITHUB_REPO", "TecJesh/triton-ascend")
         if not github_repo:
             print_error("GITHUB_REPO is empty — cannot create PR")
             self.state.summary_rows.append(("Push & PR", "FAIL", "GITHUB_REPO empty"))
             return "SKIP_PUSH"
+
+        # ── Build a comprehensive PR body from step summaries ──
+        pr_body_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
+        self._build_pr_body(pr_body_path)
 
         try:
             pr_url = push_and_create_pr(
                 ascend_path=Path(self.state.triton_ascend_path),
                 github_repo=github_repo,
                 work_branch=self.state.work_branch,
-                summary_path=WORKSPACE_DIR / FINAL_SUMMARY_FILE,
+                summary_path=pr_body_path,
             )
             self.state.pr_url = pr_url
             print_status(True, f"PR created: {pr_url}")
             self.state.summary_rows.append(("Push & PR", "PASS", pr_url))
-            return pr_url
         except Exception as e:
-            print_error(f"Failed to create PR: {e}")
+            print_error(f"Failed to push/create PR: {e}")
             self.state.summary_rows.append(("Push & PR", "FAIL", str(e)[:60]))
-            return "SKIP_PUSH"
+
+        # ── Restore original branch after push ──
+        self._restore_branch()
+        return self.state.pr_url if self.state.pr_url else "SKIP_PUSH"
+
+    def _restore_branch(self) -> None:
+        """Restore the original branch after all work is done."""
+        ascend_path = Path(self.state.triton_ascend_path)
+        print_section("Restore Original Branch")
+        try:
+            current = run_git(ascend_path, "branch", "--show-current").strip()
+            if current != self.state.original_branch:
+                run_git(ascend_path, "checkout", self.state.original_branch)
+                print_status(True, f"Restored to '{self.state.original_branch}'")
+            else:
+                print_info(f"Already on '{self.state.original_branch}'")
+        except Exception as e:
+            print_warn(f"Could not restore branch: {e}")
+            print_info(f"Work branch '{self.state.work_branch}' left checked out")
+
+    def _build_pr_body(self, output_path: Path) -> None:
+        """Build a comprehensive PR body from all step descriptions and summaries."""
+        parts: list[str] = []
+
+        # Title / overview
+        parts.append(
+            "# Triton-Ascend Upstream Sync\n\n"
+            f"- **Target commit**: `{self.state.target_commit[:12]}`\n"
+            f"- **Work branch**: `{self.state.work_branch}`\n"
+            f"- **Steps completed**: {self.state.total_steps}\n"
+            f"- **Upstream commits merged**: {self.state.upstream_commits_count}\n"
+            f"- **Date**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+
+        # Per-step progress
+        if self.state.step_pr_descriptions:
+            parts.append("## Step Progress\n")
+            for desc in self.state.step_pr_descriptions:
+                parts.append(f"- {desc}\n")
+
+        # Per-step AI summaries (if available)
+        steps_dir = WORKSPACE_DIR / STEPS_DIR
+        if self.state.total_steps > 1 and steps_dir.exists():
+            parts.append("\n## Step Details\n")
+            for step in self.state.steps:
+                step_dir = steps_dir / step["id"]
+                summary_file = step_dir / EACH_STEP_SUMMARY_FILE
+                if summary_file.exists():
+                    parts.append(
+                        f"### {step['id']}\n\n"
+                        f"{summary_file.read_text(encoding='utf-8').strip()}\n\n"
+                    )
+                else:
+                    parts.append(
+                        f"### {step['id']}\n\n"
+                        f"- Commits: {step['commit_count']}\n"
+                        f"- End commit: `{step['end_commit'][:12]}`\n"
+                        f"- Source lines changed: {step.get('source_changed_lines', '?')}\n\n"
+                    )
+        elif steps_dir.exists():
+            # Single step: include its summary
+            step_dir = WORKSPACE_DIR / "step-0"
+            summary_file = step_dir / EACH_STEP_SUMMARY_FILE
+            if summary_file.exists():
+                parts.append(
+                    "\n## Summary\n\n"
+                    f"{summary_file.read_text(encoding='utf-8').strip()}\n"
+                )
+        else:
+            # Fallback: just the final summary
+            fallback = WORKSPACE_DIR / FINAL_SUMMARY_FILE
+            if fallback.exists():
+                parts.append(fallback.read_text(encoding='utf-8'))
+
+        parts.append(
+            f"\n---\n"
+            f"🤖 Generated with [TA_main2main_workflow]"
+            f"(https://github.com/TecJesh/TA-AI-WorkFlow)"
+            f" at {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+
+        output_path.write_text("".join(parts), encoding="utf-8")
+        print_info(f"PR body written to {output_path}")
 
     @listen(UpgradeFailed)
     def handle_failure(self):

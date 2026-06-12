@@ -23,8 +23,20 @@ REPOS_DIR_NAME = "repos"
 TRITON_REPO_NAME = "triton"
 TRITON_ASCEND_REPO_NAME = "triton-ascend"
 
+# ── Step-planning constants ──────────────────────────────────────────────────
+LINE_BUDGET = 1000
+BASE_LINE_BUDGET = 1000
+BASE_COMMIT_COUNT_BUDGET = 5      # max commits per step (overridable via TA_COMMIT_BUDGET)
+# Directories in upstream triton whose changed lines count toward the budget
+SOURCE_DIRS = ["python/triton/", "lib/", "include/"]
+# Env var to control the line budget at runtime
+ENV_LINE_BUDGET = "TA_LINE_BUDGET"
+# Env var to control the commit-count budget at runtime
+ENV_COMMIT_BUDGET = "TA_COMMIT_BUDGET"
+
 # ── Output file names ────────────────────────────────────────────────────────
 DETECT_FILE = "detect.json"
+STEPS_FILE = "steps.json"
 MERGE_LOG_FILE = "merge.log"
 MERGE_RESULT_FILE = "merge_result.json"
 BUILD_LOG_FILE = "build.log"
@@ -32,6 +44,7 @@ BUILD_RESULT_FILE = "build_result.json"
 TEST_RESULT_FILE = "test_result.json"
 CONFLICT_LOG_DIR = "conflicts"
 FIX_LOG_DIR = "fixes"
+STEPS_DIR = "steps"
 FINAL_SUMMARY_FILE = "final_summary.md"
 FINAL_TARGET_PATCH_FILE = "final_target.patch"
 EACH_STEP_SUMMARY_FILE = "step_summary.md"
@@ -42,6 +55,21 @@ CODE_STRUCTURE_GUIDE_FILE = "code-structure-guide.md"
 # ── Timing tracker ───────────────────────────────────────────────────────────
 _phase_timers: dict[str, float] = {}
 _flow_start_time: float = 0.0
+
+
+def commit_count_budget(line_budget: int = LINE_BUDGET) -> int:
+    """Compute the max commits per step from the line budget.
+
+    Uses the same formula as vllm-ascend's main2main_flow:
+    max(1, round(BASE_COMMIT_COUNT_BUDGET * sqrt(line_budget / BASE_LINE_BUDGET)))
+
+    The base commit count can be overridden at runtime via TA_COMMIT_BUDGET
+    env var (e.g., TA_COMMIT_BUDGET=3 for finer granularity).
+    """
+    import math
+    import os
+    base = int(os.getenv(ENV_COMMIT_BUDGET, str(BASE_COMMIT_COUNT_BUDGET)))
+    return max(1, round(base * math.sqrt(line_budget / BASE_LINE_BUDGET)))
 
 
 def _ts() -> str:

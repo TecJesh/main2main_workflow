@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from TA_main2main_workflow.utils import (
@@ -28,11 +27,13 @@ from TA_main2main_workflow.utils import (
 
 def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
                 env: dict | None = None, timeout: int = 3600) -> subprocess.CompletedProcess:
-    """Run a command, tee output to log file, return CompletedProcess."""
+    """Run a command, tee output to log file and console, wait for completion."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     proc_env = os.environ.copy()
     if env:
         proc_env.update(env)
+
+    print(f"  Running: {' '.join(cmd)}")
     with log_path.open("w", encoding="utf-8") as fh:
         proc = subprocess.Popen(
             cmd, cwd=cwd, env=proc_env,
@@ -43,6 +44,7 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
             fh.write(line)
             print(line, end="", flush=True)
         proc.wait(timeout=timeout)
+
     return subprocess.CompletedProcess(
         cmd, proc.returncode,
         stdout="", stderr=f"See {log_path}"
@@ -143,53 +145,91 @@ def run_tests(
     if conda_env:
         env["CONDA_DEFAULT_ENV"] = conda_env
 
-    pytest_cmd = [
-        sys.executable, "-m", "pytest",
-        str(test_dir_path),
-        "-n", str(num_procs),
-        "--tb=short",
-        "-q",
-        #"--timeout=600",
-    ]
+    # Use the same python executable as the build step for consistency.
+    # sys.executable may point to a different interpreter that lacks pytest.
+    python_exe = os.getenv("TA_PYTHON", "python3")
 
-    print(f"  Running: {' '.join(pytest_cmd)}")
-    proc = _run_to_log(pytest_cmd, repo_path, test_log, env=env, timeout=timeout)
+    # Resolve to absolute path — test_dir_path may be relative, and the
+    # subprocess cwd is repo_path.  A relative path relative to repo_path
+    # would double-up (e.g. triton-ascend/triton-ascend/third_party/…).
+    test_dir_abs = test_dir_path.resolve()
 
-    passed = proc.returncode == 0
-    summary = {
-        "exit_code": proc.returncode,
-        "passed": passed,
-        "test_log": str(test_log),
-        "test_dir": str(test_dir_path),
-    }
+    if not test_dir_abs.exists():
+        print(f"  WARNING: test directory not found: {test_dir_abs}")
+        print(f"  Skipping tests — directory does not exist after merge.")
+        passed = False
+        summary = {
+            "exit_code": -1,
+            "passed": False,
+            "error": f"Test directory not found: {test_dir_abs}",
+            "test_dir": str(test_dir_abs),
+        }
+    else:
+        pytest_cmd = [
+            python_exe, "-m", "pytest",
+            str(test_dir_abs),
+            "-n", str(num_procs),
+            "--tb=short",
+            "-q",
+        ]
 
-    if test_log.exists():
-        log_text = test_log.read_text(encoding="utf-8", errors="replace")
-        import re
-        match = re.search(r'(\d+)\s+passed', log_text)
-        if match:
-            summary["passed_count"] = int(match.group(1))
-        match = re.search(r'(\d+)\s+failed', log_text)
-        if match:
-            summary["failed_count"] = int(match.group(1))
-        match = re.search(r'(\d+)\s+error', log_text)
-        if match:
-            summary["error_count"] = int(match.group(1))
+        proc = _run_to_log(pytest_cmd, repo_path, test_log, env=env, timeout=timeout)
+
+        passed = proc.returncode == 0
+        summary = {
+            "exit_code": proc.returncode,
+            "passed": passed,
+            "test_log": str(test_log),
+            "test_dir": str(test_dir_path),
+        }
+
+        if test_log.exists():
+            log_text = test_log.read_text(encoding="utf-8", errors="replace")
+            import re
+            match = re.search(r'(\d+)\s+passed', log_text)
+            if match:
+                summary["passed_count"] = int(match.group(1))
+            match = re.search(r'(\d+)\s+failed', log_text)
+            if match:
+                summary["failed_count"] = int(match.group(1))
+            match = re.search(r'(\d+)\s+error', log_text)
+            if match:
+                summary["error_count"] = int(match.group(1))
 
     precommit_config = repo_path / ".pre-commit-config.yaml"
     if precommit_config.exists():
         print("\n  Running pre-commit checks...")
         precommit_log = test_log_dir / "precommit.log"
+        precommit_passed = True
         try:
-            subprocess.run(
+            pc_proc = subprocess.run(
                 ["pre-commit", "run", "--from-ref", "origin/main", "--to-ref", "HEAD"],
                 cwd=repo_path,
                 stdout=precommit_log.open("w"),
                 stderr=subprocess.STDOUT,
                 timeout=300,
             )
+            precommit_passed = pc_proc.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            precommit_passed = False
+
+        # ── If pre-commit auto-fixed files, amend the latest commit ──
+        if not precommit_passed:
+            print("  Pre-commit found issues — checking for auto-fixes...")
+            from TA_main2main_workflow.utils import run_git_no_check
+            status_proc = run_git_no_check(repo_path, "status", "--porcelain")
+            if status_proc.stdout.strip():
+                print("  Pre-commit applied auto-fixes, amending commit...")
+                run_git_no_check(repo_path, "add", "-u")
+                run_git_no_check(repo_path, "commit", "--amend", "--no-edit")
+                print("  Commit amended with pre-commit fixes.")
+            else:
+                print("  Pre-commit failed but no auto-fixes were applied "
+                      "(manual review may be needed).")
+        else:
+            print("  Pre-commit checks passed.")
+
+        summary["precommit_passed"] = precommit_passed
 
     result_path = WORKSPACE_DIR / TEST_RESULT_FILE
     result_path.write_text(

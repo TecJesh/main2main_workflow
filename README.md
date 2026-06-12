@@ -66,7 +66,34 @@ ta-kickoff \
 # Auto-push a branch and open a PR after a successful run
 PUSH_TO_GITHUB=true GITHUB_REPO=triton-lang/triton-ascend \
 ta-kickoff --triton-ascend-path ... --triton-path ...
+
+# Custom PR title: [jeshd](sync) merge upstream triton commits
+PR_AUTHOR=jeshd PR_TYPE=sync PUSH_TO_GITHUB=true \
+ta-kickoff --triton-ascend-path ... --triton-path ...
 ```
+
+### PR title format
+
+PR titles follow the pattern `[user](type) description`:
+
+```
+[TA](sync) merge upstream triton commits (20240612-120000)
+```
+
+- `user`: from `PR_AUTHOR` env var, falls back to `git config user.name`, then `TA`
+- `type`: from `PR_TYPE` env var, defaults to `sync`
+
+### Pre-commit before PR
+
+Before pushing and creating a PR, the flow runs:
+```bash
+pre-commit run --from-ref origin/main --to-ref HEAD
+```
+
+If pre-commit auto-fixes files (e.g., formatting), those changes are
+automatically amended into the latest commit with `git commit --amend --no-edit`.
+Temp files (`result_profiling/`, `__pycache__/`, `*.lock`, `*.pyc`) are
+cleaned both before and after pre-commit to avoid accidentally committing them.
 
 ### Environment variables
 
@@ -79,12 +106,17 @@ ta-kickoff --triton-ascend-path ... --triton-path ...
 | `SKIP_AI_ANALYSIS` | skip AI, only run deterministic steps | `false` |
 | `SKIP_BUILD` | skip the build step | `false` |
 | `SKIP_E2E_TEST` | skip pytest, treat as passed | `false` |
-| `PUSH_TO_GITHUB` | open a PR after success | `false` |
-| `GITHUB_REPO` | PR target, `owner/name` | — |
+| `PUSH_TO_GITHUB` | push & create PR after all steps pass | `false` |
+| `GITHUB_REPO` | PR target, `owner/name` | `TecJesh/triton-ascend` |
+| `PR_AUTHOR` | user tag in PR title, e.g. `[TA](sync) ...` | git `user.name` or `TA` |
+| `PR_TYPE` | conventional commit type in PR title | `sync` |
 | `LLVM_INSTALL_PREFIX` | LLVM install path for building | — |
 | `CONDA_ENV` | Conda environment name | `ta-upgrade` |
 | `NUM_PROCS` | parallel pytest workers | `16` |
 | `AUTO_STASH` | auto-stash before sync | `false` |
+| `TA_PROGRESSIVE_MERGE` | enable progressive step merge | `true` |
+| `TA_LINE_BUDGET` | max source lines per step | `1000` |
+| `TA_COMMIT_BUDGET` | base commit-count budget per step | `5` |
 
 ## Outputs
 
@@ -133,6 +165,7 @@ src/TA_main2main_workflow/
     ├── build_test.py
     ├── detect_commits.py
     ├── merge_upstream.py
+    ├── plan_steps.py          # step planner: splits commits by line budget
     ├── pre_ci_check.py
     ├── push_to_github.py
     └── update_commit_reference.py

@@ -179,8 +179,15 @@ def run_merge(
         ascend_path, "merge", "--no-ff", "--no-edit", target_commit
     )
 
-    merge_log_path = WORKSPACE_DIR / MERGE_LOG_FILE
+    # Use a timestamped log file so each merge step's output is preserved
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    merge_log_path = WORKSPACE_DIR / f"merge-{ts}.log"
     merge_log_path.write_text(
+        f"STDOUT:\n{merge_proc.stdout}\n\nSTDERR:\n{merge_proc.stderr}\n",
+        encoding="utf-8",
+    )
+    # Also write/update the canonical merge log for quick access to the latest
+    (WORKSPACE_DIR / MERGE_LOG_FILE).write_text(
         f"STDOUT:\n{merge_proc.stdout}\n\nSTDERR:\n{merge_proc.stderr}\n",
         encoding="utf-8",
     )
@@ -207,8 +214,99 @@ def run_merge(
         "conflict_dir": str(conflict_dir) if has_conflicts else "",
     }
 
-    result_path = WORKSPACE_DIR / MERGE_RESULT_FILE
+    result_path = WORKSPACE_DIR / f"merge_result-{ts}.json"
     result_path.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    # Also write/update the canonical result for quick access to the latest
+    (WORKSPACE_DIR / MERGE_RESULT_FILE).write_text(
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    return result
+
+
+def run_merge_incremental(
+    triton_ascend_path: Path,
+    triton_path: Path,
+    target_commit: str,
+    work_branch: str,
+) -> dict:
+    """Merge *target_commit* into an already-existing work branch.
+
+    Used for progressive step-by-step merging: the first step calls
+    run_merge() to create the work branch, and subsequent steps call
+    run_merge_incremental() to merge their end_commit on top.
+
+    Does NOT create a new branch or stash changes — it assumes we're
+    already on the work branch from a previous step.
+    """
+    ascend_path = Path(triton_ascend_path)
+
+    # Verify we're on the expected work branch
+    current_branch = run_git(ascend_path, "branch", "--show-current").strip()
+    if current_branch != work_branch:
+        print(f"[merge] Switching from '{current_branch}' to work branch '{work_branch}'")
+        run_git(ascend_path, "checkout", work_branch)
+
+    # Fetch the target commit if needed
+    try:
+        run_git(ascend_path, "fetch", "upstream-triton", "--prune")
+    except subprocess.CalledProcessError:
+        print("[merge] Warning: could not fetch upstream-triton, assuming target is reachable")
+
+    if Path(triton_path) != ascend_path:
+        try:
+            run_git(ascend_path, "fetch", str(triton_path), target_commit)
+        except subprocess.CalledProcessError:
+            print("[merge] Warning: could not fetch target from triton path")
+
+    print(f"[merge] Incremental merge {target_commit[:12]} into {work_branch}")
+    merge_proc = run_git_no_check(
+        ascend_path, "merge", "--no-ff", "--no-edit", target_commit
+    )
+
+    # Use a timestamped log file so each merge step's output is preserved
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    merge_log_path = WORKSPACE_DIR / f"merge-{ts}.log"
+    merge_log_path.write_text(
+        f"STDOUT:\n{merge_proc.stdout}\n\nSTDERR:\n{merge_proc.stderr}\n",
+        encoding="utf-8",
+    )
+    # Also write/update the canonical merge log for quick access to the latest
+    (WORKSPACE_DIR / MERGE_LOG_FILE).write_text(
+        f"STDOUT:\n{merge_proc.stdout}\n\nSTDERR:\n{merge_proc.stderr}\n",
+        encoding="utf-8",
+    )
+
+    has_conflicts = has_merge_conflicts(ascend_path)
+    conflict_files = get_conflict_files(ascend_path) if has_conflicts else []
+
+    conflict_dir = WORKSPACE_DIR / CONFLICT_LOG_DIR
+    conflict_info = []
+    if has_conflicts:
+        conflict_dir.mkdir(parents=True, exist_ok=True)
+        conflict_info = _save_conflict_info(ascend_path, conflict_files, conflict_dir)
+
+    result = {
+        "work_branch": work_branch,
+        "original_branch": current_branch,
+        "target_commit": target_commit,
+        "merge_exit_code": merge_proc.returncode,
+        "has_conflicts": has_conflicts,
+        "conflict_files": conflict_files,
+        "conflict_count": len(conflict_files),
+        "conflicts": conflict_info,
+        "merge_log": str(merge_log_path),
+        "conflict_dir": str(conflict_dir) if has_conflicts else "",
+    }
+
+    result_path = WORKSPACE_DIR / f"merge_result-{ts}.json"
+    result_path.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    # Also write/update the canonical result for quick access to the latest
+    (WORKSPACE_DIR / MERGE_RESULT_FILE).write_text(
         json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 

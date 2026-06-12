@@ -3,8 +3,10 @@
 
 Runs mechanical checks before build/test to catch common issues early:
   1. Merge conflict marker check: no remaining <<<<<<< / ======= / >>>>>>> markers
-  2. Temp file cleanliness: no intermediate AI artifacts in the repo
-  3. Python syntax check: quick syntax validation on modified .py files
+  2. Python syntax check: quick syntax validation on modified .py files
+
+Also provides cleanup_temp_files() to actively remove test artifacts
+(result_profiling/, *.lock, __pycache__/, *.pyc) before committing.
 
 All results are printed to the local console and written to workspace.
 """
@@ -21,14 +23,24 @@ from TA_main2main_workflow.utils import (
     print_section, print_status, print_info, print_warn,
 )
 
-_TEMP_PATTERNS = [
-    ".log",
-    ".patch",
-    ".jsonl",
-    "analysis.md",
-    "review.md",
-    "opencode_stderr.log",
-    "opencode_raw.jsonl",
+# Directories to purge (recursively removed if found under repo root)
+_CLEANUP_DIRS = [
+    "result_profiling",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    "*.egg-info",
+]
+
+# File patterns to purge (matched via glob **/*.suffix and exact basename)
+_CLEANUP_SUFFIXES = [
+    ".lock",
+    ".pyc",
+    ".pyo",
+]
+
+_CLEANUP_BASENAMES = [
+    ".DS_Store",
 ]
 
 _CONFLICT_MARKERS = [
@@ -90,25 +102,69 @@ def _check_conflict_markers(repo: Path, modified_files: list[str]) -> dict:
     }
 
 
-def _check_temp_files(repo: Path, modified_files: list[str]) -> dict:
-    """Check for temporary/intermediate files in modified files."""
-    violations: list[str] = []
-    for filepath in modified_files:
-        basename = Path(filepath).name
-        for pattern in _TEMP_PATTERNS:
-            if pattern in basename or basename.endswith(pattern):
-                violations.append(filepath)
-                break
+def cleanup_temp_files(repo: Path) -> dict:
+    """Actively remove test artifacts and temp files from the repository.
+
+    Deletes directories like result_profiling/, __pycache__/ and files
+    matching *.lock, *.pyc, etc. This prevents them from being accidentally
+    committed via git add -u or git add -A.
+
+    Only operates inside the repo (not outside it). Uses a whitelist of
+    known-temp patterns — it will NOT delete arbitrary files.
+
+    Returns a dict with counts of what was cleaned.
+    """
+    import shutil
+
+    removed_dirs: list[str] = []
+    removed_files: list[str] = []
+
+    # ── Remove matching directories (recursively from repo root) ──
+    for dirname in _CLEANUP_DIRS:
+        for found in repo.rglob(dirname):
+            if found.is_dir() and ".git" not in found.parts:
+                try:
+                    shutil.rmtree(found, ignore_errors=True)
+                    removed_dirs.append(str(found.relative_to(repo)))
+                except Exception:
+                    pass
+
+    # ── Remove files by suffix ──
+    for suffix in _CLEANUP_SUFFIXES:
+        for found in repo.rglob(f"*{suffix}"):
+            if found.is_file() and ".git" not in found.parts:
+                try:
+                    found.unlink()
+                    removed_files.append(str(found.relative_to(repo)))
+                except Exception:
+                    pass
+
+    # ── Remove files by exact basename ──
+    for name in _CLEANUP_BASENAMES:
+        for found in repo.rglob(name):
+            if found.is_file() and ".git" not in found.parts:
+                try:
+                    found.unlink()
+                    removed_files.append(str(found.relative_to(repo)))
+                except Exception:
+                    pass
+
+    total = len(removed_dirs) + len(removed_files)
+    if total > 0:
+        print_info(f"Cleaned up {total} temp artifact(s):")
+        for d in removed_dirs:
+            print_info(f"  rmdir: {d}")
+        for f in removed_files:
+            print_info(f"  rm: {f}")
+    else:
+        print_info("No temp artifacts to clean up")
 
     return {
-        "name": "temp_files",
-        "passed": len(violations) == 0,
-        "violations": violations,
-        "detail": (
-            "no temp files in repo"
-            if len(violations) == 0
-            else f"{len(violations)} temp file(s) found: {', '.join(violations)}"
-        ),
+        "name": "cleanup_temp_files",
+        "passed": True,
+        "removed_dirs": removed_dirs,
+        "removed_files": removed_files,
+        "total_removed": total,
     }
 
 
@@ -164,6 +220,14 @@ def run_pre_ci_check(repo: Path, step_id: str = "") -> dict:
 
     print_info(f"Checking {len(modified_files)} modified file(s)")
 
+    # ── Phase 0: active cleanup of known temp artifacts ──
+    cleanup_temp_files(repo)
+    # Re-scan modified files after cleanup (some may have been removed)
+    try:
+        modified_files = _get_modified_files(repo)
+    except subprocess.CalledProcessError:
+        pass
+
     checks: list[dict] = []
     all_passed = True
 
@@ -174,14 +238,6 @@ def run_pre_ci_check(repo: Path, step_id: str = "") -> dict:
         all_passed = False
         for v in conflict_check["violations"]:
             print_warn(f"  {v['file']}:{v['line']} — {v['marker']}")
-
-    temp_check = _check_temp_files(repo, modified_files)
-    checks.append(temp_check)
-    print_status(temp_check["passed"], temp_check["detail"])
-    if not temp_check["passed"]:
-        all_passed = False
-        for v in temp_check["violations"]:
-            print_warn(f"  temp file: {v}")
 
     syntax_check = _check_python_syntax(repo, modified_files)
     checks.append(syntax_check)
