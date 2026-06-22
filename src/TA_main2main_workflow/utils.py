@@ -1,5 +1,6 @@
 """Shared constants, git helpers, and console output formatting for TA_main2main_workflow."""
 
+import os
 import shutil
 import subprocess
 import time
@@ -18,7 +19,9 @@ TestsPassed = "TestsPassed"
 TestsFailed = "TestsFailed"
 
 # ── Workspace paths ──────────────────────────────────────────────────────────
-WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
+_PACKAGE_DIR = Path(__file__).resolve().parent  # TA_main2main_workflow package dir
+_WORKSPACE_DEFAULT = _PACKAGE_DIR / "workspace"
+WORKSPACE_DIR = Path(os.getenv("TA_MAIN2MAIN_WORKSPACE", str(_WORKSPACE_DEFAULT)))
 REPOS_DIR_NAME = "repos"
 TRITON_REPO_NAME = "triton"
 TRITON_ASCEND_REPO_NAME = "triton-ascend"

@@ -103,7 +103,7 @@ def kickoff():
 def plot():
     import shutil
 
-    output_dir = Path(__file__).parent.parent.parent / "output"
+    output_dir = Path(__file__).resolve().parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     flow = TA_Main2MainFlow()
     tmp_html = Path(flow.plot(filename="flow.html", show=False))

@@ -44,8 +44,10 @@ ta-kickoff \
 
 - Both paths must be local git checkouts.
 - `--target-commit` is optional; defaults to upstream triton `HEAD`.
-- Each run wipes and recreates `workspace/`, so back it up if you need the
-  artifacts from a previous run.
+- Each run wipes and recreates `workspace/` inside the installed package directory
+  (under `src/TA_main2main_workflow/` in editable installs, or
+  `<site-packages>/TA_main2main_workflow/` with `pip install`).
+  Use `TA_MAIN2MAIN_WORKSPACE` env var to override the location.
 
 CLI flags can also be supplied via env vars: `TRITON_ASCEND_PATH`, `TRITON_PATH`,
 `TRITON_TARGET_COMMIT` (CLI wins).
@@ -117,10 +119,15 @@ cleaned both before and after pre-commit to avoid accidentally committing them.
 | `TA_PROGRESSIVE_MERGE` | enable progressive step merge | `true` |
 | `TA_LINE_BUDGET` | max source lines per step | `1000` |
 | `TA_COMMIT_BUDGET` | base commit-count budget per step | `5` |
+| `TA_MAIN2MAIN_WORKSPACE` | override workspace directory path | package dir |
 
 ## Outputs
 
-Everything lands under `workspace/` (recreated on every run):
+Everything lands under `workspace/` inside the installed package directory.
+Override with `TA_MAIN2MAIN_WORKSPACE` env var. Default location:
+
+- **Editable install** (`pip install -e .`): `src/TA_main2main_workflow/workspace/`
+- **Regular install** (`pip install .`): `<venv>/lib/.../site-packages/TA_main2main_workflow/workspace/`
 
 ```
 workspace/
