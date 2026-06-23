@@ -27,7 +27,7 @@ from pathlib import Path
 
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, FINAL_TARGET_PATCH_FILE, FINAL_SUMMARY_FILE,
-    run_git, run_git_no_check,
+    run_git, run_git_no_check, print_error,
 )
 
 
@@ -64,8 +64,14 @@ def _ensure_gh_auth(repo: Path) -> None:
         )
         print("[push] gh CLI authenticated via GH_TOKEN.")
 
-    run_git(repo, "config", "credential.helper", "!gh auth git-credential")
-    print("[push] Git credential helper configured.")
+    # Use gh auth setup-git (global config) instead of local credential.helper.
+    # Local credential.helper can conflict with what actions/checkout or the
+    # host CI already configure, causing git push to fail.
+    subprocess.run(
+        ["gh", "auth", "setup-git"],
+        check=True, capture_output=True, text=True,
+    )
+    print("[push] Git credential helper configured (via gh auth setup-git).")
 
 
 def _run_pre_commit_and_amend(repo: Path) -> bool:
@@ -228,7 +234,12 @@ def push_and_create_pr(
 
     # ── Push ──
     print(f"[push] Pushing branch '{work_branch}' to origin...")
-    run_git(repo, "push", "-u", "origin", work_branch)
+    try:
+        run_git(repo, "push", "-u", "origin", work_branch)
+    except subprocess.CalledProcessError as e:
+        stderr_detail = e.stderr.strip() if e.stderr else "(no stderr)"
+        print_error(f"git push failed (exit {e.returncode}): {stderr_detail}")
+        raise
 
     # ── Create PR ──
     base_branch = _detect_default_branch(repo)
