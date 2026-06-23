@@ -83,8 +83,9 @@ def _ensure_upstream_ascend_remote(repo: Path) -> str:
 def _create_work_branch(repo: Path, suffix: str = "") -> str:
     """Create and checkout a work branch for the merge.
 
-    The branch is always based on the latest main branch from
-    triton-lang/triton-ascend (fetched fresh each run).
+    Default: branch from origin/main (current checkout).  Set
+    TA_WORK_BRANCH_BASE=upstream-ascend to branch from
+    triton-lang/triton-ascend/main instead (original behaviour).
     """
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     branch = f"auto/upstream-sync-{ts}{'-' + suffix if suffix else ''}"
@@ -104,13 +105,25 @@ def _create_work_branch(repo: Path, suffix: str = "") -> str:
 
     _abort_stale_merge(repo)
 
-    # Ensure we have the latest main from triton-lang/triton-ascend
-    upstream_remote = _ensure_upstream_ascend_remote(repo)
-    print(f"[merge] Fetching latest main from '{upstream_remote}'...")
-    run_git(repo, "fetch", upstream_remote, "main")
+    # Choose branch point: origin/main by default (avoids workflow-file push
+    # protection with GITHUB_TOKEN); set TA_WORK_BRANCH_BASE=upstream-ascend
+    # to use triton-lang/triton-ascend/main instead.
+    branch_base = os.getenv("TA_WORK_BRANCH_BASE", "origin")
 
-    # Create work branch based on the latest upstream main
-    base_ref = f"{upstream_remote}/main"
+    if branch_base == "upstream-ascend":
+        upstream_remote = _ensure_upstream_ascend_remote(repo)
+        print(f"[merge] Fetching latest main from '{upstream_remote}'...")
+        run_git(repo, "fetch", upstream_remote, "main")
+        base_ref = f"{upstream_remote}/main"
+    else:
+        base_ref = "origin/main"
+        # Make sure we have the latest origin/main
+        print("[merge] Fetching latest from origin...")
+        try:
+            run_git(repo, "fetch", "origin", "main")
+        except Exception:
+            print("[merge] Warning: could not fetch origin/main, using local ref")
+
     print(f"[merge] Creating work branch '{branch}' from {base_ref}")
     proc = run_git_no_check(repo, "checkout", "-B", branch, base_ref)
     if proc.returncode != 0:
