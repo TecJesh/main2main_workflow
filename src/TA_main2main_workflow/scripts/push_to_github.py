@@ -41,37 +41,61 @@ def _detect_default_branch(repo: Path, remote: str = "origin") -> str:
 
 
 def _ensure_gh_auth(repo: Path) -> None:
-    """Ensure GitHub CLI is authenticated."""
-    try:
-        subprocess.run(
+    """Ensure GitHub CLI is ready for authenticated git push.
+
+    When GH_TOKEN is set (PAT in CI), gh and git use it directly —
+    no explicit login needed.  Otherwise fall back to interactive auth.
+    """
+    gh_token = os.getenv("GH_TOKEN", "")
+    if gh_token:
+        # Verify the token works and show which user it belongs to
+        print("[push] Using GH_TOKEN from environment (no login needed)")
+        result = subprocess.run(
             ["gh", "auth", "status"],
-            check=True, capture_output=True, text=True,
+            capture_output=True, text=True,
         )
-        print("[push] gh CLI already authenticated.")
-    except subprocess.CalledProcessError:
-        gh_token = os.getenv("GH_TOKEN", "")
-        if not gh_token:
+        print(f"[push] gh auth status: {result.stdout.strip()}")
+        if result.returncode != 0:
+            print(f"[push] gh auth status stderr: {result.stderr.strip()}")
+    else:
+        try:
+            subprocess.run(
+                ["gh", "auth", "status"],
+                check=True, capture_output=True, text=True,
+            )
+            print("[push] gh CLI already authenticated.")
+        except subprocess.CalledProcessError:
             print(
                 "[push] gh not authenticated and GH_TOKEN not set. "
                 "Run 'gh auth login' locally or set GH_TOKEN in CI.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        print("[push] Authenticating gh CLI with GH_TOKEN...")
-        subprocess.run(
-            ["gh", "auth", "login", "--with-token"],
-            input=gh_token, check=True, capture_output=True, text=True,
-        )
-        print("[push] gh CLI authenticated via GH_TOKEN.")
 
-    # Use gh auth setup-git (global config) instead of local credential.helper.
-    # Local credential.helper can conflict with what actions/checkout or the
-    # host CI already configure, causing git push to fail.
     subprocess.run(
         ["gh", "auth", "setup-git"],
         check=True, capture_output=True, text=True,
     )
     print("[push] Git credential helper configured (via gh auth setup-git).")
+
+    # Belt-and-suspenders: when GH_TOKEN is set, also embed it in the origin
+    # URL so git push works even if the credential helper misbehaves.
+    if gh_token:
+        try:
+            origin_url = run_git(repo, "remote", "get-url", "origin").strip()
+            # Only rewrite https URLs (not ssh)
+            if origin_url.startswith("https://"):
+                # Extract host + path, strip existing credentials
+                clean_url = origin_url.replace("https://", "", 1)
+                if "@" in clean_url:
+                    clean_url = clean_url.split("@", 1)[1]
+                new_url = f"https://x-access-token:{gh_token}@{clean_url}"
+                run_git(repo, "remote", "set-url", "origin", new_url)
+                # Mask token in log
+                safe = f"https://x-access-token:***@{clean_url}"
+                print(f"[push] origin URL rewritten with token: {safe}")
+        except Exception as exc:
+            print(f"[push] Note: could not rewrite origin URL: {exc}")
 
 
 def _run_pre_commit_and_amend(repo: Path) -> bool:
