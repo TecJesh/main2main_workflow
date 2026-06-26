@@ -258,6 +258,24 @@ def push_and_create_pr(
 
     # ── Push ──
     print(f"[push] Pushing branch '{work_branch}' to origin...")
+
+    # Debug: show what token / URL we're actually using
+    print("[push] === DEBUG push environment ===")
+    print(f"[push] GH_TOKEN set: {bool(os.getenv('GH_TOKEN'))}")
+    print(f"[push] GITHUB_TOKEN set: {bool(os.getenv('GITHUB_TOKEN'))}")
+    try:
+        remote_url = run_git(repo, "remote", "get-url", "origin").strip()
+        # Mask any embedded token
+        if "@" in remote_url:
+            safe_url = remote_url.split("@")[0].split(":")[-1] + "@" + remote_url.split("@")[1]
+        else:
+            safe_url = remote_url
+        print(f"[push] origin URL: {safe_url}")
+        print(f"[push] current branch: {run_git(repo, 'branch', '--show-current').strip()}")
+    except Exception:
+        pass
+    print("[push] ==============================")
+
     try:
         run_git(repo, "push", "-u", "origin", work_branch)
     except subprocess.CalledProcessError as e:
