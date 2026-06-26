@@ -1,0 +1,160 @@
+# GitHub Actions workflow: Sync upstream Triton into triton-ascend fork
+#
+# Place this file in YOUR TRITON-ASCEND FORK REPO at:
+#   .github/workflows/sync-upstream.yml
+#
+# Required GitHub Secret (Settings → Secrets and variables → Actions):
+#   ANTHROPIC_API_KEY  — DeepSeek API key (used via Anthropic-compatible API)
+#
+# The workflow uses the built-in GITHUB_TOKEN for pushing branches and creating
+# PRs in the same repo. No extra PAT needed as long as both repos are public.
+#
+# The workflow:
+#   1. Checks out your triton-ascend fork (public, no token needed)
+#   2. Adds & fetches upstream-triton remote (triton-lang/triton, public)
+#   3. Clones & installs TA_main2main_workflow (public, no token needed)
+#   4. Runs ta-kickoff → merge → AI resolve conflicts → build → test
+#   5. Pushes work branch + creates PR targeting the default branch (main)
+
+name: Sync Upstream Triton
+
+on:
+  # schedule:
+  #   # Run daily at 2:00 AM UTC (off-peak, avoids CI queue)
+  #   - cron: '0 2 * * *'
+  workflow_dispatch:  # Manual trigger from GitHub UI
+    inputs:
+      target_commit:
+        description: 'Specific upstream triton commit SHA (leave empty for latest)'
+        required: false
+        default: ''
+      enable_codegraph:
+        description: 'Enable Codegraph MCP server (code intelligence for AI)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  workflows: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── 1. Checkout triton-ascend fork ──────────────────────────────────────
+      - name: Checkout triton-ascend
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # Full history needed for merge-base detection
+          fetch-tags: true
+
+      # ── 2. Configure git user and push access ──────────────────────────────
+      - name: Configure git
+        run: |
+          git config user.name  "TA Sync Bot"
+          git config user.email "ta-sync-bot@users.noreply.github.com"
+          # Embed token in origin URL so git push works regardless of credential helpers
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+      # ── 3. Set up upstream remotes ──────────────────────────────────────────
+      - name: Add upstream remotes
+        run: |
+          if ! git remote get-url upstream-triton 2>/dev/null; then
+            git remote add upstream-triton https://github.com/triton-lang/triton.git
+          fi
+          git fetch upstream-triton --prune
+
+      # ── 4. Install Python ───────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # ── 5. Install TA_main2main_workflow ─────────────────────────────────────
+      - name: Install TA_main2main_workflow
+        run: |
+          git clone https://github.com/TecJesh/TA-AI-WorkFlow.git /tmp/ta-workflow
+          cd /tmp/ta-workflow/TA_main2main_workflow
+          pip install -e .
+          echo "TA workflow installed: $(ta-kickoff --help 2>&1 | head -1)"
+
+      # ── 6. Install Claude Code (AI backend) ─────────────────────────────────
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code 2>/dev/null || echo "Claude Code install skipped (pre-installed)"
+
+      # ── 6b. Set up Codegraph MCP server (optional) ──────────────────────────
+      - name: Set up Codegraph
+        run: |
+          if [ "${{ github.event.inputs.enable_codegraph }}" = "true" ]; then
+            curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
+            echo "Codegraph installed: $(which codegraph)"
+            codegraph init -i -d ${{ github.workspace }}
+            echo "Codegraph initialized on workspace"
+            mkdir -p ~/.claude
+            printf '{\n  "mcpServers": {\n    "codegraph": {\n      "type": "stdio",\n      "command": "codegraph",\n      "args": ["serve", "--mcp"],\n      "cwd": "%s"\n    }\n  }\n}\n' "${{ github.workspace }}" > ~/.claude.json
+            echo "Claude Code MCP configured:"
+            cat ~/.claude.json
+          else
+            echo "Codegraph disabled — skipping"
+          fi
+
+      # ── 7. Resolve target commit ────────────────────────────────────────────
+      - name: Set target commit
+        id: target
+        run: |
+          if [ -n "${{ github.event.inputs.target_commit }}" ]; then
+            echo "COMMIT=${{ github.event.inputs.target_commit }}" >> $GITHUB_OUTPUT
+          else
+            echo "COMMIT=$(git rev-parse upstream-triton/main)" >> $GITHUB_OUTPUT
+          fi
+          echo "Target: ${COMMIT:-unknown}"
+
+      # ── 8. Run sync ─────────────────────────────────────────────────────────
+      - name: Run main2main sync
+        env:
+          # Repo paths — both point to the checked-out triton-ascend fork
+          TRITON_ASCEND_PATH: ${{ github.workspace }}
+          TRITON_PATH: ${{ github.workspace }}
+          TRITON_TARGET_COMMIT: ${{ steps.target.outputs.COMMIT }}
+
+          # AI backend (DeepSeek via Anthropic-compatible API)
+          AI_BACKEND: claude
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_MODEL: deepseek-v4-pro[1m]
+          ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4-pro[1m]
+          ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4-pro[1m]
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
+          CLAUDE_CODE_SUBAGENT_MODEL: deepseek-v4-flash
+          CLAUDE_CODE_EFFORT_LEVEL: max
+
+          # PR creation (uses built-in GITHUB_TOKEN)
+          PUSH_TO_GITHUB: "true"
+          GITHUB_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # Skip build & test on CI (no NPU)
+          SKIP_BUILD: "true"
+          SKIP_E2E_TEST: "true"
+
+          # Stash any accidental modifications before merge
+          AUTO_STASH: "true"
+
+          # PR metadata
+          PR_AUTHOR: TA
+          PR_TYPE: sync
+        run: ta-kickoff
+
+      # ── 9. Upload workspace artifacts (for debugging) ────────────────────────
+      - name: Upload sync artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-workspace
+          path: |
+            /tmp/ta-workflow/TA_main2main_workflow/src/TA_main2main_workflow/workspace/
+          retention-days: 7
