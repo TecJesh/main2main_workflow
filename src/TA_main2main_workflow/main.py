@@ -18,6 +18,15 @@ Environment variables:
   LLVM_INSTALL_PREFIX  — path to LLVM for building
   CONDA_ENV            — conda env name (default: ta-upgrade)
   NUM_PROCS            — number of parallel pytest workers (default: 16)
+
+  TA_MODE              — Execution mode:
+    full (default)       Complete flow: merge → build → test → fix → PR
+    merge                Merge + AI resolve only, then push work branch & exit.
+                         Used by CI: runs on ubuntu-latest, then triggers NPU tests.
+    fix                  AI fix only on an existing work branch. Requires:
+                           TA_WORK_BRANCH  — work branch name
+                           TA_ERROR_LOGS_PATH — path to test failure logs (optional)
+                           TA_FIX_ATTEMPT — retry attempt number (optional)
 """
 
 import argparse
@@ -32,10 +41,12 @@ def _print_startup_banner() -> None:
     skip_build = os.getenv("SKIP_BUILD", "false").lower() == "true"
     skip_test = os.getenv("SKIP_E2E_TEST", "false").lower() == "true"
     ai_backend = os.getenv("AI_BACKEND", "auto-detect")
+    mode = os.getenv("TA_MODE", "full")
 
     print(f"╔{'═' * 60}╗")
     print(f"║  TA_main2main_workflow — Triton-Ascend Upstream Sync       ║")
     print(f"╠{'═' * 60}╣")
+    print(f"║  Mode:          {mode:<44}║")
     print(f"║  AI Backend:    {ai_backend:<44}║")
     print(f"║  AI Enabled:    {'YES' if not skip_ai else 'NO (SKIP_AI_ANALYSIS=true)':<44}║")
     print(f"║  Skip Build:    {str(skip_build):<44}║")
@@ -53,6 +64,28 @@ def _print_startup_banner() -> None:
 def kickoff():
     parser = argparse.ArgumentParser(
         description="Triton-Ascend Main2Main Upstream Sync Flow"
+    )
+    parser.add_argument(
+        "--mode", default=None,
+        choices=["full", "merge", "fix"],
+        help="Execution mode: full (default), merge (merge+resolve only), "
+             "fix (AI fix on existing work branch). "
+             "Can also be set via TA_MODE env var."
+    )
+    parser.add_argument(
+        "--work-branch", default=None,
+        help="Work branch name (required for --mode=fix). "
+             "Can also be set via TA_WORK_BRANCH env var."
+    )
+    parser.add_argument(
+        "--error-logs-path", default=None,
+        help="Path to test failure logs for AI fix (--mode=fix). "
+             "Can also be set via TA_ERROR_LOGS_PATH env var."
+    )
+    parser.add_argument(
+        "--fix-attempt", type=int, default=None,
+        help="Retry attempt number (--mode=fix). "
+             "Can also be set via TA_FIX_ATTEMPT env var."
     )
     parser.add_argument(
         "--triton-ascend-path", default=None,
@@ -79,6 +112,16 @@ def kickoff():
         help="Number of parallel pytest workers (default: 16)"
     )
     args = parser.parse_args()
+
+    # ── Mode: CLI arg takes precedence over env var ──
+    if args.mode:
+        os.environ["TA_MODE"] = args.mode
+    if args.work_branch:
+        os.environ["TA_WORK_BRANCH"] = args.work_branch
+    if args.error_logs_path:
+        os.environ["TA_ERROR_LOGS_PATH"] = args.error_logs_path
+    if args.fix_attempt is not None:
+        os.environ["TA_FIX_ATTEMPT"] = str(args.fix_attempt)
 
     _print_startup_banner()
 

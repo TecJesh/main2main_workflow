@@ -99,6 +99,465 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         super().__init__(**kwargs)
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # Mode dispatch — supports full (CrewAI), merge-only, and fix-only modes
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def kickoff(self, inputs: dict | None = None):
+        """Override CrewAI Flow.kickoff() to support TA_MODE dispatch.
+
+        TA_MODE values:
+          full   — Original CrewAI flow: merge → resolve → build → test → fix → PR
+          merge  — Merge + AI resolve only, push work branch, skip build/test.
+                   Used on ubuntu-latest CI to prepare the work branch before
+                   NPU testing.
+          fix    — AI fix on an existing work branch. Reads error logs from
+                   TA_ERROR_LOGS_PATH, runs AI fix, commits & pushes.
+        """
+        mode = os.getenv("TA_MODE", "full")
+        if mode == "merge":
+            return self._run_merge_mode(inputs)
+        elif mode == "fix":
+            return self._run_fix_mode(inputs)
+        else:
+            return super().kickoff(inputs=inputs)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Mode: merge — AI merge + resolve ONE step, then push work branch
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _run_merge_mode(self, inputs: dict | None) -> str:
+        """Merge + AI-resolve for ONE progressive step. Push work branch, no build/test.
+
+        Used in CI (ubuntu-latest) as the merge phase of the per-step pipeline.
+        Each call merges exactly one step's batch of upstream commits. The CI
+        workflow orchestrates the per-step loop:
+
+          For each step N:
+            → ta-kickoff --mode=merge (merges step N, resolves conflicts, pushes)
+            → NPU build+test
+            → AI fix retries (if needed)
+            → advance to step N+1
+
+        Env vars:
+          TA_CURRENT_STEP   — which step index to merge (0-based, default 0).
+                              Step 0 does full init + detect + plan first.
+                              Step N>0 resumes from an existing work branch.
+        """
+        current_step = int(os.getenv("TA_CURRENT_STEP", "0"))
+
+        # ── Apply inputs to state ──
+        if inputs:
+            for key, value in inputs.items():
+                if hasattr(self.state, key):
+                    setattr(self.state, key, value)
+
+        # ── Force skip build/test in merge mode ──
+        os.environ["SKIP_BUILD"] = "true"
+        os.environ["SKIP_E2E_TEST"] = "true"
+
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        if current_step == 0:
+            # ── First step: full init + detect + plan ──
+            self.initialize()
+            result = self.detect_commits()
+            if result == HasNoNewCommits:
+                print_info("No new commits — nothing to merge")
+                metadata_dir = WORKSPACE_DIR / "merge-metadata"
+                metadata_dir.mkdir(parents=True, exist_ok=True)
+                (metadata_dir / "no_changes.txt").write_text("true", encoding="utf-8")
+                self.state.summary_rows.append(
+                    ("MERGE PHASE", "SKIP", "No new upstream commits")
+                )
+                print_summary_table(self.state.summary_rows)
+                return UpgradeCompleted
+
+            # Store the plan for subsequent steps
+            self._write_step_plan()
+        else:
+            # ── Resume: checkout existing work branch ──
+            work_branch = os.getenv("TA_WORK_BRANCH", self.state.work_branch)
+            if not work_branch:
+                print_error("TA_WORK_BRANCH is required for TA_CURRENT_STEP > 0")
+                return UpgradeFailed
+
+            # Restore state from work branch metadata
+            self.state.work_branch = work_branch
+            self.state.triton_ascend_path = (
+                self.state.triton_ascend_path
+                or os.getenv("TRITON_ASCEND_PATH")
+                or str(Path.cwd())
+            )
+            self.state.target_commit = (
+                self.state.target_commit or os.getenv("TRITON_TARGET_COMMIT", "")
+            )
+
+            # Read step plan saved from step 0
+            plan_file = WORKSPACE_DIR / "merge-metadata" / "step_plan.json"
+            if not plan_file.exists():
+                print_warn("Step plan file not found — re-detecting commits")
+                # Lightweight re-init without full initialize
+                self.state.triton_ascend_path = self.state.triton_ascend_path or str(Path.cwd())
+                self.state.triton_path = os.getenv("TRITON_PATH", self.state.triton_ascend_path)
+                ascend_path = Path(self.state.triton_ascend_path)
+                # Fetch and checkout work branch
+                try:
+                    run_git(ascend_path, "fetch", "origin", work_branch)
+                except Exception:
+                    pass
+                run_git(ascend_path, "checkout", work_branch)
+                result = self.detect_commits()
+                if result == HasNoNewCommits:
+                    return UpgradeCompleted
+                self._write_step_plan()
+            else:
+                import json
+                plan_data = json.loads(plan_file.read_text(encoding="utf-8"))
+                self.state.total_steps = plan_data["total_steps"]
+                self.state.steps = plan_data["steps"]
+                self.state.upstream_commits_count = plan_data.get("upstream_commits_count", 0)
+
+                # Minimal init for resume
+                self.state.triton_path = os.getenv("TRITON_PATH", str(ascend_path))
+                # Fetch and checkout work branch
+                try:
+                    run_git(ascend_path, "fetch", "origin", work_branch)
+                except Exception:
+                    pass
+                run_git(ascend_path, "checkout", work_branch)
+
+        # ── Validate step index ──
+        if current_step >= self.state.total_steps:
+            print_info(f"current_step={current_step} >= total_steps={self.state.total_steps} — "
+                       f"all steps already merged")
+            metadata_dir = WORKSPACE_DIR / "merge-metadata"
+            metadata_dir.mkdir(parents=True, exist_ok=True)
+            (metadata_dir / "all_steps_done.txt").write_text("true", encoding="utf-8")
+            self._write_merge_metadata()
+            return UpgradeCompleted
+
+        step = self.state.steps[current_step]
+        step_id = step["id"]
+        is_last_step = (current_step == self.state.total_steps - 1)
+        self.state.current_step = current_step
+        self.state.retry_count = 0
+
+        print_header(
+            f"Step {current_step + 1}/{self.state.total_steps}: {step_id}"
+        )
+        print_key_value("commits in step", str(step["commit_count"]))
+        print_key_value("end commit", step["end_commit"][:12])
+        print_key_value("is last step", str(is_last_step))
+
+        # ── Work-branch guard ──
+        if current_step > 0 and self.state.work_branch:
+            current_branch = run_git(ascend_path, "branch", "--show-current").strip()
+            if current_branch != self.state.work_branch:
+                print_warn(
+                    f"Expected work branch '{self.state.work_branch}' "
+                    f"but on '{current_branch}' — switching"
+                )
+                run_git(ascend_path, "checkout", self.state.work_branch)
+
+        self.state.step_start_ascend_head = run_git(
+            ascend_path, "rev-parse", "HEAD"
+        ).strip()
+
+        # ── Step A: git merge this step's commits ──
+        merge_result = self._do_step_merge(step)
+        if merge_result == UpgradeFailed:
+            self.state.final_status = UpgradeFailed
+            self._write_merge_metadata()
+            return UpgradeFailed
+
+        # ── Step B: AI resolve conflicts ──
+        if self.state.merge_has_conflicts:
+            if not self._do_resolve_conflicts():
+                self.state.final_status = UpgradeFailed
+                self._write_merge_metadata()
+                return UpgradeFailed
+
+        # ── Step C: Skip build/test (NPU CI runs these) ──
+        print_header("Build & Test — Merge Mode")
+        print_info(f"Merge mode: deferring build/test for step {step_id} to NPU CI")
+        self.state.build_passed = True
+        self.state.test_passed = True
+        self.state.summary_rows.append(("Build", "DEFER", "Runs on NPU CI"))
+        self.state.summary_rows.append(("Tests", "DEFER", "Runs on NPU CI"))
+
+        # ── Step D: Commit step merge progress ──
+        self._do_commit_step(step)
+
+        # Record step description
+        desc = (
+            f"✅ **{step_id}**: {step['commit_count']} commits, "
+            f"end_commit=`{step['end_commit'][:12]}`, "
+            f"source lines={step.get('source_changed_lines', '?')}"
+        )
+        self.state.step_pr_descriptions.append(desc)
+        print_status(True, f"Step {step_id} merge committed")
+
+        # ── Push work branch ──
+        self._push_work_branch_to_remote()
+
+        # ── Write metadata for CI orchestration ──
+        self._write_merge_metadata()
+
+        # Print summary
+        print_header(f"Merge Phase Complete — Step {step_id}")
+        print_key_value("Work branch", self.state.work_branch)
+        print_key_value("Current step", f"{current_step + 1}/{self.state.total_steps}")
+        print_key_value("Target commit", self.state.target_commit[:12])
+        print_key_value("Is last step", str(is_last_step))
+        print_info(f"Pushed to origin/{self.state.work_branch}")
+        if is_last_step:
+            print_info("This is the last step — PR will be created if tests pass")
+        else:
+            next_step_id = self.state.steps[current_step + 1]["id"]
+            print_info(f"Next: NPU tests on this step, then merge step {next_step_id}")
+
+        self.state.summary_rows.append(
+            ("MERGE PHASE", "PASS", f"Step {step_id}, branch: {self.state.work_branch}")
+        )
+        print_summary_table(self.state.summary_rows)
+
+        return UpgradeCompleted
+
+    def _write_step_plan(self) -> None:
+        """Persist the step plan so subsequent merge-mode calls can resume."""
+        import json
+        metadata_dir = WORKSPACE_DIR / "merge-metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        plan_data = {
+            "total_steps": self.state.total_steps,
+            "steps": self.state.steps,
+            "upstream_commits_count": self.state.upstream_commits_count,
+        }
+        (metadata_dir / "step_plan.json").write_text(
+            json.dumps(plan_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print_info(f"Step plan saved: {self.state.total_steps} step(s)")
+
+    def _push_work_branch_to_remote(self) -> None:
+        """Push the work branch to origin so NPU CI can access it."""
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        # Check we're on the work branch
+        current = run_git(ascend_path, "branch", "--show-current").strip()
+        if current != self.state.work_branch:
+            run_git(ascend_path, "checkout", self.state.work_branch)
+
+        print_header("Push Work Branch")
+        try:
+            run_git(ascend_path, "push", "-u", "origin", self.state.work_branch)
+            print_status(True, f"Pushed {self.state.work_branch} to origin")
+            self.state.summary_rows.append(
+                ("Push branch", "PASS", self.state.work_branch)
+            )
+        except Exception as e:
+            print_error(f"Failed to push work branch: {e}")
+            # Try with force if normal push fails (e.g., branch exists from prior run)
+            try:
+                print_warn("Retrying with --force...")
+                run_git(
+                    ascend_path, "push", "-u", "--force",
+                    "origin", self.state.work_branch,
+                )
+                print_status(True, f"Force-pushed {self.state.work_branch}")
+            except Exception:
+                print_error("Force push also failed")
+                raise
+
+    def _write_merge_metadata(self) -> None:
+        """Write work branch, target commit, and step progress for CI orchestration."""
+        metadata_dir = WORKSPACE_DIR / "merge-metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        (metadata_dir / "work_branch.txt").write_text(
+            self.state.work_branch, encoding="utf-8"
+        )
+        (metadata_dir / "target_commit.txt").write_text(
+            self.state.target_commit, encoding="utf-8"
+        )
+        (metadata_dir / "current_step.txt").write_text(
+            str(self.state.current_step), encoding="utf-8"
+        )
+        (metadata_dir / "total_steps.txt").write_text(
+            str(self.state.total_steps), encoding="utf-8"
+        )
+        is_last = (self.state.current_step >= self.state.total_steps - 1)
+        (metadata_dir / "is_last_step.txt").write_text(
+            str(is_last).lower(), encoding="utf-8"
+        )
+        print_info(f"Metadata written to {metadata_dir} "
+                   f"(step {self.state.current_step + 1}/{self.state.total_steps}, "
+                   f"is_last={is_last})")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Mode: fix — AI fix on existing work branch
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _run_fix_mode(self, inputs: dict | None) -> str:
+        """AI fix on an existing work branch.
+
+        Reads error logs from TA_ERROR_LOGS_PATH, calls the AI fix engine
+        (_do_ai_fix), commits & pushes fixes. Used in CI after NPU tests fail.
+        """
+        ascend_path_str = (
+            (inputs or {}).get("triton_ascend_path")
+            or os.getenv("TRITON_ASCEND_PATH")
+            or str(Path.cwd())
+        )
+        work_branch = os.getenv("TA_WORK_BRANCH", "")
+        error_logs_path = os.getenv("TA_ERROR_LOGS_PATH", "")
+        attempt = int(os.getenv("TA_FIX_ATTEMPT", "1"))
+        target_commit = (
+            (inputs or {}).get("target_commit")
+            or os.getenv("TRITON_TARGET_COMMIT", "")
+        )
+
+        if not work_branch:
+            print_error("TA_WORK_BRANCH is required for fix mode")
+            return UpgradeFailed
+
+        ascend_path = Path(ascend_path_str)
+
+        # ── Setup ──
+        print_header(f"Fix Mode — Attempt {attempt}")
+        print_key_value("work branch", work_branch)
+        print_key_value("error logs", error_logs_path or "<none>")
+        print_key_value("target commit", target_commit[:12] if target_commit else "<none>")
+        print_key_value("repo path", str(ascend_path))
+
+        # Clean old workspace
+        if WORKSPACE_DIR.exists():
+            shutil.rmtree(WORKSPACE_DIR)
+        WORKSPACE_DIR.mkdir(parents=True)
+
+        # Populate minimal state
+        self.state.triton_ascend_path = str(ascend_path)
+        self.state.triton_path = os.getenv("TRITON_PATH", str(ascend_path))
+        self.state.target_commit = target_commit
+        self.state.work_branch = work_branch
+        self.state.original_branch = work_branch
+        self.state.current_step = 0
+        self.state.total_steps = 1
+        self.state.steps = [{
+            "index": 1,
+            "id": "fix-step-1",
+            "commit_count": 0,
+            "end_commit": target_commit or "",
+            "source_changed_lines": 0,
+        }]
+
+        # ── Checkout work branch ──
+        print_section("Checkout Work Branch")
+        try:
+            run_git(ascend_path, "fetch", "origin", work_branch)
+        except Exception as e:
+            print_warn(f"Could not fetch {work_branch}: {e}")
+        run_git(ascend_path, "checkout", work_branch)
+        print_status(True, f"Checked out {work_branch}")
+
+        # Pull latest (in case previous fix attempts pushed)
+        try:
+            run_git(ascend_path, "pull", "origin", work_branch)
+            print_info("Pulled latest changes")
+        except Exception:
+            print_warn("Could not pull latest — continuing with local state")
+
+        # ── Collect error logs ──
+        fix_errors: list[str] = []
+        if error_logs_path:
+            error_path = Path(error_logs_path)
+            if error_path.exists():
+                if error_path.is_dir():
+                    fix_errors = sorted(
+                        str(p) for p in error_path.rglob("*") if p.is_file()
+                    )
+                    print_info(f"Found {len(fix_errors)} error log file(s)")
+                else:
+                    fix_errors = [str(error_path)]
+                    print_info(f"Using error log: {error_path}")
+
+        if not fix_errors:
+            print_warn("No error logs found — AI will analyze the codebase directly")
+            # Create a stub so _do_ai_fix has something to work with
+            stub_log = WORKSPACE_DIR / "no-error-logs.txt"
+            stub_log.write_text(
+                "No specific error logs were provided from the NPU CI run.\n"
+                "Please analyze the triton-ascend codebase for potential issues\n"
+                f"that could cause build or test failures after merging upstream triton.\n"
+                f"Target upstream commit: {target_commit}\n"
+                f"Work branch: {work_branch}\n"
+            )
+            fix_errors = [str(stub_log)]
+
+        self.state.fix_errors = fix_errors
+
+        # ── Set up step directory ──
+        step_dir = WORKSPACE_DIR / "fix-step-1"
+        step_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Run AI fix ──
+        print_header("AI Fix Analysis")
+        print_info(f"Error sources ({len(fix_errors)}):")
+        for e in fix_errors[:10]:
+            print(f"      • {e}")
+        if len(fix_errors) > 10:
+            print(f"      ... and {len(fix_errors) - 10} more")
+
+        try:
+            fix_ok = self._do_ai_fix(ascend_path, step_dir, attempt)
+        except Exception as e:
+            print_error(f"AI fix crashed: {e}")
+            import traceback
+            traceback.print_exc()
+            fix_ok = False
+
+        if not fix_ok:
+            print_error("AI fix did not produce any changes")
+            self.state.summary_rows.append(
+                ("AI fix", "FAIL", "No changes produced")
+            )
+            print_summary_table(self.state.summary_rows)
+            return UpgradeFailed
+
+        # ── Commit and push ──
+        print_section("Commit & Push Fixes")
+        status = run_git(ascend_path, "status", "--porcelain").strip()
+        if status:
+            run_git(ascend_path, "add", "-u")
+            commit_target = target_commit[:12] if target_commit else "upstream"
+            commit_msg = (
+                f"fix: AI-generated fix for build/test failures\n\n"
+                f"Upstream target: {commit_target}\n"
+                f"Fix attempt: {attempt}\n"
+                f"Work branch: {work_branch}\n"
+            )
+            run_git(ascend_path, "commit", "-s", "-m", commit_msg)
+            print_status(True, "Committed AI fix")
+
+            run_git(ascend_path, "push", "origin", work_branch)
+            print_status(True, f"Pushed to origin/{work_branch}")
+            self.state.summary_rows.append(
+                ("AI fix", "PASS", f"Attempt {attempt}")
+            )
+        else:
+            print_info("No changes to commit after AI fix")
+            self.state.summary_rows.append(
+                ("AI fix", "NOOP", "No changes needed")
+            )
+
+        print_header("Fix Phase Complete!")
+        print_key_value("work branch", work_branch)
+        print_key_value("attempt", str(attempt))
+        print_info(f"Next: re-trigger NPU tests on branch '{work_branch}'")
+
+        print_summary_table(self.state.summary_rows)
+        return UpgradeCompleted
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # Phase 0: Initialize
     # ═══════════════════════════════════════════════════════════════════════════
 
