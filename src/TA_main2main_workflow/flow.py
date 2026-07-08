@@ -16,6 +16,7 @@ and test fixing.
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Literal
@@ -347,6 +348,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         if current != self.state.work_branch:
             run_git(ascend_path, "checkout", self.state.work_branch)
 
+        # ── Configure git auth (same logic as push_to_github._ensure_gh_auth) ──
+        self._setup_git_auth_for_push(ascend_path)
+
         print_header("Push Work Branch")
         try:
             run_git(ascend_path, "push", "-u", "origin", self.state.work_branch)
@@ -367,6 +371,55 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             except Exception:
                 print_error("Force push also failed")
                 raise
+
+    def _setup_git_auth_for_push(self, repo: Path) -> None:
+        """Configure git authentication for pushing to GitHub.
+
+        Mirrors the logic in push_to_github._ensure_gh_auth():
+        1. Run 'gh auth setup-git' to configure the git credential helper.
+        2. When GH_TOKEN is set, rewrite the origin URL to embed the token
+           so git push works even if the credential helper misbehaves.
+        """
+        gh_token = os.getenv("GH_TOKEN", "")
+        if gh_token:
+            print_info("GH_TOKEN set — configuring git credential helper")
+            subprocess.run(
+                ["gh", "auth", "setup-git"],
+                check=True, capture_output=True, text=True,
+            )
+            # Rewrite origin URL to embed token
+            try:
+                origin_url = run_git(repo, "remote", "get-url", "origin").strip()
+                if origin_url.startswith("https://"):
+                    clean_url = origin_url.replace("https://", "", 1)
+                    if "@" in clean_url:
+                        clean_url = clean_url.split("@", 1)[1]
+                    new_url = f"https://x-access-token:{gh_token}@{clean_url}"
+                    run_git(repo, "remote", "set-url", "origin", new_url)
+                    safe = f"https://x-access-token:***@{clean_url}"
+                    print_info(f"origin URL rewritten with token: {safe}")
+            except Exception as exc:
+                print_warn(f"Could not rewrite origin URL: {exc}")
+        else:
+            # Verify gh CLI is authenticated (interactive or env-based)
+            try:
+                subprocess.run(
+                    ["gh", "auth", "status"],
+                    check=True, capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ["gh", "auth", "setup-git"],
+                    check=True, capture_output=True, text=True,
+                )
+                print_info("Git credential helper configured via gh")
+            except subprocess.CalledProcessError as e:
+                print_error(
+                    f"gh not authenticated and GH_TOKEN not set: {e.stderr.strip()}"
+                )
+                raise RuntimeError(
+                    "Cannot push to GitHub: no GH_TOKEN and gh CLI not authenticated. "
+                    "Run 'gh auth login' locally or set GH_TOKEN in CI."
+                )
 
     def _write_merge_metadata(self) -> None:
         """Write work branch, target commit, and step progress for CI orchestration."""
