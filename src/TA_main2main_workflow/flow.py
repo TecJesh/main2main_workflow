@@ -75,6 +75,13 @@ class TA_Main2MainState(BaseModel):
     max_retries: int = 3
     fix_errors: list = []
 
+    # ── Per-step tracking for sync report ──
+    build_fix_count: int = 0        # AI fix attempts for build failures
+    test_fix_count: int = 0         # AI fix attempts for test failures
+    conflict_files_resolved: int = 0  # Total merge conflicts resolved
+    step_details: list = []         # Per-step breakdown for report
+    fix_attempts: list = []         # Detailed fix attempt records
+
     final_status: str = ""
     pr_url: str = ""
 
@@ -881,6 +888,20 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             )
             self.state.step_pr_descriptions.append(desc)
 
+            # ── Record per-step detail for sync report ──
+            conflicts_in_step = len(self.state.conflict_files)
+            self.state.step_details.append({
+                "step_id": step_id,
+                "step_index": self.state.current_step + 1,
+                "commits": step["commit_count"],
+                "end_commit": step["end_commit"][:12],
+                "source_lines": step.get("source_changed_lines", 0),
+                "conflict_files": conflicts_in_step,
+                "build_fixes": self.state.build_fix_count,
+                "test_fixes": self.state.test_fix_count,
+                "retries": self.state.retry_count,
+            })
+
             # Move to next step
             self.state.current_step += 1
             print_status(True, f"Step {step_id} completed successfully "
@@ -1068,6 +1089,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         resolved_all = False
         ai_result: AIResult | None = None
         conflict_files = list(self.state.conflict_files)
+        original_conflict_count = len(conflict_files)
 
         # AI resolve conflict: retry loop (up to max_retries)
         for attempt in range(1, self.state.max_retries + 1):
@@ -1118,6 +1140,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
             if not has_merge_conflicts(ascend_path):
                 print_status(True, f"All conflicts resolved! (attempt {attempt})")
+                self.state.conflict_files_resolved += original_conflict_count
                 resolved_all = True
                 break
             else:
@@ -1192,15 +1215,43 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         step_dir.mkdir(parents=True, exist_ok=True)
 
         test_passed = False
+        last_build_failed = False  # track what failed for fix-type attribution
 
         for attempt in range(self.state.max_retries + 1):
             is_fix_attempt = attempt > 0
             self.state.retry_count = attempt
+            fix_type = ""  # "build" or "test" — determined by previous failure
 
             # AI fix bug (skip on first round — build & test first)
             if is_fix_attempt:
-                print_header(f"Fix Attempt {attempt}/{self.state.max_retries}")
-                if not self._do_ai_fix(ascend_path, step_dir, attempt):
+                fix_type = "build" if last_build_failed else "test"
+                print_header(f"Fix Attempt {attempt}/{self.state.max_retries} ({fix_type})")
+                ai_ok = self._do_ai_fix(ascend_path, step_dir, attempt)
+                # Collect fix detail
+                modified_files: list[str] = []
+                ai_summary = ""
+                if hasattr(self, '_last_ai_result') and self._last_ai_result:
+                    modified_files = self._last_ai_result.get("modified_files", [])
+                    ai_summary = self._last_ai_result.get("step_summary", "")
+                # Read error log snippet for context
+                error_snippet = ""
+                for err_path in self.state.fix_errors:
+                    try:
+                        content = Path(err_path).read_text(encoding="utf-8", errors="replace")
+                        error_snippet += content[-2000:] if len(content) > 2000 else content
+                    except Exception:
+                        pass
+                self.state.fix_attempts.append({
+                    "step_id": current_step_id,
+                    "attempt": attempt,
+                    "fix_type": fix_type,
+                    "error_logs": list(self.state.fix_errors),
+                    "error_snippet": error_snippet[-1500:],
+                    "modified_files": modified_files,
+                    "ai_summary": (ai_summary or "")[:2000],
+                    "ai_ok": ai_ok,
+                })
+                if not ai_ok:
                     pass
 
             # build triton-ascend
@@ -1208,10 +1259,14 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
                     return False
                 self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
+                self.state.build_fix_count += 1
+                last_build_failed = True
                 print_warn(f"Build failed (attempt {attempt + 1}/{self.state.max_retries + 1}) — "
                            f"skipping tests, will retry after AI fix")
                 print_info(f"Build log: {WORKSPACE_DIR / BUILD_LOG_FILE}")
                 continue
+
+            last_build_failed = False
 
             # run pytest
             test_result = self._do_test(ascend_path)
@@ -1225,6 +1280,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
                     return False
                 self.state.fix_errors = [str(WORKSPACE_DIR / TEST_RESULT_FILE)]
+                self.state.test_fix_count += 1
                 continue
 
         if not test_passed:
@@ -1398,6 +1454,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             backend = _detect_backend()
         except RuntimeError as e:
             print_error(f"AI backend not available: {e}")
+            self._last_ai_result = None
             return False
 
         print_ai_call_info(
@@ -1437,6 +1494,14 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 summary=(ai_result.step_summary or "")[:500],
             )
 
+            # Store result for caller to capture fix details
+            self._last_ai_result = {
+                "modified_files": ai_result.modified_files,
+                "step_summary": ai_result.step_summary or "",
+                "is_noop": ai_result.is_noop,
+                "elapsed_seconds": ai_result.elapsed_seconds,
+            }
+
             print_info("Running pre-CI check after fix...")
             run_pre_ci_check(ascend_path, step_id=f"fix-{attempt}")
 
@@ -1444,6 +1509,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         except Exception as e:
             print_error(f"AI fix call failed: {e}")
+            self._last_ai_result = None
             return False
 
     def _do_commit_step(self, step: dict) -> None:
@@ -1567,12 +1633,236 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         self.state.summary_rows.append(("OVERALL", "PASS", f"{self.state.total_steps} step(s) completed"))
         print_summary_table(self.state.summary_rows)
 
+        # ── Generate sync report ──
+        self._write_sync_report()
+
         print_section("Output Files")
         for f in sorted(WORKSPACE_DIR.rglob("*")):
             if f.is_file() and ".git" not in str(f):
                 print(f"    {f.relative_to(WORKSPACE_DIR)}")
         print_info(f"Work branch preserved: {self.state.work_branch}")
         print_info(f"To inspect: cd {ascend_path} && git checkout {self.state.work_branch}")
+
+    def _write_sync_report(self) -> None:
+        """Generate SYNC_REPORT.md via AI — let Claude Code write the report.
+
+        Collects all sync data (fix attempt details, step summaries, error logs,
+        modified files) into a context file, then calls the AI backend to produce
+        a comprehensive, human-readable sync report.
+        """
+        report_path = WORKSPACE_DIR / "SYNC_REPORT.md"
+
+        # ── Collect context for AI ──
+        context = self._build_report_context()
+        context_path = WORKSPACE_DIR / "report-context.json"
+        context_path.write_text(
+            json.dumps(context, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print_info(f"Report context written to {context_path}")
+
+        # ── Build report prompt ──
+        prompt = self._build_report_prompt(context)
+
+        # ── Call AI backend to generate the report ──
+        try:
+            from TA_main2main_workflow.agent.opencode_adapter import (
+                _detect_backend,
+            )
+            backend = _detect_backend()
+            print_info(f"AI backend for report: {backend}")
+
+            # Write prompt file for debugging
+            prompt_path = WORKSPACE_DIR / "report-prompt.txt"
+            prompt_path.write_text(prompt, encoding="utf-8")
+
+            print_header("AI Report Generation")
+            print_info("Calling AI backend to generate sync report...")
+
+            ai_result = run_opencode_adapter({
+                "step_id": "sync-report",
+                "previous_step_id": "",
+                "previous_step_summary_path": "",
+                "is_last_step": "true",
+                "step_index": "final",
+                "step_dir": str(WORKSPACE_DIR),
+                "fix_dir": str(WORKSPACE_DIR / "report-fix"),
+                "conflict_dir": "",
+                "ascend_path": self.state.triton_ascend_path,
+                "triton_path": self.state.triton_path,
+                "reference_dir": _REFERENCE_DIR,
+                "mode": "report",
+                "error_logs": json.dumps([str(context_path)], ensure_ascii=False),
+                "target_commit": self.state.target_commit,
+            })
+
+            # AI writes report to step_dir/step_summary.md; we read it from there.
+            # (ai_result return value is not used directly — report is file-based.)
+            _ = ai_result  # suppress unused-var warning
+            ai_report_path = WORKSPACE_DIR / EACH_STEP_SUMMARY_FILE
+            if ai_report_path.exists():
+                report_content = ai_report_path.read_text(encoding="utf-8")
+                # Add metadata header
+                header = (
+                    f"# Triton-Ascend Upstream Sync Report\n\n"
+                    f"- **Date**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"- **Target commit**: `{self.state.target_commit[:12]}`\n"
+                    f"- **Work branch**: `{self.state.work_branch}`\n"
+                    f"- **Upstream commits**: {self.state.upstream_commits_count}\n"
+                    f"- **Steps**: {self.state.total_steps}\n"
+                    f"- **Merge conflicts resolved**: {self.state.conflict_files_resolved}\n"
+                    f"- **Build errors fixed**: {sum(s['build_fixes'] for s in self.state.step_details)}\n"
+                    f"- **Test failures fixed**: {sum(s['test_fixes'] for s in self.state.step_details)}\n"
+                    f"- **Total AI fix rounds**: {sum(s['retries'] for s in self.state.step_details)}\n\n"
+                    f"---\n\n"
+                )
+                report_path.write_text(header + report_content, encoding="utf-8")
+                print_status(True, f"AI-generated sync report: {report_path}")
+            else:
+                print_warn("AI did not produce a report — using fallback")
+                self._write_sync_report_fallback()
+        except Exception as e:
+            print_error(f"AI report generation failed: {e}")
+            print_info("Using fallback report generator...")
+            self._write_sync_report_fallback()
+
+    def _build_report_context(self) -> dict:
+        """Collect all sync data into a structured context for AI report generation."""
+        total_build_fixes = sum(s["build_fixes"] for s in self.state.step_details)
+        total_test_fixes = sum(s["test_fixes"] for s in self.state.step_details)
+        total_retries = sum(s["retries"] for s in self.state.step_details)
+
+        # Collect step AI summaries
+        step_summaries: dict[str, str] = {}
+        steps_dir = WORKSPACE_DIR / STEPS_DIR
+        if steps_dir.exists():
+            for step in self.state.steps:
+                step_dir = steps_dir / step["id"]
+                parts = []
+                for fname in ["analysis.md", "step_summary.md", "review.md"]:
+                    fp = step_dir / fname
+                    if fp.exists():
+                        parts.append(
+                            f"### {fname}\n\n"
+                            f"{fp.read_text(encoding='utf-8', errors='replace').strip()}"
+                        )
+                if parts:
+                    step_summaries[step["id"]] = "\n\n".join(parts)
+
+        return {
+            "overview": {
+                "date": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "target_commit": self.state.target_commit[:12],
+                "work_branch": self.state.work_branch,
+                "upstream_commits_count": self.state.upstream_commits_count,
+                "total_steps": self.state.total_steps,
+                "conflict_files_resolved": self.state.conflict_files_resolved,
+                "build_fix_count": total_build_fixes,
+                "test_fix_count": total_test_fixes,
+                "total_retries": total_retries,
+            },
+            "step_details": self.state.step_details,
+            "fix_attempts": self.state.fix_attempts,
+            "step_ai_summaries": step_summaries,
+            "step_pr_descriptions": self.state.step_pr_descriptions,
+        }
+
+    def _build_report_prompt(self, context: dict) -> str:
+        """Build the AI prompt for generating the sync report."""
+        summary_json = json.dumps(context, indent=2, ensure_ascii=False)
+        return (
+            "Generate a comprehensive sync report in Chinese (中文) based on "
+            "the structured context below. The report should be written as "
+            "step_summary.md in the output directory.\n\n"
+            "The report MUST include:\n\n"
+            "## 1. Executive Summary\n"
+            "- Brief overview of this sync (how many upstream commits, "
+            "how many steps, overall outcome)\n"
+            "- Key metrics (conflicts resolved, build errors fixed, "
+            "test failures fixed, AI fix rounds)\n\n"
+            "## 2. Per-Step Analysis\n"
+            "- For each step, explain:\n"
+            "  - Which upstream commits were merged and what areas they touched\n"
+            "  - What merge conflicts arose and how they were resolved\n"
+            "  - What build errors occurred, root causes, and how AI fixed them\n"
+            "  - What test failures occurred, root causes, and how AI fixed them\n"
+            "- Include specific file paths and error messages where relevant\n\n"
+            "## 3. Fix Pattern Analysis\n"
+            "- Identify recurring patterns across fixes (e.g., API changes, "
+            "missing includes, signature mismatches)\n"
+            "- Highlight any fixes that required multiple attempts\n\n"
+            "## 4. Recommendations\n"
+            "- Suggest preventative measures for future syncs\n"
+            "- Flag any areas of the codebase that are particularly fragile\n\n"
+            "Rules:\n"
+            "- Write in Chinese (中文)\n"
+            "- Be specific — include file paths, error messages, commit ranges\n"
+            "- Write the output to {step_dir}/step_summary.md\n"
+            "- DO NOT modify any source code — this is a report-only task\n\n"
+            f"CONTEXT DATA:\n\n{summary_json}"
+        )
+
+    def _write_sync_report_fallback(self) -> None:
+        """Fallback: assemble report from template (no AI)."""
+        report_path = WORKSPACE_DIR / "SYNC_REPORT.md"
+        L: list[str] = []
+
+        total_build_fixes = sum(s["build_fixes"] for s in self.state.step_details)
+        total_test_fixes = sum(s["test_fixes"] for s in self.state.step_details)
+        total_retries = sum(s["retries"] for s in self.state.step_details)
+
+        L.append("# Triton-Ascend Upstream Sync Report\n")
+        L.append(f"**Date**: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        L.append(f"**Target commit**: `{self.state.target_commit[:12]}`")
+        L.append(f"**Work branch**: `{self.state.work_branch}`")
+        L.append(f"**Status**: Success\n")
+
+        L.append("## Summary\n")
+        L.append("| Metric | Count |")
+        L.append("|--------|-------|")
+        L.append(f"| Upstream commits synced | {self.state.upstream_commits_count} |")
+        L.append(f"| Steps | {self.state.total_steps} |")
+        L.append(f"| Merge conflicts resolved | {self.state.conflict_files_resolved} |")
+        L.append(f"| Build errors fixed | {total_build_fixes} |")
+        L.append(f"| Test failures fixed | {total_test_fixes} |")
+        L.append(f"| AI fix rounds | {total_retries} |")
+
+        if self.state.step_details:
+            L.append("\n## Per-Step Breakdown\n")
+            L.append("| Step | Commits | Lines | Conflicts | Build Fixes | Test Fixes | Retries |")
+            L.append("|------|---------|-------|-----------|-------------|------------|---------|")
+            for s in self.state.step_details:
+                L.append(
+                    f"| {s['step_id']} ({s['step_index']}/{self.state.total_steps}) "
+                    f"| {s['commits']} | {s['source_lines']} | {s['conflict_files']} "
+                    f"| {s['build_fixes']} | {s['test_fixes']} | {s['retries']} |"
+                )
+
+        for fa in self.state.fix_attempts:
+            ftype = fa["fix_type"].upper()
+            L.append(
+                f"\n### {fa['step_id']} — Fix {fa['attempt']} ({ftype})\n"
+            )
+            if fa["modified_files"]:
+                L.append(f"**Files**: {', '.join(f'`{f}`' for f in fa['modified_files'])}")
+            ai_sum = fa.get("ai_summary", "").strip()
+            if ai_sum:
+                L.append(f"\n{ai_sum}")
+
+        steps_dir = WORKSPACE_DIR / STEPS_DIR
+        if steps_dir.exists():
+            for step in self.state.steps:
+                step_dir = steps_dir / step["id"]
+                for fname in ["analysis.md", "step_summary.md", "review.md"]:
+                    fp = step_dir / fname
+                    if fp.exists():
+                        L.append(
+                            f"\n### {step['id']} — {fname}\n\n"
+                            f"{fp.read_text(encoding='utf-8', errors='replace').strip()}\n"
+                        )
+
+        L.append(f"\n---\n🤖 Generated at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        report_path.write_text("\n".join(L), encoding="utf-8")
+        print_info(f"Fallback sync report: {report_path}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Terminal nodes (routed from execute_sync)
