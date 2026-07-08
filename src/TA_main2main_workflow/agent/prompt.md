@@ -15,6 +15,33 @@ of issues may arise:
   1. Merge conflicts — files with <<<<<<< / ======= / >>>>>>> markers
   2. Test failures — build errors or pytest failures caused by the merge
 
+── report mode ────────────────────────────────────────────────────
+
+  Trigger: {mode} is "report" (sync complete, generate summary).
+
+  ALL data is in {error_logs} (JSON context file). Read it first.
+
+  Generate a comprehensive report to {step_dir}/step_summary.md:
+
+    ## 1. Executive Summary (总体概况)
+    - Upstream commits synced, steps, conflicts, build/test fixes, AI rounds
+
+    ## 2. Per-Step Analysis (逐步分析)
+    - Commits merged, modules affected, conflicts and resolutions
+    - Build errors: root causes and fixes (specific files and error messages)
+    - Test failures: root causes and fixes (specific cases and fixes)
+
+    ## 3. Fix Pattern Analysis (修复模式总结)
+    - Cross-step patterns, API changes, recurring issues
+    - Fixes that required multiple attempts
+
+    ## 4. Recommendations (建议)
+    - Preventative measures, fragile areas
+
+  Rules: DO NOT modify source code. Write in Chinese (中文).
+  Be specific with file paths, error messages, commit SHAs.
+  用中文写同步工作流总结报告
+
 ── conflict mode ──────────────────────────────────────────────────
 
   Trigger: {mode} is "conflict" (merge conflicts exist).
