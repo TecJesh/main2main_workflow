@@ -51,14 +51,23 @@ of issues may arise:
     2. For each conflicted file, understand BOTH sides:
        - The upstream triton change (incoming)
        - The triton-ascend additions/modifications (current)
-    3. Resolve conflicts by:
+    3. Consult the in-depth reference docs (see README.md index) for the
+       conflict-resolution strategy BEFORE editing:
+       - {reference_dir}/01-merge-upstream-conflict-resolution.md — conflict
+         resolution strategy by file type, key case studies (Python frontend
+         refactor, BC pipeline, DotScale attribute rename), standard merge flow
+       - {reference_dir}/04-ir-compatibility-and-backend-adaptation.md — when a
+         conflict involves IR/bytecode compatibility (BC pipeline, Op renames
+         like indirect→unstructured, AscendNPU-IR submodule updates)
+       - {reference_dir}/code-structure-guide.md — upstream → Ascend file mapping
+    4. Resolve conflicts by:
        - Keeping triton-ascend's Ascend-specific additions
        - Accepting upstream triton changes that don't conflict with Ascend code
        - When both sides modified the same code, integrate both changes
        - Preserving Ascend-specific paths (python/triton_ascend/, third_party/ascend/)
-    4. Check that resolved files are syntactically correct
-    5. Write conflict resolution summary to {step_dir}/step_summary.md
-    6. Stage resolved files with `git add <file>` for each resolved file
+    5. Check that resolved files are syntactically correct
+    6. Write conflict resolution summary to {step_dir}/step_summary.md
+    7. Stage resolved files with `git add <file>` for each resolved file
 
   Key principles for conflict resolution:
     - Ascend-specific code (imports of triton_ascend, ascend device checks,
@@ -83,10 +92,22 @@ of issues may arise:
        - Import error → module path or symbol may have moved upstream
        - Test failure → trace back to root cause in source code
        - Environment flake → note but do not fix (timeout, network, resource)
-    3. For each actionable failure, consult reference docs:
+    3. For each actionable failure, consult reference docs (see README.md index).
+       Always-useful quick guides:
        - {reference_dir}/diagnosis-guide.md — error → root cause mapping
        - {reference_dir}/error-pattern-examples.md — concrete fix patterns
        - {reference_dir}/code-structure-guide.md — upstream → Ascend file mapping
+       Then read the in-depth guide matching the failure type:
+       - Build / compile errors (LLVM/MLIR API changes, CMake, undefined
+         symbols) → {reference_dir}/02-llvm-version-adaptation-and-compile-fixes.md
+         (LLVM/MLIR API change table, compat macros, LLVM patch mechanism)
+       - Unit-test / pytest failures (用例报错) →
+         {reference_dir}/03-unit-test-failure-diagnosis-and-fixes.md
+         (7 typical failure cases, API signature mismatches, pass-option
+         deprecations, post-upgrade test checklist)
+       - IR compatibility issues (BC pipeline, Op/IR structure changes,
+         NPUIR updates) →
+         {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
     4. Apply minimal fixes:
        - Update imports when upstream moves modules
        - Update function signatures when upstream changes APIs
@@ -122,10 +143,28 @@ of issues may arise:
 
 ━━━ REFERENCE FILES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+  Start from the index, then open the doc that matches your task:
+  {reference_dir}/README.md                 — index of ALL adaptation docs
+
+  Quick guides:
   {reference_dir}/adapt-guide.md            — adaptation workflow and decisions
   {reference_dir}/code-structure-guide.md   — Triton vs Triton-Ascend file mapping
   {reference_dir}/diagnosis-guide.md        — error type → root cause mapping
   {reference_dir}/error-pattern-examples.md — concrete fix patterns per error type
+
+  In-depth guides (from the 3.2→3.5 / LLVM 20→22 upgrade experience):
+  {reference_dir}/01-merge-upstream-conflict-resolution.md
+      — merge & conflict resolution: strategy by file type, key case studies
+      — USE FOR: resolving merge conflicts (conflict mode)
+  {reference_dir}/02-llvm-version-adaptation-and-compile-fixes.md
+      — LLVM/MLIR API change table, compat macros, LLVM patch mechanism
+      — USE FOR: fixing build / compilation errors (fix mode)
+  {reference_dir}/03-unit-test-failure-diagnosis-and-fixes.md
+      — 7 typical unit-test failure cases, post-upgrade test checklist
+      — USE FOR: fixing pytest / unit-test failures (fix mode, 用例报错)
+  {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
+      — BC pipeline, Op/IR structure changes, AscendNPU-IR submodule updates
+      — USE FOR: IR / bytecode compatibility issues (conflict or fix mode)
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
