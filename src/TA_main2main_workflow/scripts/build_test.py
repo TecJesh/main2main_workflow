@@ -33,14 +33,21 @@ from TA_main2main_workflow.utils import (
 
 
 def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
-                env: dict | None = None, timeout: int = 3600) -> subprocess.CompletedProcess:
-    """Run a command, tee output to log file and console, wait for completion."""
+                env: dict | None = None, timeout: int = 3600,
+                progress_line: bool = False) -> subprocess.CompletedProcess:
+    """Run a command, tee output to log file and console, wait for completion.
+
+    If progress_line is True, only the last line of output is shown,
+    overwriting in place with \\r — useful for cmake/ninja build output.
+    Full output is always written to the log file.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     proc_env = os.environ.copy()
     if env:
         proc_env.update(env)
 
     print(f"  Running: {' '.join(cmd)}")
+    last_line = ""
     with log_path.open("w", encoding="utf-8") as fh:
         proc = subprocess.Popen(
             cmd, cwd=cwd, env=proc_env,
@@ -49,7 +56,16 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
         assert proc.stdout is not None
         for line in proc.stdout:
             fh.write(line)
-            print(line, end="", flush=True)
+            if progress_line:
+                stripped = line.rstrip()
+                if stripped:
+                    last_line = stripped
+                    # \r 回到行首，\033[K 清除行尾残留，保证单行刷新
+                    print(f"\r  {stripped[:120]}\033[K", end="", flush=True)
+            else:
+                print(line, end="", flush=True)
+        if progress_line and last_line:
+            print()  # final newline
         proc.wait(timeout=timeout)
 
     return subprocess.CompletedProcess(
@@ -63,17 +79,22 @@ def _check_and_rebuild_llvm(repo_path: Path) -> str:
 
     Reads cmake/llvm-hash.txt from triton-ascend, compares with the
     last-built hash stored at {LLVM_INSTALL_PREFIX_SYNC}/.llvm_hash.
-    If they differ (or no previous build exists), rebuilds LLVM.
+    If they differ (or no previous build exists), checks out the
+    required commit in the pre-cloned llvm-project and rebuilds.
+
+    Environment variables:
+      LLVM_PROJECT_PATH         — path to llvm-project (default: ~/llvm-project)
+      LLVM_INSTALL_PREFIX_SYNC  — where to install LLVM (default: ~/llvm-install-sync)
 
     Returns the LLVM install prefix path.
     """
     llvm_project = Path(
         os.getenv("LLVM_PROJECT_PATH",
-                   os.path.expanduser("~/workspace/llvm-project"))
+                   os.path.expanduser("~/llvm-project"))
     )
     llvm_install = Path(
         os.getenv("LLVM_INSTALL_PREFIX_SYNC",
-                   os.path.expanduser("~/workspace/llvm-install-sync"))
+                   os.path.expanduser("~/llvm-install-sync"))
     )
 
     # Read the required LLVM hash from triton-ascend
@@ -106,17 +127,9 @@ def _check_and_rebuild_llvm(repo_path: Path) -> str:
     if not llvm_project.exists():
         raise RuntimeError(
             f"LLVM project not found at {llvm_project}. "
-            f"Clone it with: git clone <llvm-url> {llvm_project}"
+            f"Clone it with: git clone https://github.com/llvm/llvm-project.git {llvm_project}"
         )
 
-    llvm_build_log = WORKSPACE_DIR / "llvm_build.log"
-
-    # Fetch and checkout the required commit
-    _run_cmd(
-        ["git", "fetch", "origin"],
-        cwd=llvm_project,
-        timeout=300,
-    )
     _run_cmd(
         ["git", "checkout", required_hash],
         cwd=llvm_project,
@@ -124,6 +137,7 @@ def _check_and_rebuild_llvm(repo_path: Path) -> str:
     )
 
     # Clean and rebuild
+    llvm_build_log = WORKSPACE_DIR / "llvm_build.log"
     build_dir = llvm_project / "build"
     if build_dir.exists():
         import shutil
@@ -142,12 +156,12 @@ def _check_and_rebuild_llvm(repo_path: Path) -> str:
         "-DCMAKE_CXX_COMPILER=clang++",
     ]
     print(f"  [llvm] Configuring...")
-    _run_to_log(cmake_cmd, build_dir, llvm_build_log, timeout=300)
+    _run_to_log(cmake_cmd, build_dir, llvm_build_log, timeout=300, progress_line=True)
 
     print(f"  [llvm] Building (this may take a while)...")
     _run_to_log(
         ["ninja", "install"],
-        build_dir, llvm_build_log, timeout=7200,
+        build_dir, llvm_build_log, timeout=7200, progress_line=True,
     )
 
     # Copy FileCheck — not installed by ninja install
@@ -189,7 +203,7 @@ def build_triton_ascend(
     print("\n=== Building Triton-Ascend ===")
 
     # ── Check and rebuild LLVM if needed ──
-    skip_llvm = os.getenv("SKIP_LLVM_REBUILD", "true").lower() == "true"
+    skip_llvm = os.getenv("SKIP_LLVM_REBUILD", "false").lower() == "true"
     if skip_llvm:
         print("  SKIP_LLVM_REBUILD=true — skipping LLVM version check")
     else:
@@ -233,7 +247,7 @@ def build_triton_ascend(
         "TRITON_APPEND_CMAKE_ARGS": "-DTRITON_BUILD_UT=OFF",
     })
     build_cmd = ["python3", "setup.py", "install"]
-    build_proc = _run_to_log(build_cmd, repo_path, build_log, env=build_env, timeout=1800)
+    build_proc = _run_to_log(build_cmd, repo_path, build_log, env=build_env, timeout=1800, progress_line=True)
     build_passed = build_proc.returncode == 0
     steps.append({
         "step": "setup_py_install",
@@ -302,6 +316,12 @@ def run_tests(
             "test_dir": str(test_dir_abs),
         }
     else:
+        # Print bishengir-compile path before running tests
+        import shutil
+        bishengir_compile_path = shutil.which("bishengir-compile")
+        if bishengir_compile_path:
+            print(f"  bishengir-compile: {bishengir_compile_path}")
+
         pytest_cmd = [
             python_exe, "-m", "pytest",
             str(test_dir_abs),
