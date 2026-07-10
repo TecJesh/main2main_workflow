@@ -2,15 +2,22 @@
 """Build Triton-Ascend and run tests.
 
 Build steps:
-  1. Build C++ extensions (CMake / setup.py build)
-  2. Install Python package in development mode
-  3. Run pre-commit checks (optional)
-  4. Run pytest unit tests
+  1. Check LLVM version and rebuild if needed (unless SKIP_LLVM_REBUILD=true)
+  2. Build C++ extensions (CMake / setup.py build)
+  3. Install Python package in development mode
+  4. Run pre-commit checks (optional)
+  5. Run pytest unit tests
+
+Environment variables:
+  LLVM_PROJECT_PATH         — path to llvm-project repo (default: ~/workspace/llvm-project)
+  LLVM_INSTALL_PREFIX_SYNC  — where to install LLVM (default: ~/workspace/llvm-install-sync)
+  SKIP_LLVM_REBUILD         — set to "true" to skip LLVM rebuild check
 
 Output:
   - workspace/build_result.json
   - workspace/test_result.json
   - workspace/build.log
+  - workspace/llvm_build.log
 """
 
 from __future__ import annotations
@@ -51,6 +58,126 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
     )
 
 
+def _check_and_rebuild_llvm(repo_path: Path) -> str:
+    """Check if LLVM version changed and rebuild if needed.
+
+    Reads cmake/llvm-hash.txt from triton-ascend, compares with the
+    last-built hash stored at {LLVM_INSTALL_PREFIX_SYNC}/.llvm_hash.
+    If they differ (or no previous build exists), rebuilds LLVM.
+
+    Returns the LLVM install prefix path.
+    """
+    llvm_project = Path(
+        os.getenv("LLVM_PROJECT_PATH",
+                   os.path.expanduser("~/workspace/llvm-project"))
+    )
+    llvm_install = Path(
+        os.getenv("LLVM_INSTALL_PREFIX_SYNC",
+                   os.path.expanduser("~/workspace/llvm-install-sync"))
+    )
+
+    # Read the required LLVM hash from triton-ascend
+    llvm_hash_file = repo_path / "cmake" / "llvm-hash.txt"
+    if not llvm_hash_file.exists():
+        print(f"  [llvm] {llvm_hash_file} not found — skipping LLVM rebuild")
+        return str(llvm_install)
+
+    required_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+    if not required_hash:
+        print("  [llvm] llvm-hash.txt is empty — skipping LLVM rebuild")
+        return str(llvm_install)
+
+    # Check last-built hash
+    hash_cache = llvm_install / ".llvm_hash"
+    if hash_cache.exists():
+        last_hash = hash_cache.read_text(encoding="utf-8").strip()
+        if last_hash == required_hash:
+            print(f"  [llvm] LLVM hash unchanged ({required_hash[:12]}) — skip rebuild")
+            return str(llvm_install)
+
+    print(f"\n{'=' * 60}")
+    print(f"  LLVM version changed!")
+    print(f"  Previous: {hash_cache.read_text(encoding='utf-8').strip()[:12] if hash_cache.exists() else '(none)'}")
+    print(f"  Required: {required_hash[:12]}")
+    print(f"  Rebuilding LLVM...")
+    print(f"{'=' * 60}")
+
+    # Ensure llvm-project exists
+    if not llvm_project.exists():
+        raise RuntimeError(
+            f"LLVM project not found at {llvm_project}. "
+            f"Clone it with: git clone <llvm-url> {llvm_project}"
+        )
+
+    llvm_build_log = WORKSPACE_DIR / "llvm_build.log"
+
+    # Fetch and checkout the required commit
+    _run_cmd(
+        ["git", "fetch", "origin"],
+        cwd=llvm_project,
+        timeout=300,
+    )
+    _run_cmd(
+        ["git", "checkout", required_hash],
+        cwd=llvm_project,
+        timeout=60,
+    )
+
+    # Clean and rebuild
+    build_dir = llvm_project / "build"
+    if build_dir.exists():
+        import shutil
+        shutil.rmtree(build_dir)
+    build_dir.mkdir()
+
+    cmake_cmd = [
+        "cmake", str(llvm_project / "llvm"),
+        "-G", "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DLLVM_ENABLE_ASSERTIONS=ON",
+        "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
+        "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU",
+        f"-DCMAKE_INSTALL_PREFIX={llvm_install}",
+        "-DCMAKE_C_COMPILER=clang",
+        "-DCMAKE_CXX_COMPILER=clang++",
+    ]
+    print(f"  [llvm] Configuring...")
+    _run_to_log(cmake_cmd, build_dir, llvm_build_log, timeout=300)
+
+    print(f"  [llvm] Building (this may take a while)...")
+    _run_to_log(
+        ["ninja", "install"],
+        build_dir, llvm_build_log, timeout=7200,
+    )
+
+    # Copy FileCheck — not installed by ninja install
+    filecheck_src = build_dir / "bin" / "FileCheck"
+    filecheck_dst = llvm_install / "bin" / "FileCheck"
+    if filecheck_src.exists():
+        import shutil
+        filecheck_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(filecheck_src, filecheck_dst)
+        print(f"  [llvm] Copied FileCheck to {filecheck_dst}")
+    else:
+        print(f"  [llvm] WARNING: FileCheck not found at {filecheck_src}")
+
+    # Write the hash cache
+    llvm_install.mkdir(parents=True, exist_ok=True)
+    hash_cache.write_text(required_hash, encoding="utf-8")
+    print(f"  [llvm] Rebuild complete — install prefix: {llvm_install}")
+
+    return str(llvm_install)
+
+
+def _run_cmd(cmd: list[str], cwd: Path, timeout: int = 300) -> str:
+    """Run a command, return stdout. Raise on failure."""
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        print(f"  [llvm] Command failed: {' '.join(cmd)}")
+        print(f"  stderr: {proc.stderr.strip()[-500:]}")
+    return proc.stdout.strip()
+
+
 def build_triton_ascend(
     repo_path: Path,
     llvm_prefix: str = "",
@@ -60,6 +187,16 @@ def build_triton_ascend(
 ) -> dict:
     """Build the Triton-Ascend C++ extensions and Python package."""
     print("\n=== Building Triton-Ascend ===")
+
+    # ── Check and rebuild LLVM if needed ──
+    skip_llvm = os.getenv("SKIP_LLVM_REBUILD", "true").lower() == "true"
+    if skip_llvm:
+        print("  SKIP_LLVM_REBUILD=true — skipping LLVM version check")
+    else:
+        resolved_llvm_prefix = _check_and_rebuild_llvm(repo_path)
+        if resolved_llvm_prefix and not llvm_prefix:
+            llvm_prefix = resolved_llvm_prefix
+
     build_log = WORKSPACE_DIR / BUILD_LOG_FILE
 
     env = {}

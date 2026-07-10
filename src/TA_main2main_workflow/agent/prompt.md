@@ -142,6 +142,16 @@ of issues may arise:
   - Prefer minimal, targeted fixes over large refactors
   - Preserve all Ascend-specific functionality (triton-ascend is the primary
     codebase, not upstream triton)
+  - **NEVER modify code under `third_party/nvidia/` or `third_party/amd/`.**
+    These directories contain vendor-specific code that is NOT part of the
+    Ascend backend. Build errors or test failures in these paths must be
+    treated as environment issues, not code bugs — do not touch them.
+    Your fixes must be confined to Ascend-specific code paths:
+      - `third_party/ascend/`     (Ascend backend implementation)
+      - `python/triton_ascend/`   (Ascend Python bindings)
+      - `lib/Target/Ascend/`      (Ascend LLVM backend)
+      - `python/triton/`          (only if it contains Ascend conditionals)
+      - Other project files (CMakeLists.txt, setup.py, etc.)
   - When unsure about an upstream change's impact, search the triton-ascend
     codebase for references to the changed symbol/file
 
