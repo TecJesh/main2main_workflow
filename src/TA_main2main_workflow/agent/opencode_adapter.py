@@ -219,6 +219,21 @@ def _log_prompt(prompt: str, attempt: int, log_path: Path) -> None:
         fh.write(f"{'═' * 60}\n{title}:\n{'═' * 60}\n{prompt}\n{'═' * 60}\n\n")
 
 
+def _subprocess_env() -> dict:
+    """Environment for launching the AI CLI.
+
+    Claude Code refuses `--dangerously-skip-permissions` when running as root
+    ("cannot be used with root/sudo privileges for security reasons"). In CI
+    the job runs as root inside a container — already an isolated sandbox — so
+    we opt in via IS_SANDBOX=1 to allow the flag. Only set it under root, so
+    local non-root runs are unaffected.
+    """
+    env = os.environ.copy()
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env.setdefault("IS_SANDBOX", "1")
+    return env
+
+
 def _run_opencode_once(
     prompt: str,
     log_path: Path | None,
@@ -237,6 +252,7 @@ def _run_opencode_once(
         stderr=stderr_fh or subprocess.DEVNULL,
         text=True,
         bufsize=1,
+        env=_subprocess_env(),
     )
 
     lines_queue: queue.Queue[str | None] = queue.Queue()
@@ -421,6 +437,7 @@ def _run_claude(inputs: dict[str, Any]) -> AIResult:
         stderr=stderr_fh or subprocess.DEVNULL,
         text=True,
         bufsize=1,
+        env=_subprocess_env(),
     )
 
     # ── Write prompt to stdin in background thread ─────────────────────────

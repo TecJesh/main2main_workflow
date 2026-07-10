@@ -72,7 +72,7 @@ class TA_Main2MainState(BaseModel):
     test_passed: bool = False
 
     retry_count: int = 0
-    max_retries: int = 50
+    max_retries: int = 3
     fix_errors: list = []
 
     # ── Per-step tracking for sync report ──
