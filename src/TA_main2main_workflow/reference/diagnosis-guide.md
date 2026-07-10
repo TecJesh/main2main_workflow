@@ -66,52 +66,12 @@ Common code-bug mechanisms in Triton-Ascend:
 - `NotImplementedError` → new abstract method on a base class that Ascend overrides
 - CMake/build errors → upstream changed build configuration, CMake variables, or file locations
 - Compilation errors in `lib/Target/Ascend/` → upstream changed C++ interfaces that Ascend backend implements
-- **LLVM API changes** → the most common cause of build errors in triton-ascend.
-
-  Triton-Ascend's Ascend backend (`lib/Target/Ascend/`, `third_party/ascend/`)
-  implements LLVM interfaces that change between LLVM versions. When the upstream
-  triton project updates its pinned LLVM version, the Ascend backend must be
-  updated to match the new LLVM API.
-
-  To diagnose LLVM-related build errors:
-
-  1. **Identify the LLVM version change**: Check `cmake/llvm-hash.txt` for the
-     LLVM commit hash. Compare against what the Ascend patches expect (see
-     `third_party/ascend/llvm_patch/*.patch`).
-
-  2. **Read the compilation error carefully**: LLVM API changes typically manifest as:
-     - `error: no member named 'XXX' in 'llvm::YYY'` → method was renamed or removed
-     - `error: no matching function for call to 'XXX'` → function signature changed
-     - `error: cannot convert 'AAA' to 'BBB'` → type hierarchy changed
-     - `error: 'XXX' is not a member of 'llvm'` → class/function was moved or removed
-     - `error: virtual function 'XXX' has no overrider` → base class interface changed
-
-  3. **Find the new LLVM API**: Search for the changed symbol in the LLVM source
-     (available in the build cache at `~/.triton/llvm/` or check the LLVM commit
-     referenced in `cmake/llvm-hash.txt`). Key areas to check:
-     - LLVM include headers: `llvm/include/llvm/`
-     - LLVM Target infrastructure: `llvm/include/llvm/Target/`
-     - LLVM CodeGen: `llvm/include/llvm/CodeGen/`
-     - LLVM IR: `llvm/include/llvm/IR/`
-     - MLIR (if applicable): `mlir/include/mlir/`
-
-  4. **Map the change to triton-ascend**: The Ascend backend files that most
-     commonly need LLVM API updates:
-     - `third_party/ascend/backend/` — Ascend JIT compiler backend
-     - `third_party/ascend/llvm_patch/` — patches applied to LLVM
-     - `lib/Target/Ascend/` — LLVM target backend for Ascend
-     - `python/triton_ascend/backends/` — Python-level Ascend backend interfaces
-
-  5. **Apply the fix**: Update the Ascend code to use the new LLVM API. Common
-     patterns:
-     - Renamed methods: use the new name with the same arguments
-     - Signature changes: add/remove/reorder parameters as needed
-     - Type changes: update to match new type hierarchy (e.g., `StringRef` → `StringLiteral`)
-     - Removed APIs: find the replacement mechanism (check LLVM release notes)
-     - New pure virtual methods: implement the new required interface
-
-  **Important**: Never modify files under `third_party/nvidia/` or
-  `third_party/amd/`. LLVM API changes only affect Ascend code paths.
+- **LLVM/MLIR API changes** → the most common cause of build errors. When
+  upstream bumps its pinned LLVM (`cmake/llvm-hash.txt`), the Ascend backend
+  (`lib/Target/Ascend/`, `third_party/ascend/`) must match the new API. For the
+  full diagnosis flow, API change table, and fix patterns, see
+  `reference/02-llvm-version-adaptation-and-compile-fixes.md`.
+  Never modify files under `third_party/nvidia/` or `third_party/amd/`.
 - Pytest assertion failures → expected behavior changed due to upstream modifications
 
 Then look up the matching pattern in `reference/error-pattern-examples.md`.
