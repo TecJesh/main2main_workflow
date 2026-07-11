@@ -79,6 +79,10 @@ def _ensure_gh_auth(repo: Path) -> None:
     # ── GH_TOKEN is set ──
     print("[push] Using GH_TOKEN from environment")
 
+    # Set GH_HOST so all gh commands use github.com regardless of what
+    # git remotes point to (essential when url.insteadOf rewrites origin).
+    os.environ["GH_HOST"] = "github.com"
+
     # Step 1: Explicitly login gh CLI against github.com.
     # This is essential when the git remote points to a proxy host —
     # gh needs to know about github.com independently of git remotes.
