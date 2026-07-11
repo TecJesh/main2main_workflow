@@ -241,6 +241,7 @@ git commit -m "merge: upstream Triton <version>"
 | `third_party/ascend/triton_ascend.cc` | IR 构建器参数变更 | 添加新的 static 参数 | Backend |
 | `CMakeLists.txt` | 构建选项变更 | 保留上游 + Ascend 扩展宏 | Build |
 | `setup.py` | 依赖版本更新 | 采用上游新依赖版本 | Build |
+| `cmake/llvm-hash.txt` | LLVM 版本号变更 | **直接采用上游版本**（该文件由上游维护） | Build |
 
 ### 4.3 使用 `git blame` 定位问题
 

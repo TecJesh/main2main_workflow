@@ -84,3 +84,4 @@ For each conflicted file:
 | `third_party/ascend/` | Ascend NPU backend + tests | Always preserve |
 | `third_party/nvidia/` | NVIDIA GPU backend | Accept upstream |
 | `CMakeLists.txt` | Build configuration | Accept upstream, preserve Ascend targets |
+| `cmake/llvm-hash.txt` | LLVM version pin | **Always accept upstream** (upstream controls LLVM version) |
