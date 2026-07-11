@@ -72,7 +72,7 @@ class TA_Main2MainState(BaseModel):
     test_passed: bool = False
 
     retry_count: int = 0
-    max_retries: int = 3
+    max_retries: int = 5
     fix_errors: list = []
 
     # ── Per-step tracking for sync report ──
@@ -1914,7 +1914,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         if not github_repo:
             print_error("GITHUB_REPO is empty — cannot create PR")
             self.state.summary_rows.append(("Push & PR", "FAIL", "GITHUB_REPO empty"))
-            return "SKIP_PUSH"
+            self.state.final_status = UpgradeFailed
+            return UpgradeFailed
 
         # ── Build a comprehensive PR body from step summaries ──
         pr_body_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
@@ -1933,6 +1934,10 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         except Exception as e:
             print_error(f"Failed to push/create PR: {e}")
             self.state.summary_rows.append(("Push & PR", "FAIL", str(e)[:60]))
+            self.state.final_status = UpgradeFailed
+            # Still try to restore branch, then signal failure
+            self._restore_branch()
+            return UpgradeFailed
 
         # ── Restore original branch after push ──
         self._restore_branch()
@@ -2064,3 +2069,6 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_info(f"Work branch '{self.state.work_branch}' preserved for manual inspection")
         print_info(f"To restore:  cd {ascend_path} && git checkout {self.state.original_branch}")
         print_info(f"To clean up: cd {ascend_path} && git branch -D {self.state.work_branch}")
+
+        self.state.final_status = UpgradeFailed
+        return UpgradeFailed
