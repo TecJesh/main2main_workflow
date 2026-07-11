@@ -19,9 +19,11 @@ Environment variables:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -78,10 +80,6 @@ def _ensure_gh_auth(repo: Path) -> None:
 
     # ── GH_TOKEN is set ──
     print("[push] Using GH_TOKEN from environment")
-
-    # Set GH_HOST so all gh commands use github.com regardless of what
-    # git remotes point to (essential when url.insteadOf rewrites origin).
-    os.environ["GH_HOST"] = "github.com"
 
     # Step 1: Explicitly login gh CLI against github.com.
     # This is essential when the git remote points to a proxy host —
@@ -231,7 +229,52 @@ def _build_pr_title(ts: str = "") -> str:
     return f"[{author}]({pr_type}) merge upstream triton commits ({ts})"
 
 
-def push_and_create_pr(
+def _create_pr_via_api(
+    github_repo: str,
+    title: str,
+    body: str,
+    head: str,
+    base: str,
+    token: str,
+) -> str:
+    """Create a GitHub PR via the REST API directly.
+
+    Uses the GitHub REST API (POST /repos/{owner}/{repo}/pulls) instead of
+    gh CLI to avoid host-detection issues when git remotes are rewritten by
+    url.insteadOf proxy.
+    """
+    url = f"https://api.github.com/repos/{github_repo}/pulls"
+    payload = json.dumps({
+        "title": title,
+        "body": body,
+        "head": head,
+        "base": base,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            pr_url = result.get("html_url", "")
+            if not pr_url:
+                raise RuntimeError(f"API response missing html_url: {result}")
+            return pr_url
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"GitHub API error {e.code}: {error_body}"
+        ) from e
     ascend_path: Path,
     github_repo: str = "TecJesh/triton-ascend",
     work_branch: str = "",
@@ -319,27 +362,28 @@ def push_and_create_pr(
         print_error(f"git push failed (exit {e.returncode}): {stderr_detail}")
         raise
 
-    # ── Create PR ──
+    # ── Create PR via GitHub REST API ──
+    # Use the REST API directly instead of gh CLI to avoid host-detection
+    # failures when git remotes are rewritten by url.insteadOf proxy.
     base_branch = _detect_default_branch(repo)
     pr_description = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     pr_title = _build_pr_title(ts)
 
-    print(f"[push] Creating PR: {pr_title}")
-    gh_cmd = [
-        "gh", "pr", "create",
-        "--title", pr_title,
-        "--body", pr_description,
-        "--head", work_branch,
-        "--base", base_branch,
-        "--repo", github_repo,
-    ]
+    gh_token = os.getenv("GH_TOKEN", "") or os.getenv("GITHUB_TOKEN", "")
+    if not gh_token:
+        raise RuntimeError("GH_TOKEN or GITHUB_TOKEN must be set to create PR")
 
-    result = subprocess.run(
-        gh_cmd, check=True, capture_output=True, text=True, cwd=str(repo)
+    print(f"[push] Creating PR via API: {pr_title}")
+    pr_url = _create_pr_via_api(
+        github_repo=github_repo,
+        title=pr_title,
+        body=pr_description,
+        head=work_branch,
+        base=base_branch,
+        token=gh_token,
     )
-    pr_url = result.stdout.strip()
     print(f"[push] PR created: {pr_url}")
     return pr_url
 
