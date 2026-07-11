@@ -29,7 +29,7 @@ TRITON_ASCEND_REPO_NAME = "triton-ascend"
 # ── Step-planning constants ──────────────────────────────────────────────────
 LINE_BUDGET = 1000
 BASE_LINE_BUDGET = 1000
-BASE_COMMIT_COUNT_BUDGET = 5      # max commits per step (overridable via TA_COMMIT_BUDGET)
+BASE_COMMIT_COUNT_BUDGET = 5      # deprecated — no longer used as a step limit
 # Directories in upstream triton whose changed lines count toward the budget
 SOURCE_DIRS = ["python/triton/", "lib/", "include/"]
 # Env var to control the line budget at runtime
@@ -61,13 +61,11 @@ _flow_start_time: float = 0.0
 
 
 def commit_count_budget(line_budget: int = LINE_BUDGET) -> int:
-    """Compute the max commits per step from the line budget.
+    """DEPRECATED: Steps are now determined solely by line budget.
 
-    Uses the same formula as vllm-ascend's main2main_flow:
-    max(1, round(BASE_COMMIT_COUNT_BUDGET * sqrt(line_budget / BASE_LINE_BUDGET)))
-
-    The base commit count can be overridden at runtime via TA_COMMIT_BUDGET
-    env var (e.g., TA_COMMIT_BUDGET=3 for finer granularity).
+    Kept for backward compatibility with existing step plan files.
+    Returns a derived value from line_budget, but no longer used as a
+    hard limit during step planning.
     """
     import math
     import os
