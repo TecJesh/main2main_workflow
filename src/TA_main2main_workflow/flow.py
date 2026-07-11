@@ -1933,6 +1933,31 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             self.state.summary_rows.append(("Push & PR", "PASS", pr_url))
         except Exception as e:
             print_error(f"Failed to push/create PR: {e}")
+            # ── Print detailed failure diagnostics ──
+            if isinstance(e, subprocess.CalledProcessError):
+                print_section("Push/PR Failure Details")
+                print_key_value("Command", " ".join(e.cmd) if e.cmd else "N/A")
+                print_key_value("Exit code", str(e.returncode))
+                if e.stdout:
+                    print_info(f"stdout:\n{e.stdout.strip()}")
+                if e.stderr:
+                    print_error(f"stderr:\n{e.stderr.strip()}")
+            else:
+                import traceback
+                print_info(f"Traceback:\n{traceback.format_exc()}")
+            # Print git context for debugging
+            ascend_path = Path(self.state.triton_ascend_path)
+            print_section("Git Context at Failure")
+            print_key_value("Work branch", self.state.work_branch)
+            try:
+                current_branch = run_git(ascend_path, "branch", "--show-current").strip()
+                print_key_value("Current branch", current_branch)
+                status_out = run_git(ascend_path, "status", "--short").strip()
+                print_info(f"Git status:\n{status_out}" if status_out else "Git status: (clean)")
+                log_out = run_git(ascend_path, "log", "--oneline", "-5")
+                print_info(f"Recent commits:\n{log_out.strip()}")
+            except Exception:
+                pass
             self.state.summary_rows.append(("Push & PR", "FAIL", str(e)[:60]))
             self.state.final_status = UpgradeFailed
             # Still try to restore branch, then signal failure
