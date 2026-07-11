@@ -178,6 +178,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     ("MERGE PHASE", "SKIP", "No new upstream commits")
                 )
                 print_summary_table(self.state.summary_rows)
+                self.state.final_status = UpgradeCompleted
                 return UpgradeCompleted
 
             # Store the plan for subsequent steps
@@ -187,6 +188,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             work_branch = os.getenv("TA_WORK_BRANCH", self.state.work_branch)
             if not work_branch:
                 print_error("TA_WORK_BRANCH is required for TA_CURRENT_STEP > 0")
+                self.state.final_status = UpgradeFailed
                 return UpgradeFailed
 
             # Restore state from work branch metadata
@@ -216,6 +218,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 run_git(ascend_path, "checkout", work_branch)
                 result = self.detect_commits()
                 if result == HasNoNewCommits:
+                    self.state.final_status = UpgradeCompleted
                     return UpgradeCompleted
                 self._write_step_plan()
             else:
@@ -242,6 +245,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             metadata_dir.mkdir(parents=True, exist_ok=True)
             (metadata_dir / "all_steps_done.txt").write_text("true", encoding="utf-8")
             self._write_merge_metadata()
+            self.state.final_status = UpgradeCompleted
             return UpgradeCompleted
 
         step = self.state.steps[current_step]
@@ -329,6 +333,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         )
         print_summary_table(self.state.summary_rows)
 
+        self.state.final_status = UpgradeCompleted
         return UpgradeCompleted
 
     def _write_step_plan(self) -> None:
@@ -478,6 +483,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         if not work_branch:
             print_error("TA_WORK_BRANCH is required for fix mode")
+            self.state.final_status = UpgradeFailed
             return UpgradeFailed
 
         ascend_path = Path(ascend_path_str)
@@ -581,6 +587,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 ("AI fix", "FAIL", "No changes produced")
             )
             print_summary_table(self.state.summary_rows)
+            self.state.final_status = UpgradeFailed
             return UpgradeFailed
 
         # ── Commit and push ──
@@ -615,6 +622,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_info(f"Next: re-trigger NPU tests on branch '{work_branch}'")
 
         print_summary_table(self.state.summary_rows)
+        self.state.final_status = UpgradeCompleted
         return UpgradeCompleted
 
     # ═══════════════════════════════════════════════════════════════════════════
