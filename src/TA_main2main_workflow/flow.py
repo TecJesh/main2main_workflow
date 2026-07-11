@@ -40,7 +40,7 @@ from TA_main2main_workflow.utils import (
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE,
     FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE, FIX_LOG_DIR,
     HasNewCommits, HasNoNewCommits,
-    STEPS_DIR, STEPS_FILE, LINE_BUDGET, commit_count_budget,
+    STEPS_DIR, STEPS_FILE, LINE_BUDGET,
     TEST_RESULT_FILE, UpgradeCompleted, UpgradeFailed,
     WORKSPACE_DIR, has_merge_conflicts, run_git, get_conflict_files,
     print_header, print_section, print_step, print_status, print_info,
@@ -738,13 +738,11 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         progressive_env = os.getenv("TA_PROGRESSIVE_MERGE", "true").lower()
         self.state.progressive_merge = progressive_env != "false"
 
-        # ── Plan steps: split commits into chunks based on line/commit budget ──
+        # ── Plan steps: split commits into chunks based on line budget ──
         if self.state.progressive_merge and self.state.upstream_commits_count > 1:
             print_section("Step Planning")
             line_budget = int(os.getenv("TA_LINE_BUDGET", str(LINE_BUDGET)))
-            ccb = commit_count_budget(line_budget)
             print_key_value("line budget", str(line_budget))
-            print_key_value("commit-count budget", str(ccb))
 
             plan = run_plan(
                 triton_path,

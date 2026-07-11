@@ -2,15 +2,16 @@
 """Deterministic step planner for the TA main2main upstream sync pipeline.
 
 Splits a range of upstream Triton commits into ordered steps based on changed
-lines in key source directories. Commits that do not touch python/triton/,
-lib/, or include/ are skipped (they don't affect the Ascend adaption).
+lines in key source directories. Every commit between base and target is
+included — no commits are skipped, including those that touch zero source
+lines (they are still tracked but contribute 0 to the line budget).
 
 Algorithm:
   1. git log --reverse base..target → ordered commit list
   2. For each commit, git diff-tree --numstat → source dir changed lines
-  3. Keep only commits that touch source directories; skip others
+  3. ALL commits are considered in order; none are filtered out
   4. Commits accumulate into a step until source_changed_lines > LINE_BUDGET
-     or the step reaches the commit-count budget
+     (no commit-count limit — as many commits as fit within the line budget)
   5. A single commit with source_changed_lines > LINE_BUDGET becomes its own step
 
 The LINE_BUDGET can be controlled via TA_LINE_BUDGET env var (default: 1000).
@@ -30,8 +31,7 @@ from typing import Any
 
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, STEPS_FILE, STEPS_DIR, LINE_BUDGET, SOURCE_DIRS,
-    ENV_COMMIT_BUDGET, BASE_COMMIT_COUNT_BUDGET,
-    commit_count_budget, run_git,
+    run_git,
 )
 
 
@@ -95,7 +95,6 @@ def _make_step(
         "end_commit": commits[-1]["sha"],
         "source_changed_lines": total_lines,
         "line_budget": line_budget,
-        "commit_count_budget": commit_count_budget(line_budget),
     }
 
 
@@ -105,23 +104,25 @@ def _plan_steps(
     base_commit: str,
     line_budget: int = LINE_BUDGET,
 ) -> list[dict[str, Any]]:
-    """Group commits into steps respecting the line and count budgets.
+    """Group commits into steps respecting only the line budget.
+
+    Every commit in the range is included — even those that touch zero
+    source lines (they contribute 0 to the line budget and don't cause
+    step splits on their own).
 
     Algorithm:
-      - Skip commits that touch zero source lines (no impact on adaption).
+      - ALL commits are considered in order; none are filtered out.
       - A commit whose source lines exceed LINE_BUDGET becomes its own step.
-      - Otherwise accumulate until budget exceeded, then flush current step.
+      - Otherwise accumulate until line budget exceeded, then flush.
+      - No commit-count cap — as many commits as fit within the line budget.
     """
-    eligible = [c for c in commits if lines_per_commit.get(c["sha"], 0) > 0]
-
     steps: list[dict[str, Any]] = []
     step_commits: list[dict[str, str]] = []
     step_lines = 0
     start = base_commit
-    ccb = commit_count_budget(line_budget)
 
-    for commit in eligible:
-        lines = lines_per_commit[commit["sha"]]
+    for commit in commits:
+        lines = lines_per_commit.get(commit["sha"], 0)
 
         # ── Oversized single commit: flush pending, emit solo step ──
         if lines > line_budget:
@@ -134,8 +135,8 @@ def _plan_steps(
             start = steps[-1]["end_commit"]
             continue
 
-        # ── Would exceed budget → flush current step first ──
-        if step_lines + lines > line_budget or len(step_commits) >= ccb:
+        # ── Would exceed line budget → flush current step first ──
+        if step_lines + lines > line_budget:
             steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, line_budget))
             start = steps[-1]["end_commit"]
             step_commits = []
@@ -195,8 +196,8 @@ def run_plan(
         line_budget: Max source lines per step. Reads TA_LINE_BUDGET env var
                      if omitted, falls back to LINE_BUDGET (1000).
 
-    Commit-count budget is derived from line_budget via commit_count_budget(),
-    which can be tuned with TA_COMMIT_BUDGET env var (default base: 5).
+    Steps are determined solely by the line budget — there is no
+    commit-count limit. All commits between base and target are included.
 
     Returns:
         Plan dict with keys: base_commit, target_commit, total_commits, steps.
@@ -205,28 +206,25 @@ def run_plan(
         line_budget = int(os.getenv("TA_LINE_BUDGET", str(LINE_BUDGET)))
 
     commits = _list_commits(triton_path, base_commit, target_commit)
-    ccb = commit_count_budget(line_budget)
 
     print(f"[plan] Scanning {len(commits)} upstream commits "
           f"({base_commit[:8]}..{target_commit[:8]})")
-    print(f"[plan] Line budget: {line_budget}, commit-count budget: {ccb} "
-          f"(base={os.getenv('TA_COMMIT_BUDGET', str(BASE_COMMIT_COUNT_BUDGET))})")
+    print(f"[plan] Line budget: {line_budget} (no commit-count limit)")
 
     # Count changed source lines per commit
     lines_per_commit: dict[str, int] = {}
-    eligible_count = 0
+    source_touching_count = 0
     for i, c in enumerate(commits):
         lines = _source_lines_for_commit(triton_path, c["sha"])
         lines_per_commit[c["sha"]] = lines
         if lines > 0:
-            eligible_count += 1
+            source_touching_count += 1
         if (i + 1) % 50 == 0:
             print(f"[plan]   ... scanned {i + 1}/{len(commits)} commits")
 
-    skipped = len(commits) - eligible_count
-    if skipped:
-        print(f"[plan] Skipped {skipped} commits that don't touch source dirs "
-              f"({', '.join(SOURCE_DIRS)})")
+    if source_touching_count < len(commits):
+        print(f"[plan] {len(commits) - source_touching_count} commits touch zero "
+              f"source lines — included in steps with 0 line contribution")
 
     steps = _plan_steps(commits, lines_per_commit, base_commit, line_budget)
     _enrich_steps_with_diff(triton_path, steps)
@@ -235,8 +233,7 @@ def run_plan(
         "base_commit": base_commit,
         "target_commit": target_commit,
         "line_budget": line_budget,
-        "commit_count_budget": commit_count_budget(line_budget),
-        "total_source_commits": eligible_count,
+        "total_source_commits": source_touching_count,
         "total_commits": sum(s["commit_count"] for s in steps),
         "total_steps": len(steps),
         "steps": steps,
