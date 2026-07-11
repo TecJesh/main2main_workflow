@@ -387,19 +387,38 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     def _setup_git_auth_for_push(self, repo: Path) -> None:
         """Configure git authentication for pushing to GitHub.
 
-        Mirrors the logic in push_to_github._ensure_gh_auth():
-        1. Run 'gh auth setup-git' to configure the git credential helper.
-        2. When GH_TOKEN is set, rewrite the origin URL to embed the token
-           so git push works even if the credential helper misbehaves.
+        1. Login gh CLI explicitly against github.com (needed when git
+           remotes point to a proxy host that gh doesn't recognize).
+        2. Run 'gh auth setup-git' to configure the git credential helper.
+        3. Rewrite the origin URL to embed the token so git push works
+           even through url.insteadOf proxy rewriting.
         """
         gh_token = os.getenv("GH_TOKEN", "")
         if gh_token:
             print_info("GH_TOKEN set — configuring git credential helper")
-            subprocess.run(
-                ["gh", "auth", "setup-git"],
-                check=True, capture_output=True, text=True,
+
+            # Explicit gh login against github.com — essential when the
+            # git remote points to a proxy host (gh needs to know about
+            # github.com independently of git remotes).
+            result = subprocess.run(
+                ["gh", "auth", "login", "--with-token", "--hostname", "github.com"],
+                input=gh_token + "\n", text=True, capture_output=True,
             )
-            # Rewrite origin URL to embed token
+            if result.returncode == 0:
+                print_info("gh auth login --with-token: success")
+            else:
+                print_warn(f"gh auth login stderr: {result.stderr.strip()}")
+
+            result = subprocess.run(
+                ["gh", "auth", "setup-git", "--hostname", "github.com"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print_info("gh auth setup-git: success")
+            else:
+                print_warn(f"gh auth setup-git skipped "
+                           f"(exit {result.returncode}): {result.stderr.strip()}")
+            # Rewrite origin URL to embed token (for git push through proxy)
             try:
                 origin_url = run_git(repo, "remote", "get-url", "origin").strip()
                 if origin_url.startswith("https://"):

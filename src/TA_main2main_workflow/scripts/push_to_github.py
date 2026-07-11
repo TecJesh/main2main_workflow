@@ -45,19 +45,17 @@ def _ensure_gh_auth(repo: Path) -> None:
 
     When GH_TOKEN is set (PAT in CI), gh and git use it directly —
     no explicit login needed.  Otherwise fall back to interactive auth.
+
+    IMPORTANT: when the runner uses a git proxy (url.insteadOf), the origin
+    URL may point to a non-GitHub host (e.g. gh-proxy.test.osinfra.cn).
+    We use TWO separate auth paths to handle this:
+      1. gh auth login --with-token → tells gh CLI about github.com directly
+         (does NOT look at git remotes — essential for gh pr create)
+      2. Embed token in origin URL → ensures git push works through the proxy
+         (gh auth setup-git alone may not work with url.insteadOf rewriting)
     """
     gh_token = os.getenv("GH_TOKEN", "")
-    if gh_token:
-        # Verify the token works and show which user it belongs to
-        print("[push] Using GH_TOKEN from environment (no login needed)")
-        result = subprocess.run(
-            ["gh", "auth", "status"],
-            capture_output=True, text=True,
-        )
-        print(f"[push] gh auth status: {result.stdout.strip()}")
-        if result.returncode != 0:
-            print(f"[push] gh auth status stderr: {result.stderr.strip()}")
-    else:
+    if not gh_token:
         try:
             subprocess.run(
                 ["gh", "auth", "status"],
@@ -71,31 +69,65 @@ def _ensure_gh_auth(repo: Path) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+        subprocess.run(
+            ["gh", "auth", "setup-git"],
+            check=True, capture_output=True, text=True,
+        )
+        print("[push] Git credential helper configured (via gh auth setup-git).")
+        return
 
-    subprocess.run(
-        ["gh", "auth", "setup-git"],
-        check=True, capture_output=True, text=True,
+    # ── GH_TOKEN is set ──
+    print("[push] Using GH_TOKEN from environment")
+
+    # Step 1: Explicitly login gh CLI against github.com.
+    # This is essential when the git remote points to a proxy host —
+    # gh needs to know about github.com independently of git remotes.
+    result = subprocess.run(
+        ["gh", "auth", "login", "--with-token", "--hostname", "github.com"],
+        input=gh_token + "\n", text=True, capture_output=True,
     )
-    print("[push] Git credential helper configured (via gh auth setup-git).")
+    if result.returncode == 0:
+        print("[push] gh auth login --with-token: success")
+    else:
+        print(f"[push] gh auth login stderr: {result.stderr.strip()}")
 
-    # Belt-and-suspenders: when GH_TOKEN is set, also embed it in the origin
-    # URL so git push works even if the credential helper misbehaves.
-    if gh_token:
-        try:
-            origin_url = run_git(repo, "remote", "get-url", "origin").strip()
-            # Only rewrite https URLs (not ssh)
-            if origin_url.startswith("https://"):
-                # Extract host + path, strip existing credentials
-                clean_url = origin_url.replace("https://", "", 1)
-                if "@" in clean_url:
-                    clean_url = clean_url.split("@", 1)[1]
-                new_url = f"https://x-access-token:{gh_token}@{clean_url}"
-                run_git(repo, "remote", "set-url", "origin", new_url)
-                # Mask token in log
-                safe = f"https://x-access-token:***@{clean_url}"
-                print(f"[push] origin URL rewritten with token: {safe}")
-        except Exception as exc:
-            print(f"[push] Note: could not rewrite origin URL: {exc}")
+    # Step 2: Verify the token works
+    result = subprocess.run(
+        ["gh", "auth", "status", "--hostname", "github.com"],
+        capture_output=True, text=True,
+    )
+    print(f"[push] gh auth status: {result.stdout.strip()}")
+    if result.returncode != 0:
+        print(f"[push] gh auth status stderr: {result.stderr.strip()}")
+
+    # Step 3: Configure git credential helper (best-effort).
+    # This may fail when the git remote points to a proxy host that gh
+    # doesn't recognize — but it's non-essential because Step 4 embeds
+    # the token directly in the origin URL.
+    result = subprocess.run(
+        ["gh", "auth", "setup-git", "--hostname", "github.com"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print("[push] Git credential helper configured (via gh auth setup-git).")
+    else:
+        print(f"[push] gh auth setup-git skipped "
+              f"(exit {result.returncode}): {result.stderr.strip()}")
+
+    # Step 4: Embed token in origin URL so git push works through the proxy.
+    # (gh auth setup-git may not help when url.insteadOf rewrites the host.)
+    try:
+        origin_url = run_git(repo, "remote", "get-url", "origin").strip()
+        if origin_url.startswith("https://"):
+            clean_url = origin_url.replace("https://", "", 1)
+            if "@" in clean_url:
+                clean_url = clean_url.split("@", 1)[1]
+            new_url = f"https://x-access-token:{gh_token}@{clean_url}"
+            run_git(repo, "remote", "set-url", "origin", new_url)
+            safe = f"https://x-access-token:***@{clean_url}"
+            print(f"[push] origin URL rewritten with token: {safe}")
+    except Exception as exc:
+        print(f"[push] Note: could not rewrite origin URL: {exc}")
 
 
 def _run_pre_commit_and_amend(repo: Path) -> bool:
