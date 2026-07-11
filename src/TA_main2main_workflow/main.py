@@ -31,9 +31,11 @@ Environment variables:
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 from TA_main2main_workflow.flow import TA_Main2MainFlow
+from TA_main2main_workflow.utils import UpgradeFailed
 
 
 def _print_startup_banner() -> None:
@@ -59,6 +61,23 @@ def _print_startup_banner() -> None:
         print("  ⚠  AI will NOT be called to resolve conflicts or fix failures!")
         print("  ⚠  You must resolve conflicts and fix test failures manually.")
         print()
+
+
+def _is_failed(result) -> bool:
+    """Check whether a kickoff result indicates workflow failure.
+
+    Handles both plain string returns (merge/fix modes) and CrewAI
+    CrewOutput objects (full mode).
+    """
+    if result is None:
+        return False
+    if isinstance(result, str):
+        return result == UpgradeFailed
+    # CrewAI CrewOutput / object with raw attribute
+    if hasattr(result, 'raw'):
+        return str(result.raw) == UpgradeFailed
+    # Last resort: string representation
+    return str(result) == UpgradeFailed
 
 
 def kickoff():
@@ -140,7 +159,23 @@ def kickoff():
         inputs["num_procs"] = args.num_procs
 
     flow = TA_Main2MainFlow()
-    flow.kickoff(inputs=inputs if inputs else None)
+    try:
+        result = flow.kickoff(inputs=inputs if inputs else None)
+    except Exception as exc:
+        print(f"\n{'=' * 60}")
+        print(f"  WORKFLOW CRASHED: {exc}")
+        print(f"{'=' * 60}")
+        sys.exit(1)
+
+    if _is_failed(result):
+        print(f"\n{'=' * 60}")
+        print(f"  WORKFLOW FAILED — exiting with code 1")
+        print(f"{'=' * 60}")
+        sys.exit(1)
+
+    print(f"\n{'=' * 60}")
+    print(f"  WORKFLOW COMPLETED SUCCESSFULLY")
+    print(f"{'=' * 60}")
 
 
 def plot():
