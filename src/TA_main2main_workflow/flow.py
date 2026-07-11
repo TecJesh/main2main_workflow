@@ -1629,6 +1629,24 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         except Exception as e:
             print_warn(f"Could not generate final patch: {e}")
 
+        # ── Backup work branch code ──
+        # Create a git archive of the work branch so the final code state is
+        # preserved as a CI artifact. Uses git archive (tracked files only,
+        # no history) to keep the archive size manageable.
+        try:
+            archive_name = f"work-branch-code.tar.gz"
+            archive_path = WORKSPACE_DIR / archive_name
+            run_git(
+                ascend_path, "archive",
+                "--format=tar.gz",
+                "-o", str(archive_path),
+                self.state.work_branch,
+            )
+            archive_size_mb = archive_path.stat().st_size / (1024 * 1024)
+            print_info(f"Work branch code backup: {archive_path} ({archive_size_mb:.1f} MB)")
+        except Exception as e:
+            print_warn(f"Could not create work branch code backup: {e}")
+
         self.state.summary_rows.append(
             ("Finalize", "PASS", f"{self.state.total_steps} step(s) completed")
         )
