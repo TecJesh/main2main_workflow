@@ -397,6 +397,10 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         if gh_token:
             print_info("GH_TOKEN set — configuring git credential helper")
 
+            # Set GH_HOST so all gh commands use github.com regardless of
+            # what git remotes point to (essential when url.insteadOf rewrites origin).
+            os.environ["GH_HOST"] = "github.com"
+
             # Explicit gh login against github.com — essential when the
             # git remote points to a proxy host (gh needs to know about
             # github.com independently of git remotes).
