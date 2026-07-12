@@ -165,6 +165,9 @@ of issues may arise:
   {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
       — BC pipeline, Op/IR structure changes, AscendNPU-IR submodule updates
       — USE FOR: IR / bytecode compatibility issues (conflict or fix mode)
+  {reference_dir}/05-ir-patch-generation-guide.md
+      — direct OP patch strategy (TA-side only), patch format, OP change analysis
+      — USE FOR: generating LLVM backward-compatible OP patches (ir_generate_patch mode)
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -199,6 +202,178 @@ of issues may arise:
     unconditionally — do not preserve the triton-ascend side.
   - When unsure about an upstream change's impact, search the triton-ascend
     codebase for references to the changed symbol/file
+
+── ir_analyze_ops mode ────────────────────────────────────────────────
+
+  Trigger: {mode} is "ir_analyze_ops" (post-merge OP usage analysis).
+
+  Workflow:
+    1. Scan the Ascend backend directories for MLIR OP usage:
+       - `{ascend_path}/third_party/ascend/lib/`
+       - `{ascend_path}/lib/Target/Ascend/`
+    2. For each OP, record:
+       - Fully qualified name (e.g., `triton::LoadOp`, `arith::AddIOp`)
+       - Source file and line number
+       - Usage type: create / match / transform
+       - Dialect it belongs to
+       - Its `assemblyFormat` string (if present)
+    3. Output structured JSON to `{step_dir}/ops_report.json`:
+       {{
+         "ops": [
+           {{
+             "name": "ascend::UnstructuredLoadOp",
+             "file": "lib/Target/Ascend/.../Ops.cpp",
+             "line": 42,
+             "usage": ["create", "match"],
+             "dialect": "ascend",
+             "assembly_format": "...",
+             "td_file": "mlir/include/mlir/Dialect/Ascend/IR/AscendOps.td"
+           }}
+         ],
+         "total_ops": 42,
+         "dialects": ["triton", "ascend", "arith", "scf", "linalg"]
+       }}
+
+  Rules: DO NOT modify source code. Output ONLY the structured JSON report.
+
+── ir_analyze_changes mode ─────────────────────────────────────────────
+
+  Trigger: {mode} is "ir_analyze_changes" (OP delta analysis between LLVM versions).
+
+  Context:
+    The LLVM version changed from the old `cmake/llvm-hash.txt` (before merge)
+    to the new `cmake/llvm-hash.txt` (after merge). The OPs used by the Ascend
+    backend must be checked for LLVM version compatibility.
+
+  Workflow:
+    1. Read `{step_dir}/ops_report.json` for the list of OPs to check.
+    2. For each OP, examine its TableGen (.td) definition in the llvm-project
+       at BOTH the old and new LLVM versions.
+       The llvm-project repo is at: {llvm_project_path}
+       Old hash (before merge): from {ascend_path}/cmake/llvm-hash.txt (previous)
+       New hash (after merge): from {ascend_path}/cmake/llvm-hash.txt (current)
+    3. Record deltas per OP:
+       - Name change (old_name → new_name)
+       - assemblyFormat change (does the old format still parse?)
+       - create() / builder parameter signature change
+       - Attributes / getters renamed (e.g., getLhs → getA)
+       - Traits added/removed
+       - Custom printer/parser output format change
+    4. Output to `{step_dir}/changes_report.json`:
+       {{
+         "source_llvm_hash": "abc123",
+         "target_llvm_hash": "def456",
+         "changes": [
+           {{
+             "op_name": "arith::AddIOp",
+             "change_type": "assemblyFormat_changed",
+             "old_format": "...",
+             "new_format": "...",
+             "needs_patch": true,
+             "reason": "new LLVM generates IR in format old NPU-IR cannot parse"
+           }}
+         ],
+         "summary": {{
+           "total_ops_analyzed": 42,
+           "ops_needing_patch": 5,
+           "renamed_ops": 1,
+           "signature_changes": 3
+         }}
+       }}
+
+  Reference:
+    {reference_dir}/02-llvm-version-adaptation-and-compile-fixes.md
+    {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
+    {reference_dir}/05-ir-patch-generation-guide.md
+
+  Rules: DO NOT modify source code. Output ONLY the structured JSON report.
+
+── ir_generate_patch mode ──────────────────────────────────────────────
+
+  Trigger: {mode} is "ir_generate_patch" (generate TA-side LLVM OP patches).
+
+  Core strategy: patch TA-side LLVM so it generates IR compatible with the
+  UNMODIFIED AscendNPU-IR. NPU-IR is NOT touched — we cannot patch or
+  recompile it from the TA side.
+
+  Workflow:
+    1. Read `{step_dir}/changes_report.json` for ALL OPs needing patches.
+    2. Read the patch template:
+       `{reference_dir}/ir_compatibility_patch_example.patch`
+       This demonstrates the direct OP patching approach (NOT BC/bytecode).
+    3. Generate a SINGLE complete `.patch` file that covers ALL OPs flagged
+       with `needs_patch: true` in one unified patch. For each OP:
+       - Locate its .td / .cpp file in `{llvm_project_path}/mlir/`
+       - Apply the appropriate strategy by change type:
+         — OP renamed: add a backward-compatible alias (old name → new name)
+         — assemblyFormat changed: modify to also accept/emit old format
+         — create() params changed: add overload/defaults for old signature
+         — Pass option renamed: add old option name as alias
+    4. Write the single patch to `{step_dir}/generated_patches/ir_compat.patch`:
+       - Follow `git format-patch` style with proper headers
+       - Apply cleanly to `{llvm_project_path}` as one atomic change
+       - Cover every OP in changes_report — do NOT leave any out
+
+  Completeness requirement: the generated patch MUST be as complete as
+  possible. Missing even one OP will cause the outer loop to retry
+  (costly: LLVM rebuild takes ~2 hours). Review changes_report
+  thoroughly before writing the patch — every `needs_patch: true` OP
+  must have a corresponding fix in the patch.
+
+  Reference:
+    {reference_dir}/05-ir-patch-generation-guide.md
+    {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
+    Template: {reference_dir}/ir_compatibility_patch_example.patch (single unified patch)
+
+── ir_diagnose mode ────────────────────────────────────────────────────
+
+  Trigger: {mode} is "ir_diagnose" (classify test failures as IR vs code).
+
+  Workflow:
+    1. Read test failure logs from {error_logs}.
+    2. For each distinct failure, classify as:
+       a. "ir_compatibility" — LLVM/MLIR version mismatch:
+          - "unexpected op" / "custom op not registered" (OP renamed upstream)
+          - Missing dialect registration
+          - "attribute not found" for renamed properties
+          - assemblyFormat parse error (new IR format, old parser)
+          - triton-mlir-opt / bishengir-opt IR round-trip failures
+       b. "code_adaptation" — upstream API/signature change:
+          - Undefined symbols / missing includes
+          - Function signature mismatch
+          - Python ImportError / AttributeError / TypeError
+          - pytest assertion changes due to behavior changes
+       c. "environment" — non-code issue:
+          - Timeout, OOM, resource exhaustion
+          - Network failure, file not found (transient)
+    3. Output to `{step_dir}/ir_diagnosis.json`:
+       {{
+         "failures": [
+           {{
+             "id": "test_load_other",
+             "python_version": "3.10",
+             "error_summary": "...",
+             "classification": "ir_compatibility",
+             "affected_op": "triton::LoadOp",
+             "rationale": "..."
+           }}
+         ],
+         "summary": {{
+           "total_failures": 5,
+           "ir_issues": 2,
+           "code_issues": 2,
+           "environment_issues": 1,
+           "has_ir_issues": true
+         }}
+       }}
+
+  Reference:
+    {reference_dir}/03-unit-test-failure-diagnosis-and-fixes.md
+    {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
+    {reference_dir}/diagnosis-guide.md
+    {reference_dir}/error-pattern-examples.md
+
+  Rules: DO NOT modify source code. Output ONLY the structured JSON diagnosis.
 
 ━━━ OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
