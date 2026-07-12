@@ -270,3 +270,125 @@ def get_unstaged_diff(repo: Path) -> str:
 
 def get_staged_diff(repo: Path) -> str:
     return run_git(repo, "diff", "--cached")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Submodule helpers — AscendNPU-IR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_ASCENDNPU_IR_SUBMODULE = "third_party/ascend/AscendNPU-IR"
+_ASCENDNPU_IR_REMOTE = "https://github.com/TecJesh/AscendNPU-IR.git"
+_ASCENDNPU_IR_REMOTE_NAME = "origin"
+
+
+def _submodule_path(repo: Path) -> Path:
+    """Resolve the AscendNPU-IR submodule path."""
+    return repo / _ASCENDNPU_IR_SUBMODULE
+
+
+def submodule_has_changes(repo: Path) -> bool:
+    """Check if the AscendNPU-IR submodule has uncommitted changes."""
+    sm = _submodule_path(repo)
+    if not sm.exists():
+        return False
+    proc = run_git_no_check(sm, "status", "--porcelain")
+    return bool(proc.stdout.strip())
+
+
+def commit_submodule(repo: Path, commit_msg: str) -> bool:
+    """Commit uncommitted changes inside the AscendNPU-IR submodule.
+
+    Stages all tracked changes with 'git add -u' and commits them.
+    Returns True if a new commit was created.
+    """
+    sm = _submodule_path(repo)
+    if not sm.exists():
+        print_info("[submodule] AscendNPU-IR submodule not found — skipping")
+        return False
+
+    if not submodule_has_changes(repo):
+        print_info("[submodule] No uncommitted changes in AscendNPU-IR")
+        return False
+
+    print_section("Commit AscendNPU-IR Submodule")
+    try:
+        run_git(sm, "add", "-u")
+        run_git(sm, "commit", "-s", "-m", commit_msg)
+        new_head = run_git(sm, "rev-parse", "HEAD").strip()
+        print_status(True, f"Committed AscendNPU-IR: {new_head[:12]}")
+        return True
+    except Exception as e:
+        print_warn(f"Could not commit AscendNPU-IR submodule: {e}")
+        return False
+
+
+def push_submodule(
+    repo: Path,
+    branch: str,
+    remote: str = _ASCENDNPU_IR_REMOTE,
+    remote_name: str = _ASCENDNPU_IR_REMOTE_NAME,
+    force: bool = False,
+) -> bool:
+    """Push the AscendNPU-IR submodule branch to its remote.
+
+    Sets up the remote if it doesn't exist, then pushes the given branch.
+    By default uses force-with-lease for safety; pass force=True for --force.
+    Returns True on success.
+    """
+    sm = _submodule_path(repo)
+    if not sm.exists():
+        print_warn("[submodule] AscendNPU-IR submodule not found — cannot push")
+        return False
+
+    print_section("Push AscendNPU-IR Submodule")
+
+    # ── Ensure remote is set up ──
+    try:
+        existing = run_git(sm, "remote", "get-url", remote_name).strip()
+        if existing != remote:
+            print_info(f"[submodule] Updating remote '{remote_name}': {existing} → {remote}")
+            run_git(sm, "remote", "set-url", remote_name, remote)
+    except Exception:
+        print_info(f"[submodule] Adding remote '{remote_name}' → {remote}")
+        run_git(sm, "remote", "add", remote_name, remote)
+
+    # ── Ensure we are on the target branch ──
+    current_branch = run_git(sm, "branch", "--show-current").strip()
+    if current_branch != branch:
+        print_info(f"[submodule] Checking out branch '{branch}' (was '{current_branch}')")
+        # Try to create or switch to the branch
+        proc = run_git_no_check(sm, "checkout", "-B", branch)
+        if proc.returncode != 0:
+            print_error(f"[submodule] Failed to checkout branch '{branch}': {proc.stderr.strip()}")
+            return False
+
+    # ── Configure auth ──
+    gh_token = os.getenv("GH_TOKEN", "")
+    if gh_token:
+        try:
+            current_url = run_git(sm, "remote", "get-url", remote_name).strip()
+            if current_url.startswith("https://") and "x-access-token" not in current_url:
+                clean_url = current_url.replace("https://", "", 1)
+                if "@" in clean_url:
+                    clean_url = clean_url.split("@", 1)[1]
+                new_url = f"https://x-access-token:{gh_token}@{clean_url}"
+                run_git(sm, "remote", "set-url", remote_name, new_url)
+                safe = f"https://x-access-token:***@{clean_url}"
+                print_info(f"[submodule] Remote URL rewritten: {safe}")
+        except Exception as exc:
+            print_warn(f"[submodule] Could not configure remote auth: {exc}")
+
+    # ── Push ──
+    try:
+        push_args = ["push"]
+        if force:
+            push_args.append("--force")
+        else:
+            push_args.append("--force-with-lease")
+        push_args.extend([remote_name, branch])
+        run_git(sm, *push_args)
+        print_status(True, f"Pushed AscendNPU-IR branch '{branch}' to {remote_name}")
+        return True
+    except Exception as e:
+        print_error(f"[submodule] Failed to push AscendNPU-IR: {e}")
+        return False
