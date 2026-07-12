@@ -55,6 +55,16 @@ EACH_STEP_TARGET_PATCH_FILE = "step_target.patch"
 PRE_CI_CHECK_FILE = "pre_ci_check.json"
 CODE_STRUCTURE_GUIDE_FILE = "code-structure-guide.md"
 
+# ── IR Analysis & Patch paths ────────────────────────────────────────────────
+IR_ANALYSIS_DIR = "ir-analysis"
+IR_PATCHES_DIR = "ir-patches"
+IR_OPS_REPORT_FILE = "ops_report.json"
+IR_CHANGES_REPORT_FILE = "changes_report.json"
+IR_DIAGNOSIS_FILE = "ir_diagnosis.json"
+
+# ── IR Patch loop constants ──────────────────────────────────────────────────
+IR_MAX_ITERATIONS = 3
+
 # ── Timing tracker ───────────────────────────────────────────────────────────
 _phase_timers: dict[str, float] = {}
 _flow_start_time: float = 0.0

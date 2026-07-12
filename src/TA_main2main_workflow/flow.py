@@ -44,6 +44,8 @@ from TA_main2main_workflow.utils import (
     TEST_RESULT_FILE, UpgradeCompleted, UpgradeFailed,
     WORKSPACE_DIR, has_merge_conflicts, run_git, get_conflict_files,
     commit_submodule, push_submodule, submodule_has_changes,
+    IR_ANALYSIS_DIR, IR_PATCHES_DIR, IR_OPS_REPORT_FILE,
+    IR_CHANGES_REPORT_FILE, IR_DIAGNOSIS_FILE, IR_MAX_ITERATIONS,
     print_header, print_section, print_step, print_status, print_info,
     print_warn, print_error, print_key_value,
     print_flow_progress, print_conflict_list, print_summary_table,
@@ -98,6 +100,22 @@ class TA_Main2MainState(BaseModel):
     step_start_ascend_head: str = ""  # ascend HEAD before current step
     progressive_merge: bool = True
     step_pr_descriptions: list = []  # accumulated step descriptions for PR body
+
+    # ── IR Patch Loop State ──
+    ir_analysis_done: bool = False
+    ir_ops_report: dict = {}
+    ir_changes_report: dict = {}
+    ir_patches: list = []
+    ir_patch_iteration: int = 0
+    ir_max_iterations: int = 3
+    ir_issues_found: int = 0
+    ir_fix_count: int = 0
+    llvm_hash_changed: bool = False
+
+    # ── Python 3.11 Test State ──
+    python311_passed: bool = False
+    test_failures_by_python: dict = {}
+    ir_loop_details: list = []
 
     summary_rows: list = []
 
@@ -965,6 +983,13 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_status(True, f"Step {step_id} completed successfully "
                          f"({self.state.current_step}/{self.state.total_steps})")
 
+        # ── Phase 3+4: IR compatibility patches + dual Python test ──
+        ir_ok = self._do_ir_patch_loop()
+        if not ir_ok:
+            print_error("IR patch loop did not converge — sync failed")
+            self.state.final_status = UpgradeFailed
+            return UpgradeFailed
+
         # ── Finalize: generate cumulative patch & summary ──
         self._do_finalize()
         self.state.final_status = UpgradeCompleted
@@ -1418,7 +1443,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_warn(f"Could not commit fixes: {e}")
             self.state.summary_rows.append(("Commit fixes", "WARN", str(e)[:40]))
 
-    def _do_build(self, ascend_path: Path, clean: bool = False) -> bool:
+    def _do_build(self, ascend_path: Path, clean: bool = False,
+                  python_exe: str = "python3") -> bool:
         start_timer("build")
         print_section("Build Triton-Ascend")
 
@@ -1434,6 +1460,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             llvm_prefix=self.state.llvm_prefix,
             conda_env=self.state.conda_env,
             clean_build=clean,
+            python_exe=python_exe,
         )
         self.state.build_passed = build_result["all_passed"]
         stop_timer("build")
@@ -1447,7 +1474,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         self.state.summary_rows.append(("Build", "PASS", ""))
         return True
 
-    def _do_test(self, ascend_path: Path) -> bool | None:
+    def _do_test(self, ascend_path: Path, python_exe: str = "") -> bool | None:
         start_timer("test")
         print_section("Run Tests")
 
@@ -1459,8 +1486,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             return None
 
         test_dir_path = ascend_path / self.state.test_dir
+        py_label = python_exe or os.getenv("TA_PYTHON", "python3")
         print_info(f"Test directory: {test_dir_path}")
-        print_info(f"Python: {os.getenv('TA_PYTHON', 'python3')}, procs: {self.state.num_procs}")
+        print_info(f"Python: {py_label}, procs: {self.state.num_procs}")
 
         try:
             test_result = run_tests(
@@ -1468,6 +1496,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 test_dir=self.state.test_dir,
                 num_procs=self.state.num_procs,
                 conda_env=self.state.conda_env,
+                python_exe=python_exe,
             )
         except Exception as exc:
             print_error(f"run_tests raised exception: {exc}")
@@ -1647,6 +1676,500 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 (f"Commit {step_id}", "WARN", str(e)[:40])
             )
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Phase 3+4: IR Compatibility Patch Loop
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _llvm_hash_did_change(self) -> bool:
+        """Check if cmake/llvm-hash.txt changed between pre-merge and post-merge."""
+        ascend_path = Path(self.state.triton_ascend_path)
+        try:
+            current_hash = (ascend_path / "cmake" / "llvm-hash.txt") \
+                .read_text(encoding="utf-8").strip()
+        except Exception:
+            return False
+        # Compare with the hash from before the merge (saved in ascend_head)
+        try:
+            old_hash = run_git(
+                ascend_path, "show",
+                f"{self.state.ascend_head}:cmake/llvm-hash.txt",
+            ).strip()
+        except Exception:
+            return True  # can't determine old hash → assume changed
+        changed = old_hash != current_hash
+        if changed:
+            print_info(f"LLVM hash changed: {old_hash[:12]} → {current_hash[:12]}")
+        else:
+            print_info("LLVM hash unchanged — skipping IR patch phase")
+        return changed
+
+    def _do_ir_patch_loop(self) -> bool:
+        """Phase 3+4 outer loop: IR analysis → patch → rebuild → test → fix.
+
+        Runs AFTER all progressive merge steps have completed. If
+        cmake/llvm-hash.txt didn't change, skips directly to Phase 4
+        (dual Python test only).
+
+        Outer loop (max IR_MAX_ITERATIONS rounds):
+          [3.1-3.3] AI: analyze OPs, analyze changes, generate patches
+          [3.4-3.5] Apply patches to LLVM + rebuild
+          [4.1-4.2] Build TA + Python 3.11 pytest
+          [4.3]     If failures, AI classifies (IR vs code)
+                    → IR issues: loop back to modify patches
+                    → Code issues: AI fix inner loop
+        Returns True if all tests pass, False on exhaustion.
+        """
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        # ── Skip IR patch phase via env var ──
+        if os.getenv("SKIP_IR_PATCH", "false").lower() == "true":
+            print_header("Phase 4: Python 3.11 Test (SKIP_IR_PATCH=true)")
+            self.state.summary_rows.append(
+                ("IR Patch", "SKIP", "SKIP_IR_PATCH set"))
+            return self._do_python311_test()
+
+        # ── Skip if LLVM hash unchanged ──
+        self.state.llvm_hash_changed = self._llvm_hash_did_change()
+        if not self.state.llvm_hash_changed:
+            print_header("Phase 4: Python 3.11 Test (LLVM unchanged)")
+            return self._do_python311_test()
+
+        print_header("Phase 3: IR Compatibility Patch Auto-Generation")
+
+        for iteration in range(self.state.ir_max_iterations):
+            self.state.ir_patch_iteration = iteration
+            print_header(
+                f"IR Patch Loop — Iteration {iteration + 1}/"
+                f"{self.state.ir_max_iterations}"
+            )
+
+            # ── [3.1 + 3.2] Analysis (only on first iteration) ──
+            if iteration == 0:
+                if not self._do_ir_op_analysis():
+                    return False
+                if not self._do_ir_change_analysis():
+                    return False
+            else:
+                # On retry, re-analyze changes (patches from previous
+                # iteration may have altered the picture)
+                print_info("Re-analyzing OP changes after patch retry...")
+                if not self._do_ir_change_analysis():
+                    return False
+
+            # ── [3.3] Generate patches ──
+            if not self._do_ir_generate_patches():
+                return False
+
+            # ── [3.4 + 3.5] Apply patches + rebuild LLVM ──
+            if not self._do_ir_apply_patches_and_rebuild():
+                return False
+
+            # ── [4.1] Build TA ──
+            if not self._do_build(ascend_path, clean=True):
+                if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
+                    return False
+                self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
+                self.state.build_fix_count += 1
+                print_warn("Build failed after IR patches — will attempt AI fix")
+                self._do_ai_fix(ascend_path, WORKSPACE_DIR, 1)
+                continue
+
+            # ── [4.2] Python 3.11 test ──
+            if self._do_python311_test():
+                print_status(True, "All tests pass on Python 3.11!")
+                self._commit_fixes(ascend_path, WORKSPACE_DIR)
+                self.state.ir_loop_details.append({
+                    "iteration": iteration + 1,
+                    "result": "ALL_PASS",
+                })
+                return True
+
+            # ── [4.3] Diagnose failures ──
+            has_ir_issues = self._do_ir_diagnose_failures()
+            if has_ir_issues:
+                self.state.ir_issues_found += 1
+                print_warn(
+                    f"IR compatibility issues found in iteration "
+                    f"{iteration + 1} — retrying with modified patches"
+                )
+                self.state.ir_loop_details.append({
+                    "iteration": iteration + 1,
+                    "result": "IR_RETRY",
+                    "ir_issues": self.state.ir_issues_found,
+                })
+                continue
+
+            # ── [4.4] Non-IR issues → AI fix inner loop ──
+            print_info("Non-IR failures detected — entering AI fix loop")
+            for fix_attempt in range(1, self.state.max_retries + 1):
+                print_header(f"AI Fix Attempt {fix_attempt}/{self.state.max_retries}")
+                self.state.retry_count = fix_attempt
+                self._do_ai_fix(ascend_path, WORKSPACE_DIR, fix_attempt)
+                if not self._do_build(ascend_path, clean=False):
+                    self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
+                    continue
+                if self._do_python311_test():
+                    self._commit_fixes(ascend_path, WORKSPACE_DIR)
+                    self.state.ir_loop_details.append({
+                        "iteration": iteration + 1,
+                        "result": "PASS_AFTER_FIX",
+                        "fix_attempts": fix_attempt,
+                    })
+                    return True
+
+            print_error(f"All {self.state.max_retries} fix attempts exhausted "
+                        f"in iteration {iteration + 1}")
+            self.state.ir_loop_details.append({
+                "iteration": iteration + 1,
+                "result": "FIX_EXHAUSTED",
+            })
+
+        print_error(f"IR patch loop exhausted {self.state.ir_max_iterations} "
+                    f"iterations")
+        return False
+
+    def _do_ir_op_analysis(self) -> bool:
+        """[3.1] AI analyzes which MLIR OPs the Ascend backend uses."""
+        print_header("Phase 3.1: IR OP Analysis")
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
+        ir_dir.mkdir(parents=True, exist_ok=True)
+
+        from TA_main2main_workflow.agent.opencode_adapter import _detect_backend
+        backend = _detect_backend()
+        print_info(f"AI backend: {backend}")
+
+        try:
+            ai_result = run_opencode_adapter({
+                "step_id": "ir-analyze-ops",
+                "previous_step_id": "",
+                "previous_step_summary_path": "",
+                "is_last_step": "true",
+                "step_index": "ir",
+                "step_dir": str(ir_dir),
+                "fix_dir": str(ir_dir),
+                "conflict_dir": "",
+                "ascend_path": str(ascend_path),
+                "triton_path": self.state.triton_path,
+                "reference_dir": _REFERENCE_DIR,
+                "mode": "ir_analyze_ops",
+                "error_logs": "[]",
+                "target_commit": self.state.target_commit,
+                "llvm_project_path": os.getenv(
+                    "LLVM_PROJECT_PATH",
+                    os.path.expanduser("~/llvm-project"),
+                ),
+            })
+            _ = ai_result
+        except Exception as e:
+            print_error(f"IR OP analysis failed: {e}")
+            self.state.summary_rows.append(("IR OP Analysis", "FAIL", str(e)[:60]))
+            return False
+
+        ops_report = ir_dir / IR_OPS_REPORT_FILE
+        if ops_report.exists():
+            try:
+                self.state.ir_ops_report = json.loads(
+                    ops_report.read_text(encoding="utf-8"))
+                print_status(True,
+                    f"OP analysis complete: "
+                    f"{self.state.ir_ops_report.get('total_ops', '?')} OPs, "
+                    f"{len(self.state.ir_ops_report.get('dialects', []))} dialects")
+                self.state.summary_rows.append(
+                    ("IR OP Analysis", "PASS",
+                     f"{self.state.ir_ops_report.get('total_ops', '?')} OPs"))
+                return True
+            except Exception as e:
+                print_warn(f"Could not parse ops report: {e}")
+
+        self.state.summary_rows.append(("IR OP Analysis", "FAIL", "No report"))
+        return False
+
+    def _do_ir_change_analysis(self) -> bool:
+        """[3.2] AI analyzes OP definition changes between LLVM versions."""
+        print_header("Phase 3.2: IR OP Change Analysis")
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
+        ir_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            ai_result = run_opencode_adapter({
+                "step_id": "ir-analyze-changes",
+                "previous_step_id": "ir-analyze-ops",
+                "previous_step_summary_path": str(ir_dir / IR_OPS_REPORT_FILE),
+                "is_last_step": "true",
+                "step_index": "ir",
+                "step_dir": str(ir_dir),
+                "fix_dir": str(ir_dir),
+                "conflict_dir": "",
+                "ascend_path": str(ascend_path),
+                "triton_path": self.state.triton_path,
+                "reference_dir": _REFERENCE_DIR,
+                "mode": "ir_analyze_changes",
+                "error_logs": json.dumps(
+                    [str(ir_dir / IR_OPS_REPORT_FILE)], ensure_ascii=False),
+                "target_commit": self.state.target_commit,
+                "llvm_project_path": os.getenv(
+                    "LLVM_PROJECT_PATH",
+                    os.path.expanduser("~/llvm-project"),
+                ),
+            })
+            _ = ai_result
+        except Exception as e:
+            print_error(f"IR change analysis failed: {e}")
+            self.state.summary_rows.append(
+                ("IR Change Analysis", "FAIL", str(e)[:60]))
+            return False
+
+        changes_report = ir_dir / IR_CHANGES_REPORT_FILE
+        if changes_report.exists():
+            try:
+                self.state.ir_changes_report = json.loads(
+                    changes_report.read_text(encoding="utf-8"))
+                summary = self.state.ir_changes_report.get("summary", {})
+                print_status(True,
+                    f"Change analysis: {summary.get('total_ops_analyzed', '?')} "
+                    f"OPs, {summary.get('ops_needing_patch', '?')} need patch")
+                self.state.summary_rows.append(
+                    ("IR Change Analysis", "PASS",
+                     f"{summary.get('ops_needing_patch', '?')} OPs need patch"))
+                # If no OPs need patching, still return True (Phase 3 is a no-op)
+                return True
+            except Exception as e:
+                print_warn(f"Could not parse changes report: {e}")
+
+        self.state.summary_rows.append(
+            ("IR Change Analysis", "FAIL", "No report"))
+        return False
+
+    def _do_ir_generate_patches(self) -> bool:
+        """[3.3] AI generates LLVM BC compatibility patches."""
+        print_header("Phase 3.3: IR Patch Generation")
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
+        patches_dir = WORKSPACE_DIR / IR_PATCHES_DIR
+        patches_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            ai_result = run_opencode_adapter({
+                "step_id": "ir-generate-patch",
+                "previous_step_id": "ir-analyze-changes",
+                "previous_step_summary_path": str(ir_dir / IR_CHANGES_REPORT_FILE),
+                "is_last_step": "true",
+                "step_index": "ir",
+                "step_dir": str(patches_dir),
+                "fix_dir": str(patches_dir),
+                "conflict_dir": "",
+                "ascend_path": str(ascend_path),
+                "triton_path": self.state.triton_path,
+                "reference_dir": _REFERENCE_DIR,
+                "mode": "ir_generate_patch",
+                "error_logs": json.dumps(
+                    [str(ir_dir / IR_CHANGES_REPORT_FILE)], ensure_ascii=False),
+                "target_commit": self.state.target_commit,
+                "llvm_project_path": os.getenv(
+                    "LLVM_PROJECT_PATH",
+                    os.path.expanduser("~/llvm-project"),
+                ),
+            })
+            _ = ai_result
+        except Exception as e:
+            print_error(f"IR patch generation failed: {e}")
+            self.state.summary_rows.append(
+                ("IR Patch Gen", "FAIL", str(e)[:60]))
+            return False
+
+        patch_file = patches_dir / "ir_compat.patch"
+        if patch_file.exists():
+            print_status(True, "Generated ir_compat.patch")
+            self.state.ir_patches = [str(patch_file)]
+            self.state.summary_rows.append(
+                ("IR Patch Gen", "PASS", "ir_compat.patch"))
+            return True
+
+        # No patch needed — valid if changes_report showed no issues
+        print_info("ir_compat.patch not generated — "
+                   "IR compatibility may already be satisfied")
+        self.state.summary_rows.append(
+            ("IR Patch Gen", "PASS", "No patch needed"))
+        return True
+
+    def _do_ir_apply_patches_and_rebuild(self) -> bool:
+        """[3.4 + 3.5] Apply generated patches to LLVM and rebuild."""
+        print_header("Phase 3.4-3.5: Apply Patches + Rebuild LLVM")
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        patches_dir = WORKSPACE_DIR / IR_PATCHES_DIR
+        llvm_project = Path(os.getenv(
+            "LLVM_PROJECT_PATH",
+            os.path.expanduser("~/llvm-project"),
+        ))
+
+        if not llvm_project.exists():
+            print_error(f"LLVM project not found at {llvm_project}")
+            self.state.summary_rows.append(
+                ("IR Apply+Rebuild", "FAIL", "llvm-project not found"))
+            return False
+
+        # ── [3.4] Apply patch to llvm-project ──
+        # Deterministic: clean → checkout → apply. No AI involved.
+        from TA_main2main_workflow.scripts.build_test import apply_llvm_patches
+
+        # Read the target LLVM hash from triton-ascend
+        llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
+        target_llvm_hash = ""
+        if llvm_hash_file.exists():
+            target_llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+
+        patch_result = apply_llvm_patches(
+            patches_dir, llvm_project, target_hash=target_llvm_hash)
+        if not patch_result["all_ok"]:
+            failed = patch_result["failed"]
+            print_error(f"LLVM patch apply failed: "
+                        f"{failed[0]['error'][:200] if failed else 'unknown'}")
+            self.state.summary_rows.append(
+                ("IR Apply+Rebuild", "FAIL", "patch did not apply cleanly"))
+            return False
+
+        print_status(True, "ir_compat.patch applied to llvm-project")
+
+        # ── [3.5] Rebuild LLVM ──
+        from TA_main2main_workflow.scripts.build_test import \
+            _check_and_rebuild_llvm
+        try:
+            llvm_prefix = _check_and_rebuild_llvm(
+                ascend_path, force_rebuild=True)
+            if llvm_prefix and not self.state.llvm_prefix:
+                self.state.llvm_prefix = llvm_prefix
+            print_status(True, "LLVM rebuild complete")
+            self.state.summary_rows.append(
+                ("LLVM Patch Apply+Rebuild", "PASS", "patch applied, LLVM rebuilt"))
+            return True
+        except Exception as e:
+            print_error(f"LLVM rebuild failed: {e}")
+            self.state.summary_rows.append(
+                ("LLVM Patch Apply+Rebuild", "FAIL", str(e)[:60]))
+            return False
+
+    def _do_python311_test(self) -> bool:
+        """[4.2] Build TA and run pytest with Python 3.11.
+
+        Returns True when all tests pass.
+        """
+        print_header("Phase 4.2: Python 3.11 Test")
+        ascend_path = Path(self.state.triton_ascend_path)
+        py_exe = "python3.11"
+
+        import shutil
+        if not shutil.which(py_exe):
+            print_warn(f"{py_exe} not found on PATH — skipping tests")
+            self.state.python311_passed = False
+            self.state.summary_rows.append(
+                ("Tests py3.11", "SKIP", f"{py_exe} not found"))
+            return False
+
+        print_section(f"Python 3.11 Tests ({py_exe})")
+
+        # Build with Python 3.11
+        if not self._do_build(ascend_path, clean=True, python_exe=py_exe):
+            print_error("Build failed for Python 3.11")
+            self.state.python311_passed = False
+            self.state.summary_rows.append(
+                ("Tests py3.11", "FAIL", "Build failed"))
+            return False
+
+        # Run tests
+        result = self._do_test(ascend_path, python_exe=py_exe)
+        if result is None:
+            passed = True  # SKIP_E2E_TEST
+        else:
+            passed = bool(result)
+
+        self.state.python311_passed = passed
+        if not passed:
+            print_error("Python 3.11 tests FAILED")
+
+        self.state.summary_rows.append(
+            ("Tests py3.11", "PASS" if passed else "FAIL", py_exe))
+        return passed
+
+    def _do_ir_diagnose_failures(self) -> bool:
+        """[4.3] AI classifies test failures: IR compatibility vs code issues.
+
+        Returns True if IR issues are found (triggering outer loop retry).
+        Returns False if failures are all code/environment issues.
+        """
+        print_header("Phase 4.3: IR Failure Diagnosis")
+
+        ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
+        ir_dir.mkdir(parents=True, exist_ok=True)
+
+        # Collect test failure logs from both Python runs
+        error_log_paths: list[str] = []
+        test_log_dir = WORKSPACE_DIR / "test-logs"
+        if test_log_dir.exists():
+            for log_file in sorted(test_log_dir.rglob("*.log")):
+                error_log_paths.append(str(log_file))
+        # Also include test result files
+        test_result = WORKSPACE_DIR / TEST_RESULT_FILE
+        if test_result.exists():
+            error_log_paths.append(str(test_result))
+
+        if not error_log_paths:
+            print_warn("No test failure logs found — assuming code issues")
+            return False
+
+        print_info(f"Analyzing {len(error_log_paths)} log file(s)...")
+
+        try:
+            ai_result = run_opencode_adapter({
+                "step_id": "ir-diagnose",
+                "previous_step_id": "ir-generate-patch",
+                "previous_step_summary_path": str(ir_dir / IR_CHANGES_REPORT_FILE),
+                "is_last_step": "true",
+                "step_index": "ir",
+                "step_dir": str(ir_dir),
+                "fix_dir": str(ir_dir),
+                "conflict_dir": "",
+                "ascend_path": str(Path(self.state.triton_ascend_path)),
+                "triton_path": self.state.triton_path,
+                "reference_dir": _REFERENCE_DIR,
+                "mode": "ir_diagnose",
+                "error_logs": json.dumps(error_log_paths, ensure_ascii=False),
+                "target_commit": self.state.target_commit,
+            })
+            _ = ai_result
+        except Exception as e:
+            print_error(f"IR diagnosis failed: {e}")
+            return False
+
+        diagnosis_path = ir_dir / IR_DIAGNOSIS_FILE
+        if not diagnosis_path.exists():
+            print_warn("No diagnosis report generated")
+            return False
+
+        try:
+            diagnosis = json.loads(
+                diagnosis_path.read_text(encoding="utf-8"))
+            summary = diagnosis.get("summary", {})
+            has_ir = summary.get("has_ir_issues", False)
+            print_key_value("total failures", str(summary.get("total_failures", "?")))
+            print_key_value("IR issues", str(summary.get("ir_issues", "?")))
+            print_key_value("code issues", str(summary.get("code_issues", "?")))
+            print_key_value("env issues", str(summary.get("environment_issues", "?")))
+            self.state.summary_rows.append(
+                ("IR Diagnosis", "PASS",
+                 f"IR={summary.get('ir_issues', '?')} "
+                 f"code={summary.get('code_issues', '?')} "
+                 f"env={summary.get('environment_issues', '?')}"))
+            return bool(has_ir)
+        except Exception as e:
+            print_warn(f"Could not parse diagnosis: {e}")
+            return False
+
     def _do_finalize(self):
         """Generate patch, summary & print final report.
 
@@ -1738,6 +2261,14 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         # ── Print final summary table ──
         print_header("Sync Complete — Success!")
         print_elapsed_total()
+        # Add IR loop metrics if applicable
+        if self.state.llvm_hash_changed:
+            self.state.summary_rows.append(
+                ("IR Loop", "PASS",
+                 f"{len(self.state.ir_loop_details)} iteration(s)"))
+        # Add Python 3.11 result
+        py311_status = "PASS" if self.state.python311_passed else "N/A"
+        self.state.summary_rows.append(("Python 3.11", py311_status, ""))
         self.state.summary_rows.append(("OVERALL", "PASS", f"{self.state.total_steps} step(s) completed"))
         print_summary_table(self.state.summary_rows)
 

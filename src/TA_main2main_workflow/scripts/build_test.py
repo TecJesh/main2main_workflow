@@ -74,13 +74,94 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
     )
 
 
-def _check_and_rebuild_llvm(repo_path: Path) -> str:
+def apply_llvm_patches(patch_dir: Path, llvm_project: Path,
+                      target_hash: str = "") -> dict:
+    """Apply generated LLVM patch to llvm-project after cleaning stale state.
+
+    1. Clean any stale modifications in llvm-project (git checkout -- .)
+    2. Checkout the target LLVM commit
+    3. Apply the single ir_compat.patch with 'git apply'
+
+    This is a deterministic operation — no AI involved.
+    Returns a dict with 'applied', 'failed', 'all_ok'.
+    """
+    patch_file = patch_dir / "ir_compat.patch"
+    if not patch_file.exists():
+        print("  [llvm-patch] ir_compat.patch not found — nothing to apply")
+        return {"applied": [], "failed": [], "all_ok": True}
+
+    print(f"\n{'=' * 60}")
+    print(f"  Apply IR compat patch to LLVM")
+    print(f"{'=' * 60}")
+
+    # ── Step 1: Clean stale modifications ──
+    print("  [llvm-patch] Cleaning stale changes in llvm-project...")
+    subprocess.run(
+        ["git", "checkout", "--", "."],
+        cwd=llvm_project, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "clean", "-fd"],
+        cwd=llvm_project, capture_output=True, text=True,
+    )
+    print("  [llvm-patch] Working tree cleaned")
+
+    # ── Step 2: Checkout target LLVM commit ──
+    if target_hash:
+        print(f"  [llvm-patch] Checking out LLVM commit: {target_hash[:12]}")
+        result = subprocess.run(
+            ["git", "checkout", target_hash],
+            cwd=llvm_project, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"  [llvm-patch] FAILED to checkout {target_hash[:12]}: "
+                  f"{result.stderr.strip()[-200:]}")
+            return {"applied": [], "failed": [{
+                "patch": str(patch_file),
+                "error": f"git checkout failed: {result.stderr.strip()}",
+            }], "all_ok": False}
+        print(f"  [llvm-patch] Checked out: {target_hash[:12]}")
+
+    # ── Step 3: Apply the patch ──
+    print(f"  [llvm-patch] Applying: {patch_file.name}")
+    # dry-run first
+    proc = subprocess.run(
+        ["git", "apply", "--check", str(patch_file)],
+        cwd=llvm_project, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        print(f"  [llvm-patch] Patch does NOT apply cleanly:")
+        print(f"    {proc.stderr.strip()[-400:]}")
+        return {"applied": [], "failed": [{
+            "patch": str(patch_file),
+            "error": proc.stderr.strip(),
+        }], "all_ok": False}
+
+    result = subprocess.run(
+        ["git", "apply", str(patch_file)],
+        cwd=llvm_project, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"  [llvm-patch] FAILED: {result.stderr.strip()[-200:]}")
+        return {"applied": [], "failed": [{
+            "patch": str(patch_file),
+            "error": result.stderr.strip(),
+        }], "all_ok": False}
+
+    print(f"  [llvm-patch] ✓ Patch applied successfully")
+    return {"applied": [str(patch_file)], "failed": [], "all_ok": True}
+
+
+def _check_and_rebuild_llvm(repo_path: Path, force_rebuild: bool = False) -> str:
     """Check if LLVM version changed and rebuild if needed.
 
     Reads cmake/llvm-hash.txt from triton-ascend, compares with the
     last-built hash stored at {LLVM_INSTALL_PREFIX_SYNC}/.llvm_hash.
     If they differ (or no previous build exists), checks out the
     required commit in the pre-cloned llvm-project and rebuilds.
+
+    When force_rebuild is True, skips the hash comparison and always
+    rebuilds. Used after applying IR compatibility patches to LLVM.
 
     Environment variables:
       LLVM_PROJECT_PATH         — path to llvm-project (default: ~/llvm-project)
@@ -108,17 +189,21 @@ def _check_and_rebuild_llvm(repo_path: Path) -> str:
         print("  [llvm] llvm-hash.txt is empty — skipping LLVM rebuild")
         return str(llvm_install)
 
-    # Check last-built hash
+    # Check last-built hash (skip when forcing rebuild)
     hash_cache = llvm_install / ".llvm_hash"
-    if hash_cache.exists():
+    if not force_rebuild and hash_cache.exists():
         last_hash = hash_cache.read_text(encoding="utf-8").strip()
         if last_hash == required_hash:
             print(f"  [llvm] LLVM hash unchanged ({required_hash[:12]}) — skip rebuild")
             return str(llvm_install)
 
-    print(f"\n{'=' * 60}")
-    print(f"  LLVM version changed!")
-    print(f"  Previous: {hash_cache.read_text(encoding='utf-8').strip()[:12] if hash_cache.exists() else '(none)'}")
+    if force_rebuild:
+        print(f"\n{'=' * 60}")
+        print(f"  LLVM force rebuild requested (IR patches applied)")
+    else:
+        print(f"\n{'=' * 60}")
+        print(f"  LLVM version changed!")
+        print(f"  Previous: {hash_cache.read_text(encoding='utf-8').strip()[:12] if hash_cache.exists() else '(none)'}")
     print(f"  Required: {required_hash[:12]}")
     print(f"  Rebuilding LLVM...")
     print(f"{'=' * 60}")
@@ -198,8 +283,13 @@ def build_triton_ascend(
     conda_env: str = "",
     build_dir: str = "build",
     clean_build: bool = False,
+    python_exe: str = "python3",
 ) -> dict:
-    """Build the Triton-Ascend C++ extensions and Python package."""
+    """Build the Triton-Ascend C++ extensions and Python package.
+
+    python_exe: Python executable to use for setup.py install
+                (default 'python3', use 'python3.10' / 'python3.11' for dual tests).
+    """
     print("\n=== Building Triton-Ascend ===")
 
     # ── Check and rebuild LLVM if needed ──
@@ -246,7 +336,7 @@ def build_triton_ascend(
         "TRITON_WHEEL_NAME": "triton-ascend",
         "TRITON_APPEND_CMAKE_ARGS": "-DTRITON_BUILD_UT=OFF",
     })
-    build_cmd = ["python3", "setup.py", "install"]
+    build_cmd = [python_exe, "setup.py", "install"]
     build_proc = _run_to_log(build_cmd, repo_path, build_log, env=build_env, timeout=1800, progress_line=True)
     build_passed = build_proc.returncode == 0
     steps.append({
@@ -283,8 +373,13 @@ def run_tests(
     num_procs: int = 16,
     conda_env: str = "",
     timeout: int = 3600,
+    python_exe: str = "",
 ) -> dict:
-    """Run pytest unit tests and return structured results."""
+    """Run pytest unit tests and return structured results.
+
+    python_exe: Python executable for pytest (default '' uses TA_PYTHON env var
+                or 'python3'). Set to 'python3.10' / 'python3.11' for dual tests.
+    """
     print("\n=== Running Tests ===")
     test_log_dir = WORKSPACE_DIR / "test-logs"
     test_log_dir.mkdir(parents=True, exist_ok=True)
@@ -296,9 +391,7 @@ def run_tests(
     if conda_env:
         env["CONDA_DEFAULT_ENV"] = conda_env
 
-    # Use the same python executable as the build step for consistency.
-    # sys.executable may point to a different interpreter that lacks pytest.
-    python_exe = os.getenv("TA_PYTHON", "python3")
+    python_exe = python_exe or os.getenv("TA_PYTHON", "python3")
 
     # Resolve to absolute path — test_dir_path may be relative, and the
     # subprocess cwd is repo_path.  A relative path relative to repo_path

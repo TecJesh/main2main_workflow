@@ -62,6 +62,11 @@ _MODE_LABELS: dict[str, str] = {
     "conflict": "CONFLICT RESOLUTION",
     "fix": "TEST/BUILD FAILURE FIX",
     "adapt": "CODE ADAPTATION",
+    "report": "SYNC REPORT",
+    "ir_analyze_ops": "IR OP ANALYSIS",
+    "ir_analyze_changes": "IR OP CHANGE ANALYSIS",
+    "ir_generate_patch": "IR PATCH GENERATION",
+    "ir_diagnose": "IR FAILURE DIAGNOSIS",
 }
 
 
