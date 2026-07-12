@@ -191,6 +191,12 @@ of issues may arise:
       - `lib/Target/Ascend/`      (Ascend LLVM backend)
       - `python/triton/`          (only if it contains Ascend conditionals)
       - Other project files (CMakeLists.txt, setup.py, etc.)
+  - **NEVER keep triton-ascend's version of `cmake/llvm-hash.txt` in a merge
+    conflict.** This file must ALWAYS follow upstream triton. The LLVM version
+    is controlled by upstream; triton-ascend's LLVM patches are applied
+    separately and do NOT depend on a different LLVM hash. In any merge
+    conflict on this file, accept the upstream (incoming) version
+    unconditionally — do not preserve the triton-ascend side.
   - When unsure about an upstream change's impact, search the triton-ascend
     codebase for references to the changed symbol/file
 
