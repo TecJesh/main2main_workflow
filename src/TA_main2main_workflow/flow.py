@@ -43,6 +43,7 @@ from TA_main2main_workflow.utils import (
     STEPS_DIR, STEPS_FILE, LINE_BUDGET,
     TEST_RESULT_FILE, UpgradeCompleted, UpgradeFailed,
     WORKSPACE_DIR, has_merge_conflicts, run_git, get_conflict_files,
+    commit_submodule, push_submodule, submodule_has_changes,
     print_header, print_section, print_step, print_status, print_info,
     print_warn, print_error, print_key_value,
     print_flow_progress, print_conflict_list, print_summary_table,
@@ -363,6 +364,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         # ── Configure git auth (same logic as push_to_github._ensure_gh_auth) ──
         self._setup_git_auth_for_push(ascend_path)
 
+        # ── Push AscendNPU-IR submodule first ──
+        self._push_submodule_if_needed()
+
         print_header("Push Work Branch")
         try:
             run_git(ascend_path, "push", "-u", "origin", self.state.work_branch)
@@ -451,6 +455,27 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     "Cannot push to GitHub: no GH_TOKEN and gh CLI not authenticated. "
                     "Run 'gh auth login' locally or set GH_TOKEN in CI."
                 )
+
+    def _push_submodule_if_needed(self) -> None:
+        """Push AscendNPU-IR submodule changes to its remote.
+
+        Uses the same branch name as the parent repo's work branch so the
+        two repos stay in sync. Pushes with --force-with-lease to avoid
+        clobbering existing remote state.
+
+        Failure is non-fatal — the parent repo push proceeds regardless.
+        Records the result in summary_rows for visibility.
+        """
+        ascend_path = Path(self.state.triton_ascend_path)
+        submodule_push_state = push_submodule(ascend_path, self.state.work_branch)
+        if submodule_push_state:
+            self.state.summary_rows.append(
+                ("Push AscendNPU-IR", "PASS", self.state.work_branch)
+            )
+        else:
+            self.state.summary_rows.append(
+                ("Push AscendNPU-IR", "WARN", "Push failed — commit may only exist locally")
+            )
 
     def _write_merge_metadata(self) -> None:
         """Write work branch, target commit, and step progress for CI orchestration."""
@@ -611,6 +636,11 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         # ── Commit and push ──
         print_section("Commit & Push Fixes")
+
+        # ── Commit submodule changes first ──
+        self.state.retry_count = attempt - 1
+        self._commit_submodule_if_needed()
+
         status = run_git(ascend_path, "status", "--porcelain").strip()
         if status:
             run_git(ascend_path, "add", "-u")
@@ -623,6 +653,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             )
             run_git(ascend_path, "commit", "-s", "-m", commit_msg)
             print_status(True, "Committed AI fix")
+
+            # ── Push AscendNPU-IR submodule first ──
+            self._push_submodule_if_needed()
 
             run_git(ascend_path, "push", "origin", work_branch)
             print_status(True, f"Pushed to origin/{work_branch}")
@@ -1320,13 +1353,38 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         return True
 
+    def _commit_submodule_if_needed(self) -> None:
+        """Commit uncommitted changes inside the AscendNPU-IR submodule.
+
+        Must be called BEFORE parent 'git add -u' so that the submodule
+        pointer update is picked up by the parent commit.
+        """
+        ascend_path = Path(self.state.triton_ascend_path)
+        if not submodule_has_changes(ascend_path):
+            return
+
+        target_short = self.state.target_commit[:12]
+        commit_msg = (
+            f"fix: AI-generated fix for build/test failures\n\n"
+            f"Upstream target: {target_short}\n"
+            f"Fix attempt: {self.state.retry_count}\n"
+            f"Work branch: {self.state.work_branch}\n"
+        )
+        commit_submodule(ascend_path, commit_msg)
+
     def _commit_fixes(self, ascend_path: Path, step_dir: Path) -> None:
         """Commit AI bug fixes with a meaningful message.
 
         Only commits if there are uncommitted changes (i.e., the AI actually
         modified files to fix build/test failures). Uses "git add -u" to
         avoid staging test artifacts or transient files.
+
+        Commits AscendNPU-IR submodule changes first (if any), so the parent
+        repo records the updated submodule pointer.
         """
+        # ── Commit submodule changes first ──
+        self._commit_submodule_if_needed()
+
         status = run_git(ascend_path, "status", "--porcelain").strip()
         if not status:
             print_info("No uncommitted fix changes — nothing to commit")
@@ -1542,9 +1600,16 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         Only commits if there are uncommitted changes. Uses "git add -u" to
         avoid staging test artifacts or transient files.
+
+        Commits AscendNPU-IR submodule changes first (if any), so the parent
+        repo records the updated submodule pointer.
         """
         ascend_path = Path(self.state.triton_ascend_path)
         step_id = step["id"]
+
+        # ── Commit submodule changes first ──
+        self._commit_submodule_if_needed()
+
         status = run_git(ascend_path, "status", "--porcelain").strip()
 
         if not status:
@@ -1939,6 +2004,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         # ── Build a comprehensive PR body from step summaries ──
         pr_body_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
         self._build_pr_body(pr_body_path)
+
+        # ── Push AscendNPU-IR submodule first ──
+        self._push_submodule_if_needed()
 
         try:
             pr_url = push_and_create_pr(
