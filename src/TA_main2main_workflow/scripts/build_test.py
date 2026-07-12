@@ -377,7 +377,7 @@ def run_tests(
 ) -> dict:
     """Run pytest unit tests and return structured results.
 
-    python_exe: Python executable for pytest (default '' uses TA_PYTHON env var
+    python_exe: Python executable for pytest (default '' uses PYTHON env var
                 or 'python3'). Set to 'python3.10' / 'python3.11' for dual tests.
     """
     print("\n=== Running Tests ===")
@@ -391,7 +391,7 @@ def run_tests(
     if conda_env:
         env["CONDA_DEFAULT_ENV"] = conda_env
 
-    python_exe = python_exe or os.getenv("TA_PYTHON", "python3")
+    python_exe = python_exe or os.getenv("PYTHON", "python3.10")
 
     # Resolve to absolute path — test_dir_path may be relative, and the
     # subprocess cwd is repo_path.  A relative path relative to repo_path

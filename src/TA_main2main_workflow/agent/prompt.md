@@ -241,17 +241,20 @@ of issues may arise:
   Trigger: {mode} is "ir_analyze_changes" (OP delta analysis between LLVM versions).
 
   Context:
-    The LLVM version changed from the old `cmake/llvm-hash.txt` (before merge)
-    to the new `cmake/llvm-hash.txt` (after merge). The OPs used by the Ascend
-    backend must be checked for LLVM version compatibility.
+    The Ascend backend OP usage is based on a fixed baseline LLVM version.
+    The target LLVM version is specified in cmake/llvm-hash.txt. OPs must
+    be checked for compatibility across these two versions.
+
+    Baseline LLVM hash (source): {baseline_llvm_hash}
+    Target LLVM hash: from {ascend_path}/cmake/llvm-hash.txt
 
   Workflow:
     1. Read `{step_dir}/ops_report.json` for the list of OPs to check.
     2. For each OP, examine its TableGen (.td) definition in the llvm-project
-       at BOTH the old and new LLVM versions.
+       at BOTH the baseline and target LLVM versions.
        The llvm-project repo is at: {llvm_project_path}
-       Old hash (before merge): from {ascend_path}/cmake/llvm-hash.txt (previous)
-       New hash (after merge): from {ascend_path}/cmake/llvm-hash.txt (current)
+       Baseline (source): {baseline_llvm_hash}
+       Target (current): read from {ascend_path}/cmake/llvm-hash.txt
     3. Record deltas per OP:
        - Name change (old_name → new_name)
        - assemblyFormat change (does the old format still parse?)
