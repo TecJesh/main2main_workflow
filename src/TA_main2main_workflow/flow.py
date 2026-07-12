@@ -1281,10 +1281,10 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         return True
 
     def _do_build_and_fix_loop(self) -> bool:
-        """build → test → AI fix bug loop (up to max_retries rounds).
+        """build → AI fix compile-error loop (up to max_retries rounds).
 
-        Step-aware: uses step-specific directory and includes step context
-        in fix attempts (matching vllm-ascend's per-step AI context pattern).
+        Only handles compilation errors. Tests are deferred to after all
+        upstream commits are merged and the final build passes.
         """
         ascend_path = Path(self.state.triton_ascend_path)
         step = self.state.steps[self.state.current_step] if self.state.steps else None
@@ -1297,18 +1297,15 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             step_dir = WORKSPACE_DIR / "step-0"
         step_dir.mkdir(parents=True, exist_ok=True)
 
-        test_passed = False
-        last_build_failed = False  # track what failed for fix-type attribution
+        build_passed = False
 
         for attempt in range(self.state.max_retries + 1):
             is_fix_attempt = attempt > 0
             self.state.retry_count = attempt
-            fix_type = ""  # "build" or "test" — determined by previous failure
 
-            # AI fix bug (skip on first round — build & test first)
+            # AI fix compile errors (skip on first round)
             if is_fix_attempt:
-                fix_type = "build" if last_build_failed else "test"
-                print_header(f"Fix Attempt {attempt}/{self.state.max_retries} ({fix_type})")
+                print_header(f"Fix Attempt {attempt}/{self.state.max_retries} (build)")
                 ai_ok = self._do_ai_fix(ascend_path, step_dir, attempt)
                 # Collect fix detail
                 modified_files: list[str] = []
@@ -1327,7 +1324,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 self.state.fix_attempts.append({
                     "step_id": current_step_id,
                     "attempt": attempt,
-                    "fix_type": fix_type,
+                    "fix_type": "build",
                     "error_logs": list(self.state.fix_errors),
                     "error_snippet": error_snippet[-1500:],
                     "modified_files": modified_files,
@@ -1343,37 +1340,23 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     return False
                 self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
                 self.state.build_fix_count += 1
-                last_build_failed = True
                 print_warn(f"Build failed (attempt {attempt + 1}/{self.state.max_retries + 1}) — "
-                           f"skipping tests, will retry after AI fix")
+                           f"will retry after AI fix")
                 print_info(f"Build log: {WORKSPACE_DIR / BUILD_LOG_FILE}")
                 continue
 
-            last_build_failed = False
+            # Build passed — tests are deferred to after all merges complete
+            build_passed = True
+            break
 
-            # run pytest
-            test_result = self._do_test(ascend_path)
-            if test_result is None:
-                test_passed = True
-                break
-            elif test_result:
-                test_passed = True
-                break
-            else:
-                if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
-                    return False
-                self.state.fix_errors = [str(WORKSPACE_DIR / TEST_RESULT_FILE)]
-                self.state.test_fix_count += 1
-                continue
-
-        if not test_passed:
-            print_error(f"All {self.state.max_retries} fix attempts exhausted")
+        if not build_passed:
+            print_error(f"All {self.state.max_retries} fix attempts exhausted — build still failing")
             self.state.summary_rows.append(
                 ("AI fix", "FAIL", f"Failed after {self.state.max_retries} attempts")
             )
             return False
 
-        # Commit bug fixes after all tests pass
+        # Commit build fixes
         self._commit_fixes(ascend_path, step_dir)
 
         return True

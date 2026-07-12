@@ -73,8 +73,9 @@ _MODE_LABELS: dict[str, str] = {
 # ── prompt loader ────────────────────────────────────────────────────────────
 
 def _build_prompt(inputs: dict[str, Any]) -> str:
+    from collections import defaultdict
     template = _PROMPT_PATH.read_text(encoding="utf-8")
-    ctx = {k: str(v) for k, v in inputs.items()}
+    ctx = defaultdict(str, {k: str(v) for k, v in inputs.items()})
     return template.format_map(ctx)
 
 
