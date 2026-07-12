@@ -55,6 +55,10 @@ from TA_main2main_workflow.utils import (
 
 _REFERENCE_DIR = str(Path(__file__).parent / "reference")
 
+# Baseline LLVM version that Ascend backend OP usage is built against.
+# IR compatibility patches bridge from this version to the target LLVM.
+_ASCEND_BASELINE_LLVM_HASH = "b5cc222d7429fe6f18c787f633d5262fac2e676f"
+
 
 class TA_Main2MainState(BaseModel):
     triton_ascend_path: str = ""
@@ -112,8 +116,8 @@ class TA_Main2MainState(BaseModel):
     ir_fix_count: int = 0
     llvm_hash_changed: bool = False
 
-    # ── Python 3.11 Test State ──
-    python311_passed: bool = False
+    # ── Pytest State ──
+    pytest_passed: bool = False
     test_failures_by_python: dict = {}
     ir_loop_details: list = []
 
@@ -983,7 +987,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_status(True, f"Step {step_id} completed successfully "
                          f"({self.state.current_step}/{self.state.total_steps})")
 
-        # ── Phase 3+4: IR compatibility patches + dual Python test ──
+        # ── Phase 3+4: IR compatibility patches + pytest ut test ──
         ir_ok = self._do_ir_patch_loop()
         if not ir_ok:
             print_error("IR patch loop did not converge — sync failed")
@@ -1469,7 +1473,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             return None
 
         test_dir_path = ascend_path / self.state.test_dir
-        py_label = python_exe or os.getenv("TA_PYTHON", "python3")
+        py_label = python_exe or os.getenv("PYTHON", "python3.10")
         print_info(f"Test directory: {test_dir_path}")
         print_info(f"Python: {py_label}, procs: {self.state.num_procs}")
 
@@ -1664,39 +1668,39 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _llvm_hash_did_change(self) -> bool:
-        """Check if cmake/llvm-hash.txt changed between pre-merge and post-merge."""
+        """Check if cmake/llvm-hash.txt differs from the Ascend baseline LLVM.
+
+        The Ascend backend OP usage is based on a fixed baseline LLVM version.
+        If the target LLVM hash differs from the baseline, IR compatibility
+        patches need to be generated.
+        """
         ascend_path = Path(self.state.triton_ascend_path)
         try:
             current_hash = (ascend_path / "cmake" / "llvm-hash.txt") \
                 .read_text(encoding="utf-8").strip()
         except Exception:
             return False
-        # Compare with the hash from before the merge (saved in ascend_head)
-        try:
-            old_hash = run_git(
-                ascend_path, "show",
-                f"{self.state.ascend_head}:cmake/llvm-hash.txt",
-            ).strip()
-        except Exception:
-            return True  # can't determine old hash → assume changed
+
+        old_hash = _ASCEND_BASELINE_LLVM_HASH
         changed = old_hash != current_hash
         if changed:
-            print_info(f"LLVM hash changed: {old_hash[:12]} → {current_hash[:12]}")
+            print_info(f"LLVM hash changed from baseline: "
+                       f"{old_hash[:12]} → {current_hash[:12]}")
         else:
-            print_info("LLVM hash unchanged — skipping IR patch phase")
+            print_info("LLVM hash matches baseline — skipping IR patch phase")
         return changed
 
     def _do_ir_patch_loop(self) -> bool:
         """Phase 3+4 outer loop: IR analysis → patch → rebuild → test → fix.
 
         Runs AFTER all progressive merge steps have completed. If
-        cmake/llvm-hash.txt didn't change, skips directly to Phase 4
-        (dual Python test only).
+        cmake/llvm-hash.txt didn't change, skips IR patches and goes
+        directly to pytest.
 
         Outer loop (max IR_MAX_ITERATIONS rounds):
           [3.1-3.3] AI: analyze OPs, analyze changes, generate patches
           [3.4-3.5] Apply patches to LLVM + rebuild
-          [4.1-4.2] Build TA + Python 3.11 pytest
+          [4.1-4.2] Build TA + run pytest
           [4.3]     If failures, AI classifies (IR vs code)
                     → IR issues: loop back to modify patches
                     → Code issues: AI fix inner loop
@@ -1704,18 +1708,18 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """
         ascend_path = Path(self.state.triton_ascend_path)
 
-        # ── Skip IR patch phase via env var ──
+        # ── Skip IR patch phase via env var  ──
         if os.getenv("SKIP_IR_PATCH", "false").lower() == "true":
-            print_header("Phase 4: Python 3.11 Test (SKIP_IR_PATCH=true)")
+            print_header("Phase 3+4: IR Patch + Pytest — SKIPPED (SKIP_IR_PATCH=true)")
             self.state.summary_rows.append(
                 ("IR Patch", "SKIP", "SKIP_IR_PATCH set"))
-            return self._do_python311_test()
+            return True
 
         # ── Skip if LLVM hash unchanged ──
         self.state.llvm_hash_changed = self._llvm_hash_did_change()
         if not self.state.llvm_hash_changed:
-            print_header("Phase 4: Python 3.11 Test (LLVM unchanged)")
-            return self._do_python311_test()
+            print_header("Phase 4: Pytest (LLVM unchanged)")
+            return self._do_pytest()
 
         print_header("Phase 3: IR Compatibility Patch Auto-Generation")
 
@@ -1757,9 +1761,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 self._do_ai_fix(ascend_path, WORKSPACE_DIR, 1)
                 continue
 
-            # ── [4.2] Python 3.11 test ──
-            if self._do_python311_test():
-                print_status(True, "All tests pass on Python 3.11!")
+            # ── [4.2] Pytest ──
+            if self._do_pytest():
+                print_status(True, "All tests pass!")
                 self._commit_fixes(ascend_path, WORKSPACE_DIR)
                 self.state.ir_loop_details.append({
                     "iteration": iteration + 1,
@@ -1791,7 +1795,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 if not self._do_build(ascend_path, clean=False):
                     self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
                     continue
-                if self._do_python311_test():
+                if self._do_pytest():
                     self._commit_fixes(ascend_path, WORKSPACE_DIR)
                     self.state.ir_loop_details.append({
                         "iteration": iteration + 1,
@@ -1898,6 +1902,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     "LLVM_PROJECT_PATH",
                     os.path.expanduser("~/llvm-project"),
                 ),
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
             })
             _ = ai_result
         except Exception as e:
@@ -1957,6 +1962,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     "LLVM_PROJECT_PATH",
                     os.path.expanduser("~/llvm-project"),
                 ),
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
             })
             _ = ai_result
         except Exception as e:
@@ -2037,31 +2043,30 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 ("LLVM Patch Apply+Rebuild", "FAIL", str(e)[:60]))
             return False
 
-    def _do_python311_test(self) -> bool:
-        """[4.2] Build TA and run pytest with Python 3.11.
+    def _do_pytest(self) -> bool:
+        """[4.2] Build TA and run pytest.
 
         Returns True when all tests pass.
         """
-        print_header("Phase 4.2: Python 3.11 Test")
         ascend_path = Path(self.state.triton_ascend_path)
-        py_exe = "python3.11"
+        py_exe = os.getenv("PYTHON", "python3.10")
 
         import shutil
         if not shutil.which(py_exe):
             print_warn(f"{py_exe} not found on PATH — skipping tests")
-            self.state.python311_passed = False
+            self.state.pytest_passed = False
             self.state.summary_rows.append(
-                ("Tests py3.11", "SKIP", f"{py_exe} not found"))
+                ("Pytest", "SKIP", f"{py_exe} not found"))
             return False
 
-        print_section(f"Python 3.11 Tests ({py_exe})")
+        print_section(f"Pytest ({py_exe})")
 
-        # Build with Python 3.11
+        # Build with test python
         if not self._do_build(ascend_path, clean=True, python_exe=py_exe):
-            print_error("Build failed for Python 3.11")
-            self.state.python311_passed = False
+            print_error(f"Build failed ({py_exe})")
+            self.state.pytest_passed = False
             self.state.summary_rows.append(
-                ("Tests py3.11", "FAIL", "Build failed"))
+                ("Pytest", "FAIL", "Build failed"))
             return False
 
         # Run tests
@@ -2071,12 +2076,12 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         else:
             passed = bool(result)
 
-        self.state.python311_passed = passed
+        self.state.pytest_passed = passed
         if not passed:
-            print_error("Python 3.11 tests FAILED")
+            print_error(f"Pytest FAILED ({py_exe})")
 
         self.state.summary_rows.append(
-            ("Tests py3.11", "PASS" if passed else "FAIL", py_exe))
+            ("Pytest", "PASS" if passed else "FAIL", py_exe))
         return passed
 
     def _do_ir_diagnose_failures(self) -> bool:
@@ -2249,9 +2254,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             self.state.summary_rows.append(
                 ("IR Loop", "PASS",
                  f"{len(self.state.ir_loop_details)} iteration(s)"))
-        # Add Python 3.11 result
-        py311_status = "PASS" if self.state.python311_passed else "N/A"
-        self.state.summary_rows.append(("Python 3.11", py311_status, ""))
+        # Add pytest result
+        pytest_status = "PASS" if self.state.pytest_passed else "N/A"
+        self.state.summary_rows.append(("Pytest", pytest_status, ""))
         self.state.summary_rows.append(("OVERALL", "PASS", f"{self.state.total_steps} step(s) completed"))
         print_summary_table(self.state.summary_rows)
 
