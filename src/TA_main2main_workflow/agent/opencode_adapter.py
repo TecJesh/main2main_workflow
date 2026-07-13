@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 _PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 _TIMEOUT_MINUTES = 30
-_STALE_SECONDS = 300
+_STALE_SECONDS = 1200
 _MAX_STALE_RETRIES = 3
 _HEARTBEAT_INTERVAL = 15  # print "." every 15s of silence (claude only)
 
