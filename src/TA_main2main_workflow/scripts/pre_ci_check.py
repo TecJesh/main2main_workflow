@@ -37,6 +37,9 @@ _CLEANUP_SUFFIXES = [
     ".lock",
     ".pyc",
     ".pyo",
+    ".orig",       # git merge conflict backups
+    ".rej",        # patch rejection files
+    ".log",        # log files that may leak into repo
 ]
 
 _CLEANUP_BASENAMES = [

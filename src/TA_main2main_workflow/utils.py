@@ -308,7 +308,8 @@ def submodule_has_changes(repo: Path) -> bool:
 def commit_submodule(repo: Path, commit_msg: str) -> bool:
     """Commit uncommitted changes inside the AscendNPU-IR submodule.
 
-    Stages all tracked changes with 'git add -u' and commits them.
+    Stages ALL changes (including new files) with 'git add -A' and commits
+    them. Uses -A (not -u) so AI-created files are not silently dropped.
     Returns True if a new commit was created.
     """
     sm = _submodule_path(repo)
@@ -322,13 +323,23 @@ def commit_submodule(repo: Path, commit_msg: str) -> bool:
 
     print_section("Commit AscendNPU-IR Submodule")
     try:
-        run_git(sm, "add", "-u")
+        run_git(sm, "add", "-A")
+        # Show what will be committed
+        staged = run_git(sm, "diff", "--cached", "--name-only").strip()
+        if staged:
+            print_info(f"[submodule] Files staged ({len(staged.splitlines())}):")
+            for f in staged.splitlines()[:10]:
+                print_info(f"  - {f}")
         run_git(sm, "commit", "-s", "-m", commit_msg)
         new_head = run_git(sm, "rev-parse", "HEAD").strip()
         print_status(True, f"Committed AscendNPU-IR: {new_head[:12]}")
         return True
-    except Exception as e:
-        print_warn(f"Could not commit AscendNPU-IR submodule: {e}")
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip() if hasattr(e, 'stderr') else str(e)
+        if "nothing to commit" in stderr.lower():
+            print_info("[submodule] Nothing to commit")
+            return False
+        print_warn(f"Could not commit AscendNPU-IR submodule: {stderr[-200:]}")
         return False
 
 

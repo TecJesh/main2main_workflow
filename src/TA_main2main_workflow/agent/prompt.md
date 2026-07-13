@@ -4,16 +4,32 @@ Previous step summary: {previous_step_summary_path}
 
 ━━━ MISSION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-You are a single agent performing the full merge-conflict-resolution and
-test-fixing workflow end-to-end. Do NOT use TeamCreate or Agent tools — work
+You are a single agent. Do NOT use TeamCreate or Agent tools — work
 directly without sub-agents.
 
 Triton-Ascend is a fork of upstream Triton (triton-lang/triton) that adds
-Ascend NPU support. After merging upstream changes via git merge, two types
-of issues may arise:
+Ascend NPU support.
 
-  1. Merge conflicts — files with <<<<<<< / ======= / >>>>>>> markers
-  2. Test failures — build errors or pytest failures caused by the merge
+The active mode is: {mode}
+
+── IR analysis modes (ir_analyze_ops / ir_analyze_changes / ir_generate_patch / ir_diagnose) ──
+
+  If your mode starts with "ir_", you are performing LLVM IR compatibility
+  analysis. Your SOLE task is to analyze MLIR OP definitions, NOT merge
+  conflicts, NOT upstream Triton commits, NOT test failures.
+
+  Your ONLY output is the structured JSON file specified in the mode-specific
+  instructions below. Do NOT produce analysis.md, step_summary.md, or
+  review.md. Do NOT analyze git merge history or upstream Triton commits.
+
+── conflict / fix / report / adapt modes ──
+
+  If your mode is conflict, fix, report, or adapt, you are performing merge
+  conflict resolution and test fixing for the triton-ascend upstream sync.
+  After merging upstream changes via git merge, two types of issues may arise:
+
+    1. Merge conflicts — files with <<<<<<< / ======= / >>>>>>> markers
+    2. Test failures — build errors or pytest failures caused by the merge
 
 ── report mode ────────────────────────────────────────────────────
 
@@ -116,6 +132,13 @@ of issues may arise:
     5. Do NOT modify upstream triton code in python/triton/ unless it contains
        Ascend-specific changes (marked with triton_ascend imports or ascend checks)
     6. Write fix summary to {step_dir}/step_summary.md
+    7. Write a ONE-LINE commit message to {step_dir}/commit_message.txt
+       - Format: "<type>: <brief description>"
+       - Types: fix, build, test, cmake, compat
+       - Example: "fix: update AscendDotOp::build() signature for LLVM 22"
+       - Example: "test: fix pytest assertion for renamed attribute getLhs→getA"
+       - Keep under 72 characters, be specific about WHAT was fixed
+       - This line will be used as the git commit subject
 
   Common failure patterns in Triton-Ascend:
     - python/triton/ changes → Ascend overrides in python/triton_ascend/ need updating
@@ -207,8 +230,18 @@ of issues may arise:
 
   Trigger: {mode} is "ir_analyze_ops" (post-merge OP usage analysis).
 
+  ⚠️  CRITICAL: This is NOT a merge analysis. Do NOT analyze upstream Triton
+  commits, merge conflicts, or test failures. Do NOT read {ascend_path}/.git
+  history. Your ONLY job is to scan Ascend backend source files for MLIR OP
+  usage and output the structured JSON report below.
+
+  HINT: A pre-scan has been done — read {step_dir}/candidate_files.txt for
+  the list of files that contain MLIR OP patterns (::create, ::get, isa<,
+  cast<, etc.). Start from these files to find OP usages efficiently.
+
   Workflow:
-    1. Scan the Ascend backend directories for MLIR OP usage:
+    1. Read {step_dir}/candidate_files.txt for the list of files to scan.
+    2. Scan each file for MLIR OP usage in these directories:
        - `{ascend_path}/third_party/ascend/lib/`
        - `{ascend_path}/lib/Target/Ascend/`
     2. For each OP, record:
@@ -240,21 +273,57 @@ of issues may arise:
 
   Trigger: {mode} is "ir_analyze_changes" (OP delta analysis between LLVM versions).
 
+  ⚠️  CRITICAL: This is NOT a merge analysis. Do NOT analyze upstream Triton
+  commits, merge conflicts, or test failures. Do NOT read {ascend_path}/.git
+  history. Your ONLY job is to compare MLIR OP .td definitions between two
+  LLVM git commits and output the structured JSON report below.
+
   Context:
     The Ascend backend OP usage is based on a fixed baseline LLVM version.
     The target LLVM version is specified in cmake/llvm-hash.txt. OPs must
     be checked for compatibility across these two versions.
 
     Baseline LLVM hash (source): {baseline_llvm_hash}
-    Target LLVM hash: from {ascend_path}/cmake/llvm-hash.txt
+    Target LLVM hash: {target_llvm_hash}
+    llvm-project repo: {llvm_project_path}
+
+  ═══ HOW TO COMPARE — use git in the llvm-project repo ═══════════════════
+
+  For EVERY OP in ops_report.json, you MUST compare its .td definition at
+  the two LLVM versions using git. Do NOT guess or skip any OP.
+
+  Step A — verify both commits exist:
+    cd {llvm_project_path}
+    git cat-file -t {baseline_llvm_hash}
+    git cat-file -t {target_llvm_hash}
+
+  Step B — find the .td file for each OP:
+    Search for the OP's TableGen definition in mlir/include/:
+    grep -r "def <OpName>" mlir/include/ --include="*.td"
+
+  Step C — compare the definition at both versions:
+    git show {baseline_llvm_hash}:mlir/include/.../<path>.td
+    git show {target_llvm_hash}:mlir/include/.../<path>.td
+    Then diff the two definitions.
+
+  Step D — also check for name changes (OP renamed):
+    git diff {baseline_llvm_hash}..{target_llvm_hash} -- mlir/include/ | grep "^[-+].*def "
+    This shows which OP definitions were added/removed between the two versions.
+
+  Step E — for each OP, cross-reference with the Ascend backend usage:
+    Check how the OP is used in {ascend_path}/third_party/ascend/lib/
+    and {ascend_path}/lib/Target/Ascend/ — does the OP use create(),
+    match(), or transformation patterns that depend on the old definition?
+
+  ═══════════════════════════════════════════════════════════════════════════
 
   Workflow:
     1. Read `{step_dir}/ops_report.json` for the list of OPs to check.
     2. For each OP, examine its TableGen (.td) definition in the llvm-project
-       at BOTH the baseline and target LLVM versions.
+       at BOTH the baseline and target LLVM versions using the git commands above.
        The llvm-project repo is at: {llvm_project_path}
        Baseline (source): {baseline_llvm_hash}
-       Target (current): read from {ascend_path}/cmake/llvm-hash.txt
+       Target (current): {target_llvm_hash}
     3. Record deltas per OP:
        - Name change (old_name → new_name)
        - assemblyFormat change (does the old format still parse?)
@@ -380,11 +449,32 @@ of issues may arise:
 
 ━━━ OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Archive all outputs to {step_dir}/:
+── For ir_analyze_ops mode ──
+  Output ONLY `{step_dir}/ops_report.json` — the structured JSON specified
+  in the ir_analyze_ops section above. Do NOT write analysis.md,
+  step_summary.md, or review.md. Do NOT analyze merge history.
 
-  analysis.md       — analysis of what upstream changes caused issues
-  step_summary.md   — summary of resolutions/fixes applied
-  review.md         — self-review of changes made
+── For ir_analyze_changes mode ──
+  Output ONLY `{step_dir}/changes_report.json` — the structured JSON specified
+  in the ir_analyze_changes section above. Do NOT write analysis.md,
+  step_summary.md, or review.md. Do NOT analyze merge history.
+
+── For ir_generate_patch mode ──
+  Output ONLY `{step_dir}/generated_patches/ir_compat.patch` — the unified
+  patch file specified in the ir_generate_patch section above. Do NOT write
+  analysis.md, step_summary.md, or review.md.
+
+── For ir_diagnose mode ──
+  Output ONLY `{step_dir}/ir_diagnosis.json` — the structured JSON specified
+  in the ir_diagnose section above. Do NOT write analysis.md, step_summary.md,
+  or review.md.
+
+── For conflict / fix / report / adapt modes ──
+  Archive all outputs to {step_dir}/:
+
+    analysis.md       — analysis of what upstream changes caused issues
+    step_summary.md   — summary of resolutions/fixes applied
+    review.md         — self-review of changes made
 
 For conflict mode, additionally output:
   - Each resolved file path

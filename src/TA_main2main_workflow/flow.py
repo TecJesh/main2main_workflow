@@ -663,9 +663,17 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         self.state.retry_count = attempt - 1
         self._commit_submodule_if_needed()
 
+        # ── Clean temp artifacts BEFORE staging ──
+        cleanup_temp_files(ascend_path)
+
         status = run_git(ascend_path, "status", "--porcelain").strip()
         if status:
-            run_git(ascend_path, "add", "-u")
+            run_git(ascend_path, "add", "-A")
+            staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
+            if staged:
+                print_info(f"Files staged ({len(staged.splitlines())}):")
+                for f in staged.splitlines()[:10]:
+                    print_info(f"  - {f}")
             commit_target = target_commit[:12] if target_commit else "upstream"
             commit_msg = (
                 f"fix: AI-generated fix for build/test failures\n\n"
@@ -902,6 +910,20 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         The internal per-step call chain is:
           _do_step_merge → _do_resolve_conflicts → _do_build_and_fix_loop → _do_commit_step → _push_step_progress
         """
+        try:
+            return self._execute_sync_inner()
+        except Exception as exc:
+            print_error(f"Unexpected error in execute_sync: {exc}")
+            import traceback
+            traceback.print_exc()
+            # Backup code before failing so partial work is preserved
+            self._backup_code_state(f"crash-step{self.state.current_step + 1}")
+            self.state.final_status = UpgradeFailed
+            return UpgradeFailed
+
+    def _execute_sync_inner(self) -> Literal["UpgradeCompleted", "UpgradeFailed"]:
+        """Inner body of execute_sync — wrapped by try/except for crash backup."""
+
         # ── Iterate over each planned step ──
         while self.state.current_step < self.state.total_steps:
             step = self.state.steps[self.state.current_step]
@@ -1244,14 +1266,24 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             return False
 
         # AI resolve conflict: git commit the resolution
-        # Use "git add -u" (tracked-only) to avoid staging test artifacts,
-        # cache files, or other transient files created during the flow.
+        # Clean temp artifacts first, then use git add -A to ensure
+        # AI-created files are NOT dropped.
+        cleanup_temp_files(ascend_path)
         try:
-            run_git(ascend_path, "add", "-u")
+            run_git(ascend_path, "add", "-A")
+            staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
+            if staged:
+                print_info(f"Files staged ({len(staged.splitlines())}):")
+                for f in staged.splitlines()[:10]:
+                    print_info(f"  - {f}")
             run_git(ascend_path, "commit", "--no-edit", "-s")
             print_status(True, "Committed conflict resolution")
-        except Exception:
-            print_info("Note: commit may have already been applied (nothing to commit)")
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip() if hasattr(e, 'stderr') else str(e)
+            if "nothing to commit" in stderr.lower():
+                print_info("Nothing to commit — resolution may already be committed")
+            else:
+                print_warn(f"Commit may have failed: {stderr[-200:]}")
 
         # pre-CI check: scan for leftover conflict markers, temp files, syntax errors
         print_info("Running pre-CI check after conflict resolution...")
@@ -1368,7 +1400,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     def _commit_submodule_if_needed(self) -> None:
         """Commit uncommitted changes inside the AscendNPU-IR submodule.
 
-        Must be called BEFORE parent 'git add -u' so that the submodule
+        Must be called BEFORE parent 'git add -A' so that the submodule
         pointer update is picked up by the parent commit.
         """
         ascend_path = Path(self.state.triton_ascend_path)
@@ -1387,14 +1419,16 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     def _commit_fixes(self, ascend_path: Path, step_dir: Path) -> None:
         """Commit AI bug fixes with a meaningful message.
 
-        Only commits if there are uncommitted changes (i.e., the AI actually
-        modified files to fix build/test failures). Uses "git add -u" to
-        avoid staging test artifacts or transient files.
+        Only commits if there are uncommitted changes. Commits submodule
+        changes first (AscendNPU-IR), then returns to triton-ascend for the
+        parent commit. Uses git add -A so AI-created files are not dropped.
 
-        Commits AscendNPU-IR submodule changes first (if any), so the parent
-        repo records the updated submodule pointer.
+        Commit message priority:
+          1. AI-written commit_message.txt (one-line subject)
+          2. First line of step_summary.md
+          3. Default generic message
         """
-        # ── Commit submodule changes first ──
+        # ── Commit submodule changes first (inside AscendNPU-IR) ──
         self._commit_submodule_if_needed()
 
         status = run_git(ascend_path, "status", "--porcelain").strip()
@@ -1404,14 +1438,25 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         print_section("Commit Bug Fixes")
 
-        # Build commit message from AI summary if available
-        summary_path = step_dir / EACH_STEP_SUMMARY_FILE
-        if summary_path.exists():
-            summary_text = summary_path.read_text(encoding="utf-8").strip()
-            # Use first heading or first line as short description
-            commit_summary = summary_text.split("\n")[0].lstrip("#").strip()[:72]
+        # ── Clean temp artifacts BEFORE staging ──
+        # git add -A would otherwise pick up build outputs, cache dirs, etc.
+        cleanup_temp_files(ascend_path)
+
+        # ── Read AI-written commit message ──
+        commit_msg_path = step_dir / "commit_message.txt"
+        if commit_msg_path.exists():
+            commit_summary = commit_msg_path.read_text(encoding="utf-8").strip()
+            # Take first line only for the subject
+            commit_summary = commit_summary.split("\n")[0].strip()[:72]
+            print_info(f"Using AI-written commit message: {commit_summary}")
         else:
-            commit_summary = f"fix: resolve build/test failures for upstream sync"
+            # Fallback: first line of step_summary.md
+            summary_path = step_dir / EACH_STEP_SUMMARY_FILE
+            if summary_path.exists():
+                summary_text = summary_path.read_text(encoding="utf-8").strip()
+                commit_summary = summary_text.split("\n")[0].lstrip("#").strip()[:72]
+            else:
+                commit_summary = "fix: resolve build/test failures for upstream sync"
 
         target_short = self.state.target_commit[:12]
         commit_msg = (
@@ -1419,16 +1464,33 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             f"Upstream target: {target_short}\n"
             f"Fix attempt: {self.state.retry_count}\n"
             f"Work branch: {self.state.work_branch}\n"
+            f"Co-Authored-By: Claude <noreply@anthropic.com>\n"
         )
 
+        # ── Stage and commit (already changed to -A above via replace_all) ──
         try:
-            run_git(ascend_path, "add", "-u")
+            staged_before = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
+            if not staged_before:
+                # git add -A was already called; if no files staged yet, stage now
+                run_git(ascend_path, "add", "-A")
+            staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
+            if staged:
+                print_info(f"Files staged for commit ({len(staged.splitlines())}):")
+                for f in staged.splitlines()[:15]:
+                    print_info(f"  - {f}")
+                if len(staged.splitlines()) > 15:
+                    print_info(f"  ... and {len(staged.splitlines()) - 15} more")
             run_git(ascend_path, "commit", "-s", "-m", commit_msg)
             print_status(True, f"Committed fix: {commit_summary[:60]}")
             self.state.summary_rows.append(("Commit fixes", "PASS", commit_summary[:40]))
-        except Exception as e:
-            print_warn(f"Could not commit fixes: {e}")
-            self.state.summary_rows.append(("Commit fixes", "WARN", str(e)[:40]))
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip() if hasattr(e, 'stderr') else str(e)
+            if "nothing to commit" in stderr.lower():
+                print_info("Nothing to commit (AI made no changes)")
+                self.state.summary_rows.append(("Commit fixes", "PASS", "No changes"))
+            else:
+                print_warn(f"Could not commit fixes: {stderr[-200:]}")
+                self.state.summary_rows.append(("Commit fixes", "WARN", stderr[:40]))
 
     def _do_build(self, ascend_path: Path, clean: bool = False,
                   python_exe: str = "python3") -> bool:
@@ -1651,17 +1713,29 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         )
 
         try:
-            run_git(ascend_path, "add", "-u")
+            run_git(ascend_path, "add", "-A")
+            staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
+            if staged:
+                print_info(f"Files staged ({len(staged.splitlines())}):")
+                for f in staged.splitlines()[:10]:
+                    print_info(f"  - {f}")
+                if len(staged.splitlines()) > 10:
+                    print_info(f"  ... and {len(staged.splitlines()) - 10} more")
             run_git(ascend_path, "commit", "-s", "-m", commit_msg)
             print_status(True, f"Committed step {step_id}")
             self.state.summary_rows.append(
                 (f"Commit {step_id}", "PASS", f"{step['commit_count']} commits")
             )
-        except Exception as e:
-            print_warn(f"Could not commit step {step_id}: {e}")
-            self.state.summary_rows.append(
-                (f"Commit {step_id}", "WARN", str(e)[:40])
-            )
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip() if hasattr(e, 'stderr') else str(e)
+            if "nothing to commit" in stderr.lower():
+                print_info(f"[{step_id}] Nothing to commit (clean merge)")
+                self.state.summary_rows.append(
+                    (f"Commit {step_id}", "PASS", "No changes (clean merge)"))
+            else:
+                print_warn(f"Could not commit step {step_id}: {stderr[-200:]}")
+                self.state.summary_rows.append(
+                    (f"Commit {step_id}", "WARN", stderr[:40]))
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Phase 3+4: IR Compatibility Patch Loop
@@ -1719,9 +1793,13 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         self.state.llvm_hash_changed = self._llvm_hash_did_change()
         if not self.state.llvm_hash_changed:
             print_header("Phase 4: Pytest (LLVM unchanged)")
+            print_info("LLVM hash unchanged — skipping IR analysis and patch generation")
             return self._do_pytest()
 
         print_header("Phase 3: IR Compatibility Patch Auto-Generation")
+        print_info(f"LLVM hash changed — IR compatibility analysis required")
+        print_key_value("Baseline LLVM", _ASCEND_BASELINE_LLVM_HASH[:12])
+        print_key_value("Max IR iterations", str(self.state.ir_max_iterations))
 
         for iteration in range(self.state.ir_max_iterations):
             self.state.ir_patch_iteration = iteration
@@ -1732,6 +1810,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
             # ── [3.1 + 3.2] Analysis (only on first iteration) ──
             if iteration == 0:
+                print_info("First iteration — running full OP analysis pipeline")
                 if not self._do_ir_op_analysis():
                     return False
                 if not self._do_ir_change_analysis():
@@ -1744,14 +1823,17 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     return False
 
             # ── [3.3] Generate patches ──
+            print_info("Step 3.3: Invoking AI to generate IR compatibility patches...")
             if not self._do_ir_generate_patches():
                 return False
 
             # ── [3.4 + 3.5] Apply patches + rebuild LLVM ──
+            print_info("Step 3.4-3.5: Applying patches and rebuilding LLVM (this may take a while)...")
             if not self._do_ir_apply_patches_and_rebuild():
                 return False
 
             # ── [4.1] Build TA ──
+            print_info("Step 4.1: Building Triton-Ascend with patched LLVM...")
             if not self._do_build(ascend_path, clean=True):
                 if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
                     return False
@@ -1762,6 +1844,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 continue
 
             # ── [4.2] Pytest ──
+            print_info("Step 4.2: Running pytest suite...")
             if self._do_pytest():
                 print_status(True, "All tests pass!")
                 self._commit_fixes(ascend_path, WORKSPACE_DIR)
@@ -1772,6 +1855,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 return True
 
             # ── [4.3] Diagnose failures ──
+            print_info("Step 4.3: Invoking AI to classify test failures (IR vs code)...")
             has_ir_issues = self._do_ir_diagnose_failures()
             if has_ir_issues:
                 self.state.ir_issues_found += 1
@@ -1788,6 +1872,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
             # ── [4.4] Non-IR issues → AI fix inner loop ──
             print_info("Non-IR failures detected — entering AI fix loop")
+            print_key_value("Max fix attempts", str(self.state.max_retries))
             for fix_attempt in range(1, self.state.max_retries + 1):
                 print_header(f"AI Fix Attempt {fix_attempt}/{self.state.max_retries}")
                 self.state.retry_count = fix_attempt
@@ -1826,6 +1911,50 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         from TA_main2main_workflow.agent.opencode_adapter import _detect_backend
         backend = _detect_backend()
         print_info(f"AI backend: {backend}")
+        print_key_value("Triton-Ascend", str(ascend_path))
+        print_key_value("Output dir", str(ir_dir))
+
+        # ── Pre-scan: find candidate files with MLIR OP usage ──
+        print_info("Pre-scanning Ascend backend for MLIR OP patterns...")
+        candidate_files: list[str] = []
+        scan_dirs = [
+            ascend_path / "third_party" / "ascend" / "lib",
+            ascend_path / "lib" / "Target" / "Ascend",
+        ]
+        op_patterns = [
+            r'::create\b', r'::get\b', r'\.match\b', r'\.walk\b',
+            r'isa<', r'cast<', r'dyn_cast<',
+        ]
+        for sd in scan_dirs:
+            if not sd.exists():
+                print_warn(f"Scan dir not found: {sd}")
+                continue
+            for pattern in op_patterns:
+                try:
+                    result = subprocess.run(
+                        ["grep", "-rl", pattern, str(sd)],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    for f in result.stdout.splitlines():
+                        if f not in candidate_files:
+                            candidate_files.append(f)
+                except (subprocess.TimeoutExpired, Exception):
+                    pass
+
+        candidate_files.sort()
+        print_info(f"Found {len(candidate_files)} candidate files with MLIR OP patterns")
+        for f in candidate_files[:15]:
+            print_info(f"  - {Path(f).relative_to(ascend_path)}")
+        if len(candidate_files) > 15:
+            print_info(f"  ... and {len(candidate_files) - 15} more files")
+
+        # Write candidate file list for AI reference
+        hint_path = ir_dir / "candidate_files.txt"
+        hint_path.write_text("\n".join(candidate_files), encoding="utf-8")
+        print_info(f"Candidate file list written to {hint_path}")
+
+        print_info("AI will scan candidate files for MLIR OP usage and output structured JSON")
+        print_info("Invoking AI for IR OP analysis (this may take several minutes)...")
 
         try:
             ai_result = run_opencode_adapter({
@@ -1857,15 +1986,42 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         ops_report = ir_dir / IR_OPS_REPORT_FILE
         if ops_report.exists():
             try:
-                self.state.ir_ops_report = json.loads(
-                    ops_report.read_text(encoding="utf-8"))
+                data = json.loads(ops_report.read_text(encoding="utf-8"))
+                # ── Content validation: must have 'ops' array with real OP data ──
+                ops_list = data.get("ops", [])
+                if not ops_list or not isinstance(ops_list, list):
+                    print_error(
+                        f"AI output is NOT a valid OP report! "
+                        f"Missing or empty 'ops' array. "
+                        f"Top-level keys: {list(data.keys())}")
+                    print_warn(
+                        f"AI may have produced a merge analysis instead of IR OP scan. "
+                        f"Check {ops_report} for content.")
+                    self.state.summary_rows.append(
+                        ("IR OP Analysis", "FAIL",
+                         f"No 'ops' array — AI produced wrong output type"))
+                    return False
+                # Check that ops have expected fields
+                valid_ops = [o for o in ops_list if isinstance(o, dict) and "name" in o]
+                if len(valid_ops) < len(ops_list):
+                    print_warn(
+                        f"{len(ops_list) - len(valid_ops)} entries missing 'name' field — filtered")
+                if not valid_ops:
+                    print_error("No valid OP entries with 'name' field found!")
+                    self.state.summary_rows.append(
+                        ("IR OP Analysis", "FAIL", "No valid OP entries"))
+                    return False
+
+                self.state.ir_ops_report = data
+                dialects = data.get("dialects", [])
                 print_status(True,
                     f"OP analysis complete: "
-                    f"{self.state.ir_ops_report.get('total_ops', '?')} OPs, "
-                    f"{len(self.state.ir_ops_report.get('dialects', []))} dialects")
+                    f"{data.get('total_ops', len(valid_ops))} OPs, "
+                    f"{len(dialects)} dialects — "
+                    f"{', '.join(dialects[:10])}")
                 self.state.summary_rows.append(
                     ("IR OP Analysis", "PASS",
-                     f"{self.state.ir_ops_report.get('total_ops', '?')} OPs"))
+                     f"{data.get('total_ops', len(valid_ops))} OPs"))
                 return True
             except Exception as e:
                 print_warn(f"Could not parse ops report: {e}")
@@ -1880,6 +2036,105 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
         ir_dir.mkdir(parents=True, exist_ok=True)
+
+        baseline_hash = _ASCEND_BASELINE_LLVM_HASH
+        llvm_project = Path(os.getenv(
+            "LLVM_PROJECT_PATH",
+            os.path.expanduser("~/llvm-project"),
+        ))
+
+        # Read target LLVM hash from ascend repo
+        llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
+        if not llvm_hash_file.exists():
+            print_error(f"llvm-hash.txt not found at {llvm_hash_file}")
+            self.state.summary_rows.append(
+                ("IR Change Analysis", "FAIL", "llvm-hash.txt missing"))
+            return False
+        target_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+
+        print_key_value("Input ops report", str(ir_dir / IR_OPS_REPORT_FILE))
+        print_key_value("LLVM project", str(llvm_project))
+        print_key_value("Baseline LLVM", f"{baseline_hash[:12]} ({baseline_hash})")
+        print_key_value("Target LLVM", f"{target_hash[:12]} ({target_hash})")
+
+        # ── Pre-flight: verify both commits exist in llvm-project ──
+        if not llvm_project.exists():
+            print_error(f"llvm-project not found at {llvm_project}")
+            self.state.summary_rows.append(
+                ("IR Change Analysis", "FAIL", "llvm-project not found"))
+            return False
+
+        print_info("Verifying LLVM commits are available in llvm-project...")
+        for label, h in [("Baseline", baseline_hash), ("Target", target_hash)]:
+            try:
+                result = subprocess.run(
+                    ["git", "cat-file", "-t", h],
+                    cwd=str(llvm_project),
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode == 0:
+                    print_status(True, f"{label} commit {h[:12]} — found in llvm-project")
+                else:
+                    print_error(
+                        f"{label} commit {h[:12]} NOT found in llvm-project! "
+                        f"(git cat-file -t returned: {result.stderr.strip()})")
+                    print_warn(
+                        f"Try: cd {llvm_project} && git fetch origin {h}")
+                    self.state.summary_rows.append(
+                        ("IR Change Analysis", "FAIL",
+                         f"{label} commit {h[:12]} not in llvm-project"))
+                    return False
+            except subprocess.TimeoutExpired:
+                print_error(f"Timeout checking {label} commit {h[:12]}")
+                return False
+            except Exception as e:
+                print_error(f"Failed to verify {label} commit: {e}")
+                return False
+
+        # ── Pre-flight: show MLIR .td file changes between the two commits ──
+        print_info("Scanning MLIR .td file changes between baseline and target...")
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only", baseline_hash, target_hash,
+                 "--", "mlir/include/"],
+                cwd=str(llvm_project),
+                capture_output=True, text=True, timeout=60,
+            )
+            if diff_result.returncode == 0:
+                changed_files = [f for f in diff_result.stdout.splitlines()
+                                 if f.endswith(".td")]
+                print_info(f"Found {len(changed_files)} changed .td files in mlir/include/ "
+                           f"between baseline and target")
+                for f in changed_files[:20]:
+                    print_info(f"  - {f}")
+                if len(changed_files) > 20:
+                    print_info(f"  ... and {len(changed_files) - 20} more .td files")
+            else:
+                print_warn(f"git diff returned non-zero: {diff_result.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            print_warn("git diff timed out after 60s — continuing anyway")
+        except Exception as e:
+            print_warn(f"Could not run git diff for .td files: {e}")
+
+        # ── Pre-flight: show ops report summary for AI context ──
+        ops_report_path = ir_dir / IR_OPS_REPORT_FILE
+        if ops_report_path.exists():
+            try:
+                ops = json.loads(ops_report_path.read_text(encoding="utf-8"))
+                print_info(
+                    f"Ops report: {ops.get('total_ops', '?')} OPs across "
+                    f"{len(ops.get('dialects', []))} dialects — "
+                    f"{', '.join(ops.get('dialects', [])[:8])}")
+            except Exception:
+                print_warn("Could not read ops_report.json for summary")
+        else:
+            print_warn(f"Ops report not found at {ops_report_path} — "
+                       f"AI will need to discover OPs on its own")
+
+        print_info("AI will compare each OP's .td definition with:")
+        print_info(f"  git show {baseline_hash[:12]}:mlir/include/.../<Op>.td")
+        print_info(f"  git show {target_hash[:12]}:mlir/include/.../<Op>.td")
+        print_info("Invoking AI for OP change analysis (this may take several minutes)...")
 
         try:
             ai_result = run_opencode_adapter({
@@ -1903,6 +2158,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     os.path.expanduser("~/llvm-project"),
                 ),
                 "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "target_llvm_hash": target_hash,
             })
             _ = ai_result
         except Exception as e:
@@ -1914,12 +2170,29 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         changes_report = ir_dir / IR_CHANGES_REPORT_FILE
         if changes_report.exists():
             try:
-                self.state.ir_changes_report = json.loads(
-                    changes_report.read_text(encoding="utf-8"))
-                summary = self.state.ir_changes_report.get("summary", {})
+                data = json.loads(changes_report.read_text(encoding="utf-8"))
+                # ── Content validation: must have 'changes' array and 'summary' ──
+                changes_list = data.get("changes", [])
+                summary = data.get("summary", {})
+                if not changes_list or not isinstance(changes_list, list):
+                    print_error(
+                        f"AI output is NOT a valid changes report! "
+                        f"Missing or empty 'changes' array. "
+                        f"Top-level keys: {list(data.keys())}")
+                    print_warn(
+                        f"AI may have produced a merge analysis instead of "
+                        f"OP change comparison. Check {changes_report} for content.")
+                    self.state.summary_rows.append(
+                        ("IR Change Analysis", "FAIL",
+                         "No 'changes' array — AI produced wrong output type"))
+                    return False
+
+                self.state.ir_changes_report = data
                 print_status(True,
                     f"Change analysis: {summary.get('total_ops_analyzed', '?')} "
-                    f"OPs, {summary.get('ops_needing_patch', '?')} need patch")
+                    f"OPs, {summary.get('ops_needing_patch', '?')} need patch, "
+                    f"{summary.get('renamed_ops', 0)} renamed, "
+                    f"{summary.get('signature_changes', 0)} signature changes")
                 self.state.summary_rows.append(
                     ("IR Change Analysis", "PASS",
                      f"{summary.get('ops_needing_patch', '?')} OPs need patch"))
@@ -1940,6 +2213,18 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
         patches_dir = WORKSPACE_DIR / IR_PATCHES_DIR
         patches_dir.mkdir(parents=True, exist_ok=True)
+
+        changes_report = ir_dir / IR_CHANGES_REPORT_FILE
+        if changes_report.exists():
+            try:
+                report = json.loads(changes_report.read_text(encoding="utf-8"))
+                summary = report.get("summary", {})
+                print_info(f"Changes report: {summary.get('total_ops_analyzed', '?')} OPs analyzed, "
+                           f"{summary.get('ops_needing_patch', '?')} need patches")
+            except Exception:
+                pass
+        print_key_value("Patches output dir", str(patches_dir))
+        print_info("Invoking AI to generate IR compatibility patches...")
 
         try:
             ai_result = run_opencode_adapter({
@@ -1996,6 +2281,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             "LLVM_PROJECT_PATH",
             os.path.expanduser("~/llvm-project"),
         ))
+        print_key_value("LLVM project", str(llvm_project))
+        print_key_value("Patches dir", str(patches_dir))
 
         if not llvm_project.exists():
             print_error(f"LLVM project not found at {llvm_project}")
@@ -2012,7 +2299,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         target_llvm_hash = ""
         if llvm_hash_file.exists():
             target_llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+            print_key_value("Target LLVM hash", target_llvm_hash[:12])
 
+        print_info("Step 3.4: Applying ir_compat.patch to llvm-project...")
         patch_result = apply_llvm_patches(
             patches_dir, llvm_project, target_hash=target_llvm_hash)
         if not patch_result["all_ok"]:
@@ -2029,6 +2318,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         from TA_main2main_workflow.scripts.build_test import \
             _check_and_rebuild_llvm
         try:
+            print_info("Step 3.5: Rebuilding LLVM (this takes ~1-2 hours)...")
             llvm_prefix = _check_and_rebuild_llvm(
                 ascend_path, force_rebuild=True)
             if llvm_prefix and not self.state.llvm_prefix:
@@ -2060,8 +2350,10 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             return False
 
         print_section(f"Pytest ({py_exe})")
+        print_key_value("Ascend path", str(ascend_path))
 
         # Build with test python
+        print_info(f"Building Triton-Ascend with {py_exe}...")
         if not self._do_build(ascend_path, clean=True, python_exe=py_exe):
             print_error(f"Build failed ({py_exe})")
             self.state.pytest_passed = False
@@ -2094,6 +2386,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
         ir_dir.mkdir(parents=True, exist_ok=True)
+        print_key_value("Diagnosis output", str(ir_dir / IR_DIAGNOSIS_FILE))
 
         # Collect test failure logs from both Python runs
         error_log_paths: list[str] = []
@@ -2110,7 +2403,12 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_warn("No test failure logs found — assuming code issues")
             return False
 
-        print_info(f"Analyzing {len(error_log_paths)} log file(s)...")
+        print_info(f"Collected {len(error_log_paths)} log file(s) for AI diagnosis")
+        for p in error_log_paths[:5]:
+            print_info(f"  - {p}")
+        if len(error_log_paths) > 5:
+            print_info(f"  ... and {len(error_log_paths) - 5} more")
+        print_info("Invoking AI to classify failures (IR compatibility vs code vs environment)...")
 
         try:
             ai_result = run_opencode_adapter({
@@ -2157,6 +2455,53 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         except Exception as e:
             print_warn(f"Could not parse diagnosis: {e}")
             return False
+
+    def _backup_code_state(self, label: str = "snapshot") -> Path | None:
+        """Backup triton-ascend working tree to workspace for CI artifact retention.
+
+        Copies the entire working tree (tracked + untracked) excluding .git
+        and build artifacts. Used both on success (label="final") and on
+        failure (label="failed-step-N") so no AI fix or conflict resolution
+        work is ever lost.
+        """
+        ascend_path = Path(self.state.triton_ascend_path)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        backup_dir = WORKSPACE_DIR / "code-backups" / f"{label}_{ts}"
+        backup_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        _ignore_patterns = shutil.ignore_patterns(
+            ".git", "__pycache__", "*.pyc", "*.pyo",
+            "*.o", "*.a", "*.so", "*.dylib",
+            "build", "dist", "*.egg-info",
+            ".mypy_cache", ".pytest_cache", ".ruff_cache",
+            "result_profiling", "*.lock",
+        )
+        try:
+            shutil.copytree(str(ascend_path), str(backup_dir),
+                            ignore=_ignore_patterns, symlinks=False)
+            file_count = sum(1 for _ in backup_dir.rglob("*") if _.is_file())
+            print_info(f"Code backup [{label}]: {backup_dir} ({file_count} files)")
+
+            # ── Also record git state snapshot ──
+            try:
+                head = run_git(ascend_path, "rev-parse", "HEAD").strip()
+                branch = run_git(ascend_path, "branch", "--show-current").strip()
+                status = run_git(ascend_path, "status", "--porcelain").strip()
+                info = (
+                    f"# Backup: {label}\n"
+                    f"# Time: {ts}\n"
+                    f"# Branch: {branch}\n"
+                    f"# HEAD: {head}\n"
+                    f"# Uncommitted changes: {'yes' if status else 'none'}\n"
+                )
+                (backup_dir / "_BACKUP_INFO.txt").write_text(info, encoding="utf-8")
+            except Exception:
+                pass
+
+            return backup_dir
+        except Exception as e:
+            print_warn(f"Could not create code backup [{label}]: {e}")
+            return None
 
     def _do_finalize(self):
         """Generate patch, summary & print final report.
@@ -2225,30 +2570,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_warn(f"Could not generate final patch: {e}")
 
         # ── Backup work branch code ──
-        # Copy the entire working tree (tracked + untracked, excluding .git
-        # and build artifacts) so the final code state is preserved as a CI
-        # artifact.  Avoids git archive so that submodule content and
-        # generated files are included.
-        try:
-            backup_dir = WORKSPACE_DIR / "work-branch-code"
-            if backup_dir.exists():
-                shutil.rmtree(backup_dir)
-
-            _ignore_patterns = shutil.ignore_patterns(
-                ".git", "__pycache__", "*.pyc", "*.pyo",
-                "*.o", "*.a", "*.so", "*.dylib",
-                "build", "dist", "*.egg-info",
-                ".mypy_cache", ".pytest_cache", ".ruff_cache",
-                "result_profiling",
-            )
-            shutil.copytree(str(ascend_path), str(backup_dir),
-                            ignore=_ignore_patterns, symlinks=False)
-
-            # Count total files for the log
-            file_count = sum(1 for _ in backup_dir.rglob("*") if _.is_file())
-            print_info(f"Work branch code backup: {backup_dir} ({file_count} files)")
-        except Exception as e:
-            print_warn(f"Could not create work branch code backup: {e}")
+        self._backup_code_state("final")
 
         self.state.summary_rows.append(
             ("Finalize", "PASS", f"{self.state.total_steps} step(s) completed")
@@ -2667,6 +2989,12 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_header("Sync Failed — Diagnostics")
 
         ascend_path = Path(self.state.triton_ascend_path)
+
+        # ── Backup code state BEFORE anything else ──
+        # Capture the working tree so AI fixes, conflict resolutions, and
+        # partial merge progress are preserved as CI artifacts even on failure.
+        failed_step = self.state.current_step + 1 if self.state.current_step < self.state.total_steps else self.state.total_steps
+        self._backup_code_state(f"failed-step{failed_step}")
 
         print_error(f"Upgrade failed after {self.state.retry_count} retries")
 
