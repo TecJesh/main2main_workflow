@@ -38,6 +38,8 @@ LLVM_HASH_FILE = "cmake/llvm-hash.txt"
 ENV_LINE_BUDGET = "TA_LINE_BUDGET"
 # Env var to control the commit-count budget at runtime
 ENV_COMMIT_BUDGET = "TA_COMMIT_BUDGET"
+# Env var to enable single-step mode (per-step merge → IR → build → test → fix)
+ENV_SINGLE_STEP_MODE = "TA_SINGLE_STEP_MODE"
 
 # ── Output file names ────────────────────────────────────────────────────────
 DETECT_FILE = "detect.json"
@@ -63,6 +65,9 @@ IR_PATCHES_DIR = "ir-patches"
 IR_OPS_REPORT_FILE = "ops_report.json"
 IR_CHANGES_REPORT_FILE = "changes_report.json"
 IR_DIAGNOSIS_FILE = "ir_diagnosis.json"
+
+# ── Per-step LLVM change analysis (single-step mode) ─────────────────────────
+LLVM_CHANGE_ANALYSIS_DIR = "llvm_change_analysis"
 
 # ── IR Patch loop constants ──────────────────────────────────────────────────
 IR_MAX_ITERATIONS = 3
