@@ -46,6 +46,7 @@ from TA_main2main_workflow.utils import (
     commit_submodule, push_submodule, submodule_has_changes,
     IR_ANALYSIS_DIR, IR_PATCHES_DIR, IR_OPS_REPORT_FILE,
     IR_CHANGES_REPORT_FILE, IR_DIAGNOSIS_FILE, IR_MAX_ITERATIONS,
+    ENV_SINGLE_STEP_MODE, LLVM_CHANGE_ANALYSIS_DIR,
     print_header, print_section, print_step, print_status, print_info,
     print_warn, print_error, print_key_value,
     print_flow_progress, print_conflict_list, print_summary_table,
@@ -145,7 +146,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                    TA_ERROR_LOGS_PATH, runs AI fix, commits & pushes.
         """
         mode = os.getenv("TA_MODE", "full")
-        if mode == "merge":
+        if os.getenv(ENV_SINGLE_STEP_MODE, "false").lower() == "true":
+            return self._run_single_step_mode(inputs)
+        elif mode == "merge":
             return self._run_merge_mode(inputs)
         elif mode == "fix":
             return self._run_fix_mode(inputs)
@@ -523,6 +526,154 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_info(f"Metadata written to {metadata_dir} "
                    f"(step {self.state.current_step + 1}/{self.state.total_steps}, "
                    f"is_last={is_last})")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Mode: single-step — per-step merge → IR → build → test → fix
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _run_single_step_mode(self, inputs: dict | None) -> str:
+        """Single-step mode: each planned step runs the full pipeline independently.
+
+        For each step:
+          1. Merge upstream commits + resolve conflicts
+          2. If LLVM hash changed: IR analysis → patch → rebuild LLVM
+          3. Build Triton-Ascend + AI fix compile errors
+          4. Run tests + AI fix test failures
+          5. Commit step progress
+
+        After all steps: finalize + push + create PR.
+
+        Controlled by TA_SINGLE_STEP_MODE=true env var.
+        """
+        # ── Apply inputs to state ──
+        if inputs:
+            for key, value in inputs.items():
+                if hasattr(self.state, key):
+                    setattr(self.state, key, value)
+
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        # ── Phase 0: Initialize ──
+        self.initialize()
+
+        # ── Phase 1: Detect commits & plan steps ──
+        detect_result = self.detect_commits()
+        if detect_result == HasNoNewCommits:
+            print_info("No new commits — nothing to merge")
+            self.state.summary_rows.append(
+                ("Detect", "SKIP", "No new upstream commits"))
+            self.state.final_status = UpgradeCompleted
+            return UpgradeCompleted
+
+        print_header("Single-Step Mode — Per-Step Full Pipeline")
+        print_key_value("Total steps", str(self.state.total_steps))
+        print_info("Each step: merge → [IR patch] → build → fix → test → fix → commit")
+
+        # ── Phase 1.5: Build baseline LLVM (pre-merge, with Ascend patch) ──
+        if not self._build_baseline_llvm():
+            print_error("Baseline LLVM build failed — cannot proceed")
+            self.state.final_status = UpgradeFailed
+            return UpgradeFailed
+
+        # ── Phase 2: Per-step loop ──
+        while self.state.current_step < self.state.total_steps:
+            step = self.state.steps[self.state.current_step]
+            step_id = step["id"]
+            self.state.retry_count = 0
+
+            print_header(
+                f"Single-Step {self.state.current_step + 1}/{self.state.total_steps}: {step_id}"
+            )
+            print_key_value("commits in step", str(step["commit_count"]))
+            print_key_value("end commit", step["end_commit"][:12])
+            reason = step.get("reason", "line_budget")
+            print_key_value("step reason", reason)
+
+            # Record ascend HEAD before this step
+            self.state.step_start_ascend_head = run_git(
+                ascend_path, "rev-parse", "HEAD"
+            ).strip()
+
+            # ── Step A: git merge ──
+            merge_result = self._do_step_merge(step)
+            if merge_result == UpgradeFailed:
+                self._backup_code_state(f"failed-merge-{step_id}")
+                self.state.final_status = UpgradeFailed
+                return UpgradeFailed
+
+            # ── Step B: AI resolve conflicts ──
+            if self.state.merge_has_conflicts:
+                if not self._do_resolve_conflicts():
+                    self._backup_code_state(f"failed-conflict-{step_id}")
+                    self.state.final_status = UpgradeFailed
+                    return UpgradeFailed
+
+            # ── Step C: IR patch if LLVM hash changed in this step ──
+            if reason == "llvm_version":
+                print_section(f"LLVM Version Change in {step_id} — IR Patch Pipeline")
+                if not self._do_per_step_ir_patch(step):
+                    self.state.final_status = UpgradeFailed
+                    return UpgradeFailed
+
+            # ── Step D: Build + AI fix compile errors ──
+            print_section(f"Build & Fix — {step_id}")
+            if not self._do_build_and_fix_loop():
+                self._backup_code_state(f"failed-build-{step_id}")
+                self.state.final_status = UpgradeFailed
+                return UpgradeFailed
+
+            # ── Step E: Test + AI fix test failures ──
+            if not self._do_test_and_fix_loop():
+                self._backup_code_state(f"failed-test-{step_id}")
+                self.state.final_status = UpgradeFailed
+                return UpgradeFailed
+
+            # ── Step F: Commit step progress ──
+            self._do_commit_step(step)
+
+            # Record step description for PR body
+            desc = (
+                f"✅ **{step_id}**: {step['commit_count']} commits, "
+                f"end_commit=`{step['end_commit'][:12]}`, "
+                f"source lines={step.get('source_changed_lines', '?')}, "
+                f"reason={reason}"
+            )
+            self.state.step_pr_descriptions.append(desc)
+
+            # Record per-step detail for sync report
+            self.state.step_details.append({
+                "step_id": step_id,
+                "step_index": self.state.current_step + 1,
+                "commits": step["commit_count"],
+                "end_commit": step["end_commit"][:12],
+                "source_lines": step.get("source_changed_lines", 0),
+                "conflict_files": len(self.state.conflict_files),
+                "build_fixes": self.state.build_fix_count,
+                "test_fixes": self.state.test_fix_count,
+                "retries": self.state.retry_count,
+                "reason": reason,
+            })
+
+            self.state.current_step += 1
+            print_status(True, f"Step {step_id} completed "
+                         f"({self.state.current_step}/{self.state.total_steps})")
+
+        # ── Phase 3: Finalize ──
+        print_header("Finalize — Generate Summary & Push")
+        self._do_finalize()
+
+        # ── Phase 4: Push to GitHub + create PR ──
+        self.push_to_github()
+
+        self.state.summary_rows.append(
+            ("Single-Step Sync", "PASS",
+             f"{self.state.total_steps} step(s), branch: {self.state.work_branch}")
+        )
+        print_summary_table(self.state.summary_rows)
+        print_elapsed_total()
+
+        self.state.final_status = UpgradeCompleted
+        return UpgradeCompleted
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Mode: fix — AI fix on existing work branch
@@ -2455,6 +2606,425 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         except Exception as e:
             print_warn(f"Could not parse diagnosis: {e}")
             return False
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Per-step IR patch pipeline (single-step mode)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _do_per_step_ir_patch(self, step: dict) -> bool:
+        """Per-step IR compatibility patch generation + LLVM rebuild.
+
+        Called from _run_single_step_mode() when a step's merge included an
+        LLVM hash change.  Reuses the shared IR analysis / patch-generation
+        methods but adds a patch→rebuild retry loop specific to the
+        single-step context.
+
+        Pipeline:
+          1. Verify LLVM hash changed
+          2. Create llvm_change_analysis/<step_id>/ workspace
+          3. IR analysis → patch → apply → rebuild LLVM (max 3 iterations)
+          4. On patch failure: stash/drop, loop back for AI to fix
+        """
+        step_id = step["id"]
+
+        # ── Guard: check LLVM hash actually changed ──
+        if not self._llvm_hash_did_change():
+            print_info(f"[{step_id}] LLVM hash unchanged — skipping IR patch")
+            return True
+
+        # ── Create per-step analysis workspace ──
+        analysis_dir = WORKSPACE_DIR / LLVM_CHANGE_ANALYSIS_DIR / step_id
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        print_key_value("IR analysis dir", str(analysis_dir))
+
+        # ── IR analysis → patch → rebuild loop ──
+        for iteration in range(self.state.ir_max_iterations):
+            self.state.ir_patch_iteration = iteration
+            print_header(
+                f"Per-Step IR Patch — {step_id} "
+                f"(iter {iteration + 1}/{self.state.ir_max_iterations})"
+            )
+
+            # [3.1 + 3.2] Analysis (first iteration only for OP scan)
+            if iteration == 0:
+                print_info("First iteration — running full OP analysis pipeline")
+                if not self._do_ir_op_analysis():
+                    return False
+                if not self._do_ir_change_analysis():
+                    return False
+            else:
+                print_info("Re-analyzing OP changes after patch retry...")
+                if not self._do_ir_change_analysis():
+                    return False
+
+            # [3.3] Generate patches
+            if not self._do_ir_generate_patches():
+                return False
+
+            # [3.4 + 3.5] Apply patches + rebuild LLVM (with retry for patch failures)
+            rebuild_ok = False
+            for patch_attempt in range(IR_MAX_ITERATIONS):
+                print_info(
+                    f"Patch apply attempt {patch_attempt + 1}/{IR_MAX_ITERATIONS}"
+                )
+                if self._do_ir_apply_patches_and_rebuild():
+                    rebuild_ok = True
+                    break
+                # Patch failed — stash/drop, let AI regenerate
+                print_warn(
+                    f"LLVM rebuild failed (patch attempt {patch_attempt + 1}) — "
+                    f"will stash changes and retry patch generation"
+                )
+                self._stash_and_drop_llvm_patch()
+                if not self._do_ir_generate_patches():
+                    break
+
+            if rebuild_ok:
+                print_status(True, f"IR patch + LLVM rebuild OK for {step_id}")
+                self.state.ir_loop_details.append({
+                    "step_id": step_id,
+                    "iteration": iteration + 1,
+                    "result": "PASS",
+                })
+                return True
+
+            print_warn(f"IR patch iteration {iteration + 1} exhausted "
+                       f"— retrying outer loop")
+
+        print_error(f"IR patch loop exhausted {self.state.ir_max_iterations} "
+                    f"iterations for {step_id}")
+        return False
+
+    def _build_baseline_llvm(self) -> bool:
+        """Build baseline LLVM (pre-merge state) before any merge steps.
+
+        Called once at the start of _run_single_step_mode().  Reads the
+        current cmake/llvm-hash.txt from triton-ascend, checks out that
+        commit in llvm-project, applies the Ascend backend LLVM patch,
+        builds LLVM, then stashes + drops the patch to leave a clean tree.
+
+        The baseline LLVM must be built before merging because the Ascend
+        backend code depends on it for compilation.
+        """
+        print_header("Build Baseline LLVM (pre-merge)")
+        ascend_path = Path(self.state.triton_ascend_path)
+
+        llvm_project = Path(os.getenv(
+            "LLVM_PROJECT_PATH", os.path.expanduser("~/llvm-project")))
+        llvm_install = Path(os.getenv(
+            "LLVM_INSTALL_PREFIX_SYNC", os.path.expanduser("~/llvm-install-sync")))
+
+        if not llvm_project.exists():
+            print_error(f"llvm-project not found at {llvm_project}")
+            return False
+
+        # ── 1. Read current LLVM hash ──
+        llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
+        if not llvm_hash_file.exists():
+            print_error(f"LLVM hash file not found: {llvm_hash_file}")
+            return False
+        llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+        print_key_value("LLVM commit", llvm_hash[:12])
+
+        # ── 2. Checkout the LLVM commit ──
+        print_info(f"Checking out LLVM commit {llvm_hash[:12]} in llvm-project...")
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", llvm_hash],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=120,
+            )
+            subprocess.run(
+                ["git", "checkout", llvm_hash],
+                cwd=str(llvm_project), check=True, capture_output=True, text=True, timeout=60,
+            )
+            print_status(True, f"Checked out {llvm_hash[:12]}")
+        except Exception as e:
+            print_error(f"Failed to checkout LLVM commit: {e}")
+            return False
+
+        # ── 3. Apply Ascend backend LLVM patch ──
+        ascend_patch = ascend_path / "third_party" / "ascend" / "patch" / "llvm_patch_f6ded0b.patch"
+        if ascend_patch.exists():
+            print_info(f"Applying Ascend LLVM patch: {ascend_patch.name}")
+            # Dry-run first
+            dry_run = subprocess.run(
+                ["git", "apply", "--check", str(ascend_patch)],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=30,
+            )
+            if dry_run.returncode != 0:
+                print_error(f"Patch does not apply cleanly: {dry_run.stderr.strip()[-400:]}")
+                return False
+            try:
+                subprocess.run(
+                    ["git", "apply", str(ascend_patch)],
+                    cwd=str(llvm_project), check=True, capture_output=True, text=True, timeout=30,
+                )
+                print_status(True, "Ascend LLVM patch applied")
+            except Exception as e:
+                print_error(f"Failed to apply patch: {e}")
+                return False
+        else:
+            print_warn(f"Ascend LLVM patch not found at {ascend_patch} — continuing without it")
+
+        # ── 4. Build LLVM ──
+        llvm_build_log = WORKSPACE_DIR / "llvm_build_baseline.log"
+
+        build_dir = llvm_project / "build"
+        if build_dir.exists():
+            import shutil
+            shutil.rmtree(build_dir)
+        build_dir.mkdir()
+
+        cmake_cmd = [
+            "cmake", str(llvm_project / "llvm"),
+            "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DLLVM_ENABLE_ASSERTIONS=ON",
+            "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
+            "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU",
+            f"-DCMAKE_INSTALL_PREFIX={llvm_install}",
+            "-DCMAKE_C_COMPILER=clang",
+            "-DCMAKE_CXX_COMPILER=clang++",
+        ]
+        print_info("Configuring LLVM with cmake...")
+        cmake_proc = subprocess.run(
+            cmake_cmd, cwd=str(build_dir), timeout=300,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        llvm_build_log.write_text(
+            f"=== cmake ===\n{cmake_proc.stdout}\n", encoding="utf-8")
+        if cmake_proc.returncode != 0:
+            print_error(f"cmake failed (exit {cmake_proc.returncode})")
+            return False
+        print_status(True, "cmake configure OK")
+
+        print_info("Building LLVM with ninja (this may take a while)...")
+        ninja_proc = subprocess.run(
+            ["ninja", "install"], cwd=str(build_dir), timeout=7200,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        with llvm_build_log.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n=== ninja install ===\n{ninja_proc.stdout}\n")
+        if ninja_proc.returncode != 0:
+            print_error(f"ninja install failed (exit {ninja_proc.returncode})")
+            return False
+        print_status(True, "ninja install OK")
+
+        # Copy FileCheck
+        import shutil
+        filecheck_src = build_dir / "bin" / "FileCheck"
+        filecheck_dst = llvm_install / "bin" / "FileCheck"
+        if filecheck_src.exists():
+            filecheck_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(filecheck_src, filecheck_dst)
+            print_info("Copied FileCheck to install prefix")
+
+        # Write hash cache
+        hash_cache = llvm_install / ".llvm_hash"
+        llvm_install.mkdir(parents=True, exist_ok=True)
+        hash_cache.write_text(llvm_hash, encoding="utf-8")
+        print_status(True, "Baseline LLVM build complete")
+
+        # Store llvm_prefix for later use
+        if not self.state.llvm_prefix:
+            self.state.llvm_prefix = str(llvm_install)
+
+        # ── 5. Stash + drop the patch to leave a clean tree ──
+        print_info("Stashing and dropping Ascend LLVM patch to clean working tree...")
+        try:
+            subprocess.run(
+                ["git", "stash", "push", "-u", "-m", "ta-baseline-llvm-patch"],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=30,
+            )
+            subprocess.run(
+                ["git", "stash", "drop", "stash@{0}"],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=30,
+            )
+            print_status(True, "LLVM working tree clean (patch stashed + dropped)")
+        except Exception as e:
+            print_warn(f"Stash/drop failed: {e} — forcing clean with checkout")
+            subprocess.run(
+                ["git", "checkout", "--", "."],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "clean", "-fd"],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=60,
+            )
+
+        self.state.summary_rows.append(
+            ("Baseline LLVM", "PASS", f"Built {llvm_hash[:12]}"))
+        return True
+
+    def _stash_and_drop_llvm_patch(self) -> None:
+        """Stash any pending changes in llvm-project and drop them.
+
+        Used after a failed LLVM rebuild to clean up the patch so that the
+        AI can generate a fresh patch from a clean working tree.
+        """
+        llvm_project = Path(os.getenv(
+            "LLVM_PROJECT_PATH",
+            os.path.expanduser("~/llvm-project"),
+        ))
+        if not llvm_project.exists():
+            print_warn("[llvm-stash] llvm-project not found — cannot stash")
+            return
+
+        print_info("[llvm-stash] Stashing and dropping LLVM patch changes...")
+        try:
+            subprocess.run(
+                ["git", "stash", "push", "-u", "-m", "ta-ir-patch-failed"],
+                cwd=str(llvm_project),
+                capture_output=True, text=True, timeout=30,
+            )
+            subprocess.run(
+                ["git", "stash", "drop", "stash@{0}"],
+                cwd=str(llvm_project),
+                capture_output=True, text=True, timeout=30,
+            )
+            print_info("[llvm-stash] Changes stashed and dropped — working tree clean")
+        except Exception as e:
+            print_warn(f"[llvm-stash] Stash/drop failed: {e} — "
+                       f"forcing clean with checkout")
+            subprocess.run(
+                ["git", "checkout", "--", "."],
+                cwd=str(llvm_project),
+                capture_output=True, text=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "clean", "-fd"],
+                cwd=str(llvm_project),
+                capture_output=True, text=True, timeout=60,
+            )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Per-step test + fix loop (single-step mode)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _do_test_and_fix_loop(self) -> bool:
+        """Run tests + AI-fix loop for the current step.
+
+        Returns True if all tests pass, False on exhaustion.
+        """
+        ascend_path = Path(self.state.triton_ascend_path)
+        step = (self.state.steps[self.state.current_step]
+                if self.state.steps else None)
+        step_id = step["id"] if step else "step-0"
+        step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
+        step_dir.mkdir(parents=True, exist_ok=True)
+
+        test_passed = False
+
+        for attempt in range(self.state.max_retries + 1):
+            is_fix_attempt = attempt > 0
+            self.state.retry_count = attempt
+
+            # AI fix test failures (skip on first round)
+            if is_fix_attempt:
+                print_header(f"Fix Attempt {attempt}/{self.state.max_retries} (test)")
+                self.state.fix_errors = self._collect_test_error_logs()
+                if self.state.fix_errors:
+                    ai_ok = self._do_ai_fix(ascend_path, step_dir, attempt)
+                    # Record fix attempt
+                    modified_files: list[str] = []
+                    ai_summary = ""
+                    if hasattr(self, '_last_ai_result') and self._last_ai_result:
+                        modified_files = self._last_ai_result.get("modified_files", [])
+                        ai_summary = self._last_ai_result.get("step_summary", "")
+                    error_snippet = ""
+                    for err_path in self.state.fix_errors:
+                        try:
+                            content = Path(err_path).read_text(
+                                encoding="utf-8", errors="replace")
+                            error_snippet += (content[-2000:]
+                                             if len(content) > 2000 else content)
+                        except Exception:
+                            pass
+                    self.state.fix_attempts.append({
+                        "step_id": step_id,
+                        "attempt": attempt,
+                        "fix_type": "test",
+                        "error_logs": list(self.state.fix_errors),
+                        "error_snippet": error_snippet[-1500:],
+                        "modified_files": modified_files,
+                        "ai_summary": (ai_summary or "")[:2000],
+                        "ai_ok": ai_ok,
+                    })
+                    self.state.test_fix_count += 1
+                else:
+                    print_warn("No test error logs found — cannot fix")
+
+            # Rebuild after fix (skip on first attempt since build_and_fix already built)
+            if is_fix_attempt:
+                if not self._do_build(ascend_path, clean=False):
+                    print_warn(f"Build failed after test fix (attempt {attempt})")
+                    continue
+
+            # Run tests
+            test_result = self._do_test(ascend_path)
+            if test_result is None:
+                # SKIP_E2E_TEST — treat as pass
+                test_passed = True
+                break
+            if test_result:
+                test_passed = True
+                break
+
+            print_warn(f"Tests failed (attempt {attempt + 1}/"
+                       f"{self.state.max_retries + 1})")
+
+            if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
+                print_warn("SKIP_AI_ANALYSIS=true — stopping test fix loop")
+                break
+
+        if test_passed:
+            self.state.test_passed = True
+            # Commit test fixes if any were applied
+            if self.state.retry_count > 0:
+                self._commit_fixes(ascend_path, step_dir)
+            self.state.summary_rows.append(
+                ("Tests", "PASS", f"{step_id}"))
+        else:
+            print_error(f"All {self.state.max_retries} fix attempts exhausted "
+                        f"— tests still failing")
+            self.state.summary_rows.append(
+                ("Tests", "FAIL", f"After {self.state.max_retries} attempts"))
+            self.state.test_passed = False
+
+        return test_passed
+
+    def _collect_test_error_logs(self) -> list[str]:
+        """Collect test failure log paths for AI fix context.
+
+        Returns a list of file paths pointing to test logs and test result
+        files in the workspace.
+        """
+        error_logs: list[str] = []
+
+        # Test log directory
+        test_log_dir = WORKSPACE_DIR / "test-logs"
+        if test_log_dir.exists():
+            for log_file in sorted(test_log_dir.rglob("*.log")):
+                error_logs.append(str(log_file))
+
+        # Test result JSON
+        test_result_path = WORKSPACE_DIR / TEST_RESULT_FILE
+        if test_result_path.exists():
+            error_logs.append(str(test_result_path))
+
+        # Build result JSON (may contain build errors that affect tests)
+        build_result_path = WORKSPACE_DIR / BUILD_RESULT_FILE
+        if build_result_path.exists():
+            error_logs.append(str(build_result_path))
+
+        if error_logs:
+            print_info(f"Collected {len(error_logs)} error log(s) for AI fix")
+            for p in error_logs[:5]:
+                print_info(f"  - {p}")
+            if len(error_logs) > 5:
+                print_info(f"  ... and {len(error_logs) - 5} more")
+
+        return error_logs
 
     def _backup_code_state(self, label: str = "snapshot") -> Path | None:
         """Backup triton-ascend working tree to workspace for CI artifact retention.
