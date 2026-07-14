@@ -32,6 +32,8 @@ BASE_LINE_BUDGET = 1000
 BASE_COMMIT_COUNT_BUDGET = 5      # deprecated — no longer used as a step limit
 # Directories in upstream triton whose changed lines count toward the budget
 SOURCE_DIRS = ["python/triton/", "lib/", "include/"]
+# File that tracks the LLVM version — commits that modify it get solo steps
+LLVM_HASH_FILE = "cmake/llvm-hash.txt"
 # Env var to control the line budget at runtime
 ENV_LINE_BUDGET = "TA_LINE_BUDGET"
 # Env var to control the commit-count budget at runtime

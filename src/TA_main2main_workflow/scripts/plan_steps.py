@@ -6,13 +6,15 @@ lines in key source directories. Every commit between base and target is
 included — no commits are skipped, including those that touch zero source
 lines (they are still tracked but contribute 0 to the line budget).
 
-Algorithm:
-  1. git log --reverse base..target → ordered commit list
-  2. For each commit, git diff-tree --numstat → source dir changed lines
-  3. ALL commits are considered in order; none are filtered out
-  4. Commits accumulate into a step until source_changed_lines > LINE_BUDGET
-     (no commit-count limit — as many commits as fit within the line budget)
-  5. A single commit with source_changed_lines > LINE_BUDGET becomes its own step
+Algorithm (in priority order):
+  1. LLVM version change → solo step:
+     If a commit modifies cmake/llvm-hash.txt it MUST be merged alone,
+     regardless of its source-line count. Pending commits are flushed first.
+  2. Oversized single commit:
+     A commit whose source lines exceed LINE_BUDGET becomes its own step.
+  3. Line-budget grouping:
+     Commits accumulate into a step until source_changed_lines > LINE_BUDGET
+     (no commit-count limit — as many commits as fit within the line budget).
 
 The LINE_BUDGET can be controlled via TA_LINE_BUDGET env var (default: 1000).
 
@@ -31,7 +33,7 @@ from typing import Any
 
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, STEPS_FILE, STEPS_DIR, LINE_BUDGET, SOURCE_DIRS,
-    run_git,
+    LLVM_HASH_FILE, run_git,
 )
 
 
@@ -74,17 +76,37 @@ def _source_lines_for_commit(repo: Path, sha: str) -> int:
     return total
 
 
+def _commit_changed_llvm_hash(repo: Path, sha: str) -> bool:
+    """Check if a single commit modified cmake/llvm-hash.txt.
+
+    Uses git diff-tree to list files changed by *sha*, then checks whether
+    LLVM_HASH_FILE appears in the output.  A commit that touches this file
+    must become a solo step regardless of its source-line count.
+    """
+    try:
+        output = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        return LLVM_HASH_FILE in output
+    except Exception:
+        return False
+
+
 def _make_step(
     index: int,
     commits: list[dict[str, str]],
     start_commit: str,
     total_lines: int,
     line_budget: int,
+    reason: str = "line_budget",
 ) -> dict[str, Any]:
     """Build a step dict from accumulated commits.
 
     The 'commits' field stores objects with 'sha' and 'subject' keys,
     matching the vllm-ascend main2main_flow format.
+
+    *reason* explains why this step was formed:
+      - ``"line_budget"`` — normal grouping by line budget
+      - ``"llvm_version"`` — solo step because commit changed llvm-hash.txt
+      - ``"oversized"``    — solo step because a single commit exceeds budget
     """
     return {
         "index": index,
@@ -95,6 +117,7 @@ def _make_step(
         "end_commit": commits[-1]["sha"],
         "source_changed_lines": total_lines,
         "line_budget": line_budget,
+        "reason": reason,
     }
 
 
@@ -103,41 +126,77 @@ def _plan_steps(
     lines_per_commit: dict[str, int],
     base_commit: str,
     line_budget: int = LINE_BUDGET,
+    llvm_commits: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Group commits into steps respecting only the line budget.
+    """Group commits into steps with LLVM-aware planning.
 
     Every commit in the range is included — even those that touch zero
     source lines (they contribute 0 to the line budget and don't cause
     step splits on their own).
 
-    Algorithm:
-      - ALL commits are considered in order; none are filtered out.
-      - A commit whose source lines exceed LINE_BUDGET becomes its own step.
-      - Otherwise accumulate until line budget exceeded, then flush.
-      - No commit-count cap — as many commits as fit within the line budget.
+    Algorithm (in priority order):
+      1. **LLVM version change → solo step**: If a commit modifies
+         ``cmake/llvm-hash.txt`` it MUST be merged alone, regardless of
+         its source-line count.  Pending commits are flushed first.
+      2. **Oversized single commit**: A commit whose source lines exceed
+         LINE_BUDGET becomes its own step.
+      3. **Line-budget grouping**: Otherwise accumulate commits until
+         ``step_lines + commit_lines > line_budget``, then flush.
+         No commit-count cap — as many commits as fit within the budget.
     """
+    if llvm_commits is None:
+        llvm_commits = set()
+
     steps: list[dict[str, Any]] = []
     step_commits: list[dict[str, str]] = []
     step_lines = 0
     start = base_commit
 
     for commit in commits:
-        lines = lines_per_commit.get(commit["sha"], 0)
+        sha = commit["sha"]
+        lines = lines_per_commit.get(sha, 0)
+        is_llvm_change = sha in llvm_commits
 
-        # ── Oversized single commit: flush pending, emit solo step ──
-        if lines > line_budget:
+        # ── Rule 1.1: LLVM version change → solo step ──
+        if is_llvm_change:
             if step_commits:
-                steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, line_budget))
+                steps.append(_make_step(
+                    len(steps) + 1, step_commits, start, step_lines,
+                    line_budget, reason="line_budget",
+                ))
                 start = steps[-1]["end_commit"]
                 step_commits = []
                 step_lines = 0
-            steps.append(_make_step(len(steps) + 1, [commit], start, lines, line_budget))
+            steps.append(_make_step(
+                len(steps) + 1, [commit], start, lines, line_budget,
+                reason="llvm_version",
+            ))
+            start = steps[-1]["end_commit"]
+            continue
+
+        # ── Rule 2.1: Oversized single commit → solo step ──
+        if lines > line_budget:
+            if step_commits:
+                steps.append(_make_step(
+                    len(steps) + 1, step_commits, start, step_lines,
+                    line_budget, reason="line_budget",
+                ))
+                start = steps[-1]["end_commit"]
+                step_commits = []
+                step_lines = 0
+            steps.append(_make_step(
+                len(steps) + 1, [commit], start, lines, line_budget,
+                reason="oversized",
+            ))
             start = steps[-1]["end_commit"]
             continue
 
         # ── Would exceed line budget → flush current step first ──
         if step_lines + lines > line_budget:
-            steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, line_budget))
+            steps.append(_make_step(
+                len(steps) + 1, step_commits, start, step_lines,
+                line_budget, reason="line_budget",
+            ))
             start = steps[-1]["end_commit"]
             step_commits = []
             step_lines = 0
@@ -147,7 +206,10 @@ def _plan_steps(
 
     # ── Flush remaining ──
     if step_commits:
-        steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, line_budget))
+        steps.append(_make_step(
+            len(steps) + 1, step_commits, start, step_lines,
+            line_budget, reason="line_budget",
+        ))
 
     return steps
 
@@ -211,14 +273,19 @@ def run_plan(
           f"({base_commit[:8]}..{target_commit[:8]})")
     print(f"[plan] Line budget: {line_budget} (no commit-count limit)")
 
-    # Count changed source lines per commit
+    # Count changed source lines per commit + detect LLVM version changes
     lines_per_commit: dict[str, int] = {}
+    llvm_commits: set[str] = set()
     source_touching_count = 0
     for i, c in enumerate(commits):
         lines = _source_lines_for_commit(triton_path, c["sha"])
         lines_per_commit[c["sha"]] = lines
         if lines > 0:
             source_touching_count += 1
+        # Rule 1.1: check if this commit changed cmake/llvm-hash.txt
+        if _commit_changed_llvm_hash(triton_path, c["sha"]):
+            llvm_commits.add(c["sha"])
+            print(f"[plan]   LLVM version change detected: {c['sha'][:8]} {c['subject'][:80]}")
         if (i + 1) % 50 == 0:
             print(f"[plan]   ... scanned {i + 1}/{len(commits)} commits")
 
@@ -226,7 +293,12 @@ def run_plan(
         print(f"[plan] {len(commits) - source_touching_count} commits touch zero "
               f"source lines — included in steps with 0 line contribution")
 
-    steps = _plan_steps(commits, lines_per_commit, base_commit, line_budget)
+    if llvm_commits:
+        print(f"[plan] {len(llvm_commits)} commit(s) changed LLVM hash "
+              f"— each will be a solo merge step")
+
+    steps = _plan_steps(commits, lines_per_commit, base_commit, line_budget,
+                        llvm_commits=llvm_commits)
     _enrich_steps_with_diff(triton_path, steps)
 
     plan = {
@@ -267,8 +339,42 @@ def run_plan(
     print(f"[plan] Generated {len(steps)} step(s) totaling "
           f"{plan['total_commits']} source-touching commits")
     for s in steps:
+        reason_tag = ""
+        if s.get("reason") == "llvm_version":
+            reason_tag = " [LLVM VERSION]"
+        elif s.get("reason") == "oversized":
+            reason_tag = " [OVERSIZED]"
         print(f"        {s['id']}: {s['commit_count']} commits, "
               f"{s['source_changed_lines']} lines "
-              f"({'OVERSIZED' if s['source_changed_lines'] > line_budget else 'OK'})")
+              f"({'OVERSIZED' if s['source_changed_lines'] > line_budget else 'OK'})"
+              f"{reason_tag}")
 
     return plan
+
+
+def plan_steps(
+    triton_path: Path,
+    base_commit: str,
+    target_commit: str,
+    line_budget: int | None = None,
+) -> list[dict[str, Any]]:
+    """Public wrapper: plan steps and return the step list (for testing).
+
+    Same as run_plan() but returns just the steps list instead of the full
+    plan dict.  Does NOT write files to disk — call run_plan() for that.
+    """
+    if line_budget is None:
+        line_budget = int(os.getenv("TA_LINE_BUDGET", str(LINE_BUDGET)))
+
+    commits = _list_commits(triton_path, base_commit, target_commit)
+
+    lines_per_commit: dict[str, int] = {}
+    llvm_commits: set[str] = set()
+    for c in commits:
+        lines = _source_lines_for_commit(triton_path, c["sha"])
+        lines_per_commit[c["sha"]] = lines
+        if _commit_changed_llvm_hash(triton_path, c["sha"]):
+            llvm_commits.add(c["sha"])
+
+    return _plan_steps(commits, lines_per_commit, base_commit, line_budget,
+                       llvm_commits=llvm_commits)
