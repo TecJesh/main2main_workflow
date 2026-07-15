@@ -105,8 +105,8 @@ def _create_work_branch(repo: Path, suffix: str = "") -> str:
 
     _abort_stale_merge(repo)
 
-    # Choose branch point: origin/main by default (avoids workflow-file push
-    # protection with GITHUB_TOKEN); set TA_WORK_BRANCH_BASE=upstream-ascend
+    # Choose branch point: origin/main by default (the private fork's main branch,
+    # i.e. TecJesh/triton-ascend when run in CI). Set TA_WORK_BRANCH_BASE=upstream-ascend
     # to use triton-lang/triton-ascend/main instead.
     branch_base = os.getenv("TA_WORK_BRANCH_BASE", "origin")
 
@@ -123,6 +123,10 @@ def _create_work_branch(repo: Path, suffix: str = "") -> str:
             run_git(repo, "fetch", "origin", "main")
         except Exception:
             print("[merge] Warning: could not fetch origin/main, using local ref")
+
+    # Resolve base ref to a commit so we can log both the name and the SHA
+    base_sha = run_git(repo, "rev-parse", base_ref).strip()
+    print(f"[merge] Base branch: {base_ref}  commit: {base_sha[:12]}")
 
     print(f"[merge] Creating work branch '{branch}' from {base_ref}")
     proc = run_git_no_check(repo, "checkout", "-B", branch, base_ref)
