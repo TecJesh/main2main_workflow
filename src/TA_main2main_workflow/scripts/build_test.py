@@ -174,14 +174,10 @@ def _check_and_rebuild_llvm(repo_path: Path, force_rebuild: bool = False) -> str
 
     Returns the LLVM install prefix path.
     """
-    llvm_project = Path(
-        os.getenv("LLVM_PROJECT_PATH",
-                   os.path.expanduser("~/llvm-project"))
-    )
-    llvm_install = Path(
-        os.getenv("LLVM_INSTALL_PREFIX_SYNC",
-                   os.path.expanduser("~/llvm-install-sync"))
-    )
+    llvm_project = Path(os.path.expanduser(
+        os.getenv("LLVM_PROJECT_PATH", "~/llvm-project")))
+    llvm_install = Path(os.path.expanduser(
+        os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")))
 
     # Read the required LLVM hash from triton-ascend
     llvm_hash_file = repo_path / "cmake" / "llvm-hash.txt"

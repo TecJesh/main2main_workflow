@@ -61,6 +61,18 @@ _REFERENCE_DIR = str(Path(__file__).parent / "reference")
 _ASCEND_BASELINE_LLVM_HASH = "b5cc222d7429fe6f18c787f633d5262fac2e676f"
 
 
+def _llvm_project_path() -> Path:
+    """Return the resolved llvm-project path (expands ~ and $HOME)."""
+    return Path(os.path.expanduser(
+        os.getenv("LLVM_PROJECT_PATH", "~/llvm-project")))
+
+
+def _llvm_install_prefix() -> Path:
+    """Return the resolved LLVM install prefix (expands ~ and $HOME)."""
+    return Path(os.path.expanduser(
+        os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")))
+
+
 class TA_Main2MainState(BaseModel):
     triton_ascend_path: str = ""
     triton_path: str = ""
@@ -2123,10 +2135,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 "mode": "ir_analyze_ops",
                 "error_logs": "[]",
                 "target_commit": self.state.target_commit,
-                "llvm_project_path": os.getenv(
-                    "LLVM_PROJECT_PATH",
-                    os.path.expanduser("~/llvm-project"),
-                ),
+                "llvm_project_path": str(_llvm_project_path()),
             })
             _ = ai_result
         except Exception as e:
@@ -2189,10 +2198,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         ir_dir.mkdir(parents=True, exist_ok=True)
 
         baseline_hash = _ASCEND_BASELINE_LLVM_HASH
-        llvm_project = Path(os.getenv(
-            "LLVM_PROJECT_PATH",
-            os.path.expanduser("~/llvm-project"),
-        ))
+        llvm_project = _llvm_project_path()
 
         # Read target LLVM hash from ascend repo
         llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
@@ -2304,10 +2310,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 "error_logs": json.dumps(
                     [str(ir_dir / IR_OPS_REPORT_FILE)], ensure_ascii=False),
                 "target_commit": self.state.target_commit,
-                "llvm_project_path": os.getenv(
-                    "LLVM_PROJECT_PATH",
-                    os.path.expanduser("~/llvm-project"),
-                ),
+                "llvm_project_path": str(_llvm_project_path()),
                 "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
                 "target_llvm_hash": target_hash,
             })
@@ -2403,10 +2406,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 "error_logs": json.dumps(
                     [str(ir_dir / IR_CHANGES_REPORT_FILE)], ensure_ascii=False),
                 "target_commit": self.state.target_commit,
-                "llvm_project_path": os.getenv(
-                    "LLVM_PROJECT_PATH",
-                    os.path.expanduser("~/llvm-project"),
-                ),
+                "llvm_project_path": str(_llvm_project_path()),
                 "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
                 "ascend_patch_file": str(ascend_patch),
             })
@@ -2437,10 +2437,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_header("Phase 3.4-3.5: Apply Patches + Rebuild LLVM")
         ascend_path = Path(self.state.triton_ascend_path)
 
-        llvm_project = Path(os.getenv(
-            "LLVM_PROJECT_PATH",
-            os.path.expanduser("~/llvm-project"),
-        ))
+        llvm_project = _llvm_project_path()
         # The in-repo Ascend LLVM patch (modified by AI in step 3.3)
         ascend_patch = (ascend_path / "third_party" / "ascend" / "patch"
                         / "llvm_patch_f6ded0b.patch")
@@ -2722,10 +2719,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_header("Build Baseline LLVM (pre-merge)")
         ascend_path = Path(self.state.triton_ascend_path)
 
-        llvm_project = Path(os.getenv(
-            "LLVM_PROJECT_PATH", os.path.expanduser("~/llvm-project")))
-        llvm_install = Path(os.getenv(
-            "LLVM_INSTALL_PREFIX_SYNC", os.path.expanduser("~/llvm-install-sync")))
+        llvm_project = _llvm_project_path()
+        llvm_install = _llvm_install_prefix()
 
         if not llvm_project.exists():
             print_error(f"llvm-project not found at {llvm_project}")
@@ -2875,10 +2870,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         Used after a failed LLVM rebuild to clean up the patch so that the
         AI can generate a fresh patch from a clean working tree.
         """
-        llvm_project = Path(os.getenv(
-            "LLVM_PROJECT_PATH",
-            os.path.expanduser("~/llvm-project"),
-        ))
+        llvm_project = _llvm_project_path()
         if not llvm_project.exists():
             print_warn("[llvm-stash] llvm-project not found — cannot stash")
             return
