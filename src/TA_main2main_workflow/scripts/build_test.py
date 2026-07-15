@@ -223,14 +223,21 @@ def _check_and_rebuild_llvm(repo_path: Path, force_rebuild: bool = False) -> str
     )
     if proc.returncode != 0:
         print(f"  [llvm] Commit {required_hash[:12]} not found locally — fetching from origin...")
-        subprocess.run(
-            ["git", "fetch", "origin", required_hash],
-            cwd=llvm_project, check=True, capture_output=True, text=True, timeout=120,
-        )
+        for attempt in range(1, 7):
+            fetch_proc = subprocess.run(
+                ["git", "fetch", "origin", required_hash],
+                cwd=llvm_project, capture_output=True, text=True, timeout=2000,
+            )
+            if fetch_proc.returncode == 0:
+                break
+            print(f"  [llvm] Fetch attempt {attempt}/6 failed — retrying...")
+        else:
+            raise RuntimeError(
+                f"Failed to fetch LLVM commit {required_hash[:12]} after 6 attempts")
         _run_cmd(
             ["git", "checkout", required_hash],
             cwd=llvm_project,
-            timeout=60,
+            timeout=2000,
         )
 
     # Clean and rebuild

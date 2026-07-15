@@ -81,18 +81,49 @@ def detect(
 
     Returns (result_dict, has_new_commits).
     """
-    ascend_head = get_repo_head(triton_ascend_path)
-    target = target_commit if target_commit else get_repo_head(triton_path)
+    # ── Fetch latest from origin/main (private fork base) ──
+    try:
+        run_git(triton_ascend_path, "fetch", "origin", "main")
+        print("[detect] Fetched origin/main (private fork)")
+    except Exception:
+        print("[detect] Warning: could not fetch origin/main, using local refs")
 
+    # ── Fetch latest from upstream-triton ──
     if not target_commit:
         try:
             run_git(triton_ascend_path, "fetch", "upstream-triton", "--prune")
         except Exception:
             print("[detect] Warning: could not fetch upstream-triton, using local refs")
 
+    # ── Use origin/main as the ascend reference (not checkout HEAD) ──
+    # The work branch will be created from origin/main, so the merge_base
+    # must be computed against origin/main — otherwise we'd include commits
+    # that are already on main.
+    try:
+        ascend_head = run_git(triton_ascend_path, "rev-parse", "origin/main").strip()
+    except Exception:
+        ascend_head = get_repo_head(triton_ascend_path)
+        print("[detect] Warning: origin/main not available, using checkout HEAD")
+
+    target = target_commit if target_commit else get_repo_head(triton_path)
+
+    # ── Debug: print key refs ──
+    checkout_head = get_repo_head(triton_ascend_path)
+    print(f"[detect] Checkout HEAD : {checkout_head[:12]}")
+    print(f"[detect] origin/main  : {ascend_head[:12]}")
+    print(f"[detect] upstream target: {target[:12]}")
+
     merge_base = get_merge_base(triton_ascend_path, ascend_head, target)
+    print(f"[detect] merge_base   : {merge_base[:12]}")
+
     commits = _list_upstream_commits(triton_path, merge_base, target)
     has_new = len(commits) > 0 and merge_base != target
+
+    if has_new:
+        print(f"[detect] {len(commits)} new upstream commits to merge "
+              f"({commits[0]['sha'][:8]}..{commits[-1]['sha'][:8]})")
+    else:
+        print("[detect] No new upstream commits — already up to date")
 
     result = {
         "ascend_head": ascend_head,

@@ -2739,17 +2739,33 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         # ── 2. Checkout the LLVM commit ──
         print_info(f"Checking out LLVM commit {llvm_hash[:12]} in llvm-project...")
         try:
-            subprocess.run(
-                ["git", "fetch", "origin", llvm_hash],
-                cwd=str(llvm_project), capture_output=True, text=True, timeout=120,
-            )
+            # Fetch the specific commit with retries
+            for attempt in range(1, 7):
+                fetch_proc = subprocess.run(
+                    ["git", "fetch", "origin", llvm_hash],
+                    cwd=str(llvm_project), capture_output=True, text=True, timeout=2000,
+                )
+                if fetch_proc.returncode == 0:
+                    break
+                print_warn(f"git fetch attempt {attempt}/6 failed: "
+                           f"{fetch_proc.stderr.strip()[-150:]}")
+            else:
+                raise RuntimeError(
+                    f"Failed to fetch LLVM commit {llvm_hash[:12]} after 6 attempts")
+
             subprocess.run(
                 ["git", "checkout", llvm_hash],
-                cwd=str(llvm_project), check=True, capture_output=True, text=True, timeout=60,
+                cwd=str(llvm_project), check=True, capture_output=True, text=True,
+                timeout=2000,
             )
             print_status(True, f"Checked out {llvm_hash[:12]}")
         except Exception as e:
             print_error(f"Failed to checkout LLVM commit: {e}")
+            log_proc = subprocess.run(
+                ["git", "log", "--oneline", "-5"],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=10,
+            )
+            print_info(f"llvm-project HEAD and recent commits:\n{log_proc.stdout.strip()}")
             return False
 
         # ── 3. Apply Ascend backend LLVM patch ──
