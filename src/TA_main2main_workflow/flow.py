@@ -44,7 +44,7 @@ from TA_main2main_workflow.utils import (
     TEST_RESULT_FILE, UpgradeCompleted, UpgradeFailed,
     WORKSPACE_DIR, has_merge_conflicts, run_git, get_conflict_files,
     commit_submodule, push_submodule, submodule_has_changes,
-    IR_ANALYSIS_DIR, IR_PATCHES_DIR, IR_OPS_REPORT_FILE,
+    IR_ANALYSIS_DIR, IR_OPS_REPORT_FILE,
     IR_CHANGES_REPORT_FILE, IR_DIAGNOSIS_FILE, IR_MAX_ITERATIONS,
     ENV_SINGLE_STEP_MODE, LLVM_CHANGE_ANALYSIS_DIR,
     print_header, print_section, print_step, print_status, print_info,
@@ -2357,13 +2357,23 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         return False
 
     def _do_ir_generate_patches(self) -> bool:
-        """[3.3] AI generates LLVM BC compatibility patches."""
+        """[3.3] AI modifies the Ascend LLVM patch for IR compatibility.
+
+        The AI directly edits the existing patch file at
+        ``third_party/ascend/patch/llvm_patch_f6ded0b.patch`` rather than
+        creating a new file from scratch — this lets it start from a known-
+        working baseline and only adjust the parts that need changing for
+        the current LLVM version.
+        """
         print_header("Phase 3.3: IR Patch Generation")
         ascend_path = Path(self.state.triton_ascend_path)
 
         ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
-        patches_dir = WORKSPACE_DIR / IR_PATCHES_DIR
-        patches_dir.mkdir(parents=True, exist_ok=True)
+
+        # The patch file that AI modifies in-place
+        ascend_patch = (ascend_path / "third_party" / "ascend" / "patch"
+                        / "llvm_patch_f6ded0b.patch")
+        print_key_value("Target patch", str(ascend_patch))
 
         changes_report = ir_dir / IR_CHANGES_REPORT_FILE
         if changes_report.exists():
@@ -2374,8 +2384,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                            f"{summary.get('ops_needing_patch', '?')} need patches")
             except Exception:
                 pass
-        print_key_value("Patches output dir", str(patches_dir))
-        print_info("Invoking AI to generate IR compatibility patches...")
+        print_info("Invoking AI to modify the Ascend LLVM compatibility patch...")
 
         try:
             ai_result = run_opencode_adapter({
@@ -2384,8 +2393,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 "previous_step_summary_path": str(ir_dir / IR_CHANGES_REPORT_FILE),
                 "is_last_step": "true",
                 "step_index": "ir",
-                "step_dir": str(patches_dir),
-                "fix_dir": str(patches_dir),
+                "step_dir": str(ascend_patch.parent),
+                "fix_dir": str(ascend_patch.parent),
                 "conflict_dir": "",
                 "ascend_path": str(ascend_path),
                 "triton_path": self.state.triton_path,
@@ -2399,6 +2408,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     os.path.expanduser("~/llvm-project"),
                 ),
                 "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "ascend_patch_file": str(ascend_patch),
             })
             _ = ai_result
         except Exception as e:
@@ -2407,33 +2417,35 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 ("IR Patch Gen", "FAIL", str(e)[:60]))
             return False
 
-        patch_file = patches_dir / "ir_compat.patch"
-        if patch_file.exists():
-            print_status(True, "Generated ir_compat.patch")
-            self.state.ir_patches = [str(patch_file)]
+        # Check the ascend patch was modified
+        if ascend_patch.exists():
+            print_status(True, f"Modified {ascend_patch.name}")
+            self.state.ir_patches = [str(ascend_patch)]
             self.state.summary_rows.append(
-                ("IR Patch Gen", "PASS", "ir_compat.patch"))
+                ("IR Patch Gen", "PASS", ascend_patch.name))
             return True
 
-        # No patch needed — valid if changes_report showed no issues
-        print_info("ir_compat.patch not generated — "
+        # No changes needed — valid if changes_report showed no issues
+        print_info(f"{ascend_patch.name} unchanged — "
                    "IR compatibility may already be satisfied")
         self.state.summary_rows.append(
-            ("IR Patch Gen", "PASS", "No patch needed"))
+            ("IR Patch Gen", "PASS", "No changes needed"))
         return True
 
     def _do_ir_apply_patches_and_rebuild(self) -> bool:
-        """[3.4 + 3.5] Apply generated patches to LLVM and rebuild."""
+        """[3.4 + 3.5] Apply the Ascend LLVM patch and rebuild."""
         print_header("Phase 3.4-3.5: Apply Patches + Rebuild LLVM")
         ascend_path = Path(self.state.triton_ascend_path)
 
-        patches_dir = WORKSPACE_DIR / IR_PATCHES_DIR
         llvm_project = Path(os.getenv(
             "LLVM_PROJECT_PATH",
             os.path.expanduser("~/llvm-project"),
         ))
+        # The in-repo Ascend LLVM patch (modified by AI in step 3.3)
+        ascend_patch = (ascend_path / "third_party" / "ascend" / "patch"
+                        / "llvm_patch_f6ded0b.patch")
         print_key_value("LLVM project", str(llvm_project))
-        print_key_value("Patches dir", str(patches_dir))
+        print_key_value("Patch file", str(ascend_patch))
 
         if not llvm_project.exists():
             print_error(f"LLVM project not found at {llvm_project}")
@@ -2452,9 +2464,10 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             target_llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
             print_key_value("Target LLVM hash", target_llvm_hash[:12])
 
-        print_info("Step 3.4: Applying ir_compat.patch to llvm-project...")
+        print_info(f"Step 3.4: Applying {ascend_patch.name} to llvm-project...")
         patch_result = apply_llvm_patches(
-            patches_dir, llvm_project, target_hash=target_llvm_hash)
+            ascend_patch.parent, llvm_project,
+            target_hash=target_llvm_hash, patch_file=ascend_patch)
         if not patch_result["all_ok"]:
             failed = patch_result["failed"]
             print_error(f"LLVM patch apply failed: "
@@ -2463,7 +2476,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 ("IR Apply+Rebuild", "FAIL", "patch did not apply cleanly"))
             return False
 
-        print_status(True, "ir_compat.patch applied to llvm-project")
+        print_status(True, f"{ascend_patch.name} applied to llvm-project")
 
         # ── [3.5] Rebuild LLVM ──
         from TA_main2main_workflow.scripts.build_test import \

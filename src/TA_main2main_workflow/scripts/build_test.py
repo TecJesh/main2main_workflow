@@ -75,19 +75,24 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
 
 
 def apply_llvm_patches(patch_dir: Path, llvm_project: Path,
-                      target_hash: str = "") -> dict:
+                      target_hash: str = "",
+                      patch_file: Path | None = None) -> dict:
     """Apply generated LLVM patch to llvm-project after cleaning stale state.
 
     1. Clean any stale modifications in llvm-project (git checkout -- .)
     2. Checkout the target LLVM commit
-    3. Apply the single ir_compat.patch with 'git apply'
+    3. Apply the patch with 'git apply'
+
+    If *patch_file* is given it is used directly; otherwise
+    ``patch_dir / "ir_compat.patch"`` is used.
 
     This is a deterministic operation — no AI involved.
     Returns a dict with 'applied', 'failed', 'all_ok'.
     """
-    patch_file = patch_dir / "ir_compat.patch"
+    if patch_file is None:
+        patch_file = patch_dir / "ir_compat.patch"
     if not patch_file.exists():
-        print("  [llvm-patch] ir_compat.patch not found — nothing to apply")
+        print(f"  [llvm-patch] {patch_file.name} not found — nothing to apply")
         return {"applied": [], "failed": [], "all_ok": True}
 
     print(f"\n{'=' * 60}")
@@ -215,11 +220,22 @@ def _check_and_rebuild_llvm(repo_path: Path, force_rebuild: bool = False) -> str
             f"Clone it with: git clone https://github.com/llvm/llvm-project.git {llvm_project}"
         )
 
-    _run_cmd(
+    # Checkout the required commit (fetch from origin if missing)
+    proc = subprocess.run(
         ["git", "checkout", required_hash],
-        cwd=llvm_project,
-        timeout=60,
+        cwd=llvm_project, capture_output=True, text=True,
     )
+    if proc.returncode != 0:
+        print(f"  [llvm] Commit {required_hash[:12]} not found locally — fetching from origin...")
+        subprocess.run(
+            ["git", "fetch", "origin", required_hash],
+            cwd=llvm_project, check=True, capture_output=True, text=True, timeout=120,
+        )
+        _run_cmd(
+            ["git", "checkout", required_hash],
+            cwd=llvm_project,
+            timeout=60,
+        )
 
     # Clean and rebuild
     llvm_build_log = WORKSPACE_DIR / "llvm_build.log"
