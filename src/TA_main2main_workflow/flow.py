@@ -246,7 +246,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 print_warn("Step plan file not found — re-detecting commits")
                 # Lightweight re-init without full initialize
                 self.state.triton_ascend_path = self.state.triton_ascend_path or str(Path.cwd())
-                self.state.triton_path = os.getenv("TRITON_PATH", self.state.triton_ascend_path)
+                self.state.triton_path = os.path.expanduser(
+                os.getenv("TRITON_PATH", self.state.triton_ascend_path))
                 ascend_path = Path(self.state.triton_ascend_path)
                 # Fetch and checkout work branch
                 try:
@@ -267,7 +268,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 self.state.upstream_commits_count = plan_data.get("upstream_commits_count", 0)
 
                 # Minimal init for resume
-                self.state.triton_path = os.getenv("TRITON_PATH", str(ascend_path))
+                self.state.triton_path = os.path.expanduser(
+                os.getenv("TRITON_PATH", str(ascend_path)))
                 # Fetch and checkout work branch
                 try:
                     run_git(ascend_path, "fetch", "origin", work_branch)
@@ -899,7 +901,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         )
 
         self.state.triton_ascend_path = raw_ascend
-        self.state.triton_path = raw_triton
+        self.state.triton_path = os.path.expanduser(raw_triton)
         self.state.target_commit = (
             self.state.target_commit or os.getenv("TRITON_TARGET_COMMIT", "")
         )
