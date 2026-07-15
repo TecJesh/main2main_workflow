@@ -936,14 +936,26 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         self.state.original_branch = ascend_branch or run_git(
             ascend_path, "rev-parse", "HEAD"
         ).strip()
-        self.state.ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
+
+        # ── Use origin/main as the base ref for patch diffs ──
+        # The work branch is created from origin/main, so all diffs should
+        # be computed against origin/main, not the checkout HEAD.
+        try:
+            run_git(ascend_path, "fetch", "origin", "main")
+        except Exception:
+            print_warn("Could not fetch origin/main, using checkout HEAD as base")
+        try:
+            self.state.ascend_head = run_git(
+                ascend_path, "rev-parse", "origin/main").strip()
+        except Exception:
+            self.state.ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
 
         print_section("Repository Configuration")
         print_key_value("triton-ascend", self.state.triton_ascend_path)
         print_key_value("upstream triton", self.state.triton_path)
         print_key_value("target commit", self.state.target_commit or "<upstream HEAD>")
         print_key_value("original branch", self.state.original_branch)
-        print_key_value("ascend HEAD", self.state.ascend_head[:12])
+        print_key_value("base (origin/main)", self.state.ascend_head[:12])
 
         self.state.summary_rows = []
 
@@ -2728,13 +2740,30 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_error(f"llvm-project not found at {llvm_project}")
             return False
 
-        # ── 1. Read current LLVM hash ──
-        llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
-        if not llvm_hash_file.exists():
-            print_error(f"LLVM hash file not found: {llvm_hash_file}")
+        # ── 1. Read LLVM hash from origin/main (work branch base) ──
+        # Use git show to get the hash from origin/main, NOT the checkout
+        # filesystem — the checkout may be on a stale branch.
+        try:
+            run_git(ascend_path, "fetch", "origin", "main")
+        except Exception:
+            print_warn("[baseline-llvm] Could not fetch origin/main, using local ref")
+        try:
+            llvm_hash = run_git(
+                ascend_path, "show", "origin/main:cmake/llvm-hash.txt"
+            ).strip()
+        except Exception:
+            # Fallback: read from checkout filesystem
+            llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
+            if not llvm_hash_file.exists():
+                print_error(f"LLVM hash file not found: {llvm_hash_file}")
+                return False
+            llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+            print_warn("[baseline-llvm] Using checkout llvm-hash.txt (origin/main not available)")
+        if not llvm_hash:
+            print_error("LLVM hash is empty")
             return False
-        llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
         print_key_value("LLVM commit", llvm_hash[:12])
+        print_info(f"  (from origin/main)")
 
         # ── 2. Checkout the LLVM commit ──
         print_info(f"Checking out LLVM commit {llvm_hash[:12]} in llvm-project...")
