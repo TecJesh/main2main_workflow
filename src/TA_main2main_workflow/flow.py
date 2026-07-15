@@ -2741,7 +2741,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         try:
             subprocess.run(
                 ["git", "fetch", "origin", llvm_hash],
-                cwd=str(llvm_project), capture_output=True, text=True, timeout=120,
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=2000,
             )
             subprocess.run(
                 ["git", "checkout", llvm_hash],
