@@ -143,6 +143,70 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         super().__init__(**kwargs)
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # Workspace info helper — prints paths, branches, and git status
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _print_workspace_info(self, label: str = "") -> None:
+        """Print all relevant repo paths, current branches, and git status.
+
+        Called at key workflow steps to provide full visibility into the
+        workspace state — which repos are in play, what branches they're on,
+        and whether there are uncommitted changes.
+        """
+        header = f"Workspace Info{f' — {label}' if label else ''}"
+        print_section(header)
+
+        # ── Resolve paths ──
+        llvm_proj = _llvm_project_path()
+        llvm_install = _llvm_install_prefix()
+        ascend_str = self.state.triton_ascend_path
+        triton_str = self.state.triton_path
+
+        # ── Print all relevant paths ──
+        print_key_value("LLVM_PROJECT_PATH", str(llvm_proj))
+        print_key_value("LLVM_INSTALL_PREFIX_SYNC", str(llvm_install))
+        if self.state.llvm_prefix:
+            print_key_value("LLVM_INSTALL_PREFIX", self.state.llvm_prefix)
+        if ascend_str:
+            print_key_value("TRITON_ASCEND_PATH", ascend_str)
+        if triton_str:
+            print_key_value("TRITON_PATH", triton_str)
+
+        # ── Print git branch + status for each repo ──
+        repos: list[tuple[str, Path]] = []
+        if ascend_str:
+            ap = Path(ascend_str)
+            if ap.exists():
+                repos.append(("triton-ascend", ap))
+        if triton_str:
+            tp = Path(triton_str)
+            if tp.exists():
+                # Skip triton if it's the same directory as triton-ascend
+                if not ascend_str or tp != Path(ascend_str):
+                    repos.append(("triton", tp))
+        if llvm_proj.exists():
+            repos.append(("llvm-project", llvm_proj))
+
+        for repo_label, repo_path in repos:
+            try:
+                branch = run_git(repo_path, "branch", "--show-current").strip()
+                print_key_value(f"{repo_label} branch", branch)
+                status = run_git(repo_path, "status", "--porcelain").strip()
+                if status:
+                    lines = status.splitlines()
+                    print_info(
+                        f"{repo_label} uncommitted changes ({len(lines)} files):"
+                    )
+                    for line in lines[:10]:
+                        print(f"      {line}")
+                    if len(lines) > 10:
+                        print(f"      ... and {len(lines) - 10} more")
+                else:
+                    print_info(f"{repo_label} status: clean")
+            except Exception as e:
+                print_warn(f"Could not get git info for {repo_label}: {e}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # Mode dispatch — supports full (CrewAI), merge-only, and fix-only modes
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -196,6 +260,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             for key, value in inputs.items():
                 if hasattr(self.state, key):
                     setattr(self.state, key, value)
+
+        self._print_workspace_info(f"Merge Mode — step {current_step}")
 
         # ── Force skip build/test in merge mode ──
         os.environ["SKIP_BUILD"] = "true"
@@ -603,6 +669,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             reason = step.get("reason", "line_budget")
             print_key_value("step reason", reason)
 
+            self._print_workspace_info(f"Single-Step Mode — {step_id}")
+
             # Record ascend HEAD before this step
             self.state.step_start_ascend_head = run_git(
                 ascend_path, "rev-parse", "HEAD"
@@ -725,6 +793,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_key_value("error logs", error_logs_path or "<none>")
         print_key_value("target commit", target_commit[:12] if target_commit else "<none>")
         print_key_value("repo path", str(ascend_path))
+
+        self._print_workspace_info(f"Fix Mode — Attempt {attempt}")
 
         # Clean old workspace
         if WORKSPACE_DIR.exists():
@@ -957,6 +1027,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_key_value("original branch", self.state.original_branch)
         print_key_value("base (origin/main)", self.state.ascend_head[:12])
 
+        self._print_workspace_info("Phase 0: Initialize")
+
         self.state.summary_rows = []
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -967,6 +1039,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     def detect_commits(self) -> Literal["HasNewCommits", "HasNoNewCommits"]:
         start_timer("detect")
         print_header("Phase 1: Detect Upstream Commits & Plan Steps")
+
+        self._print_workspace_info("Phase 1: Detect Commits")
 
         ascend_path = Path(self.state.triton_ascend_path)
         triton_path = Path(self.state.triton_path)
@@ -1112,6 +1186,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_key_value("end commit", step["end_commit"][:12])
             if "source_changed_lines" in step:
                 print_key_value("source lines", str(step["source_changed_lines"]))
+
+            self._print_workspace_info(f"Phase 2: Execute Sync — {step_id}")
 
             ascend_path = Path(self.state.triton_ascend_path)
 
@@ -1976,6 +2052,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_header("Phase 3: IR Compatibility Patch Auto-Generation")
         print_info(f"LLVM hash changed — IR compatibility analysis required")
         print_key_value("Baseline LLVM", _ASCEND_BASELINE_LLVM_HASH[:12])
+
+        self._print_workspace_info("Phase 3: IR Patch Loop")
         print_key_value("Max IR iterations", str(self.state.ir_max_iterations))
 
         for iteration in range(self.state.ir_max_iterations):
@@ -2081,6 +2159,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """[3.1] AI analyzes which MLIR OPs the Ascend backend uses."""
         print_header("Phase 3.1: IR OP Analysis")
         ascend_path = Path(self.state.triton_ascend_path)
+
+        self._print_workspace_info("Phase 3.1: IR OP Analysis")
 
         ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
         ir_dir.mkdir(parents=True, exist_ok=True)
@@ -2207,6 +2287,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """[3.2] AI analyzes OP definition changes between LLVM versions."""
         print_header("Phase 3.2: IR OP Change Analysis")
         ascend_path = Path(self.state.triton_ascend_path)
+
+        self._print_workspace_info("Phase 3.2: IR Change Analysis")
 
         ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
         ir_dir.mkdir(parents=True, exist_ok=True)
@@ -2385,6 +2467,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_header("Phase 3.3: IR Patch Generation")
         ascend_path = Path(self.state.triton_ascend_path)
 
+        self._print_workspace_info("Phase 3.3: IR Patch Generation")
+
         ir_dir = WORKSPACE_DIR / IR_ANALYSIS_DIR
 
         # The patch file that AI modifies in-place
@@ -2450,6 +2534,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """[3.4 + 3.5] Apply the Ascend LLVM patch and rebuild."""
         print_header("Phase 3.4-3.5: Apply Patches + Rebuild LLVM")
         ascend_path = Path(self.state.triton_ascend_path)
+
+        self._print_workspace_info("Phase 3.4-3.5: Apply Patches + Rebuild LLVM")
 
         llvm_project = _llvm_project_path()
         # The in-repo Ascend LLVM patch (modified by AI in step 3.3)
@@ -2732,6 +2818,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """
         print_header("Build Baseline LLVM (pre-merge)")
         ascend_path = Path(self.state.triton_ascend_path)
+
+        self._print_workspace_info("Build Baseline LLVM")
 
         llvm_project = _llvm_project_path()
         llvm_install = _llvm_install_prefix()
@@ -3134,6 +3222,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """
         print_header("Phase Final: Finalize & Summary")
 
+        self._print_workspace_info("Phase Final: Finalize")
+
         ascend_path = Path(self.state.triton_ascend_path)
 
         # ── Generate final summary ──
@@ -3465,6 +3555,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             return "SKIP_PUSH"
 
         print_header("Push to GitHub & Create PR")
+
+        self._print_workspace_info("Push to GitHub & Create PR")
+
         github_repo = os.getenv("GITHUB_REPO", "TecJesh/triton-ascend")
         if not github_repo:
             print_error("GITHUB_REPO is empty — cannot create PR")
@@ -3609,6 +3702,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     def handle_failure(self):
         """write FAILURE.md, print diagnostics & summary, suggest recovery commands."""
         print_header("Sync Failed — Diagnostics")
+
+        self._print_workspace_info("Handle Failure")
 
         ascend_path = Path(self.state.triton_ascend_path)
 
