@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from TA_main2main_workflow.utils import (
@@ -35,11 +36,14 @@ from TA_main2main_workflow.utils import (
 def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
                 env: dict | None = None, timeout: int = 3600,
                 progress_line: bool = False) -> subprocess.CompletedProcess:
-    """Run a command, tee output to log file and console, wait for completion.
+    """Run a command, tee output to log file and console, with a real timeout.
 
-    If progress_line is True, only the last line of output is shown,
-    overwriting in place with \\r — useful for cmake/ninja build output.
-    Full output is always written to the log file.
+    Output is streamed to the log file (full) and console (last line with
+    \\r or every line depending on progress_line).  The timeout covers the
+    ENTIRE run — if the subprocess hangs, it is killed after `timeout`
+    seconds rather than blocking forever.
+
+    Returns a CompletedProcess with returncode and a pointer to the log.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     proc_env = os.environ.copy()
@@ -47,26 +51,66 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
         proc_env.update(env)
 
     print(f"  Running: {' '.join(cmd)}")
-    last_line = ""
-    with log_path.open("w", encoding="utf-8") as fh:
-        proc = subprocess.Popen(
-            cmd, cwd=cwd, env=proc_env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            fh.write(line)
-            if progress_line:
-                stripped = line.rstrip()
-                if stripped:
-                    last_line = stripped
-                    # \r 回到行首，\033[K 清除行尾残留，保证单行刷新
-                    print(f"\r  {stripped[:120]}\033[K", end="", flush=True)
-            else:
-                print(line, end="", flush=True)
-        if progress_line and last_line:
-            print()  # final newline
+
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=proc_env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    assert proc.stdout is not None
+
+    # ── Read output in a background thread so the main thread can
+    #     enforce the timeout via proc.wait().  When the process is
+    #     killed on timeout the pipe closes, unblocking the reader. ──
+    last_line: str = ""
+    read_error: Exception | None = None
+
+    def _reader() -> None:
+        nonlocal last_line, read_error
+        try:
+            with log_path.open("w", encoding="utf-8") as fh:
+                for line in proc.stdout:
+                    fh.write(line)
+                    if progress_line:
+                        stripped = line.rstrip()
+                        if stripped:
+                            last_line = stripped
+                            # \r returns to line start, \033[K clears residue
+                            print(f"\r  {stripped[:120]}\033[K", end="", flush=True)
+                    else:
+                        print(line, end="", flush=True)
+        except Exception as exc:
+            read_error = exc
+        finally:
+            if progress_line and last_line:
+                print()  # final newline
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+
+    timed_out = False
+    try:
         proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        print(f"\n  ✗ Timeout after {timeout}s — killing process (pid {proc.pid})...")
+        proc.kill()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            print(f"  ✗ Process did not respond to SIGKILL")
+
+    # ── Wait for reader thread to finish flushing the last lines ──
+    #     Must happen BEFORE raising TimeoutExpired so the log is complete.
+    reader.join(timeout=10)
+
+    if read_error:
+        print(f"  ⚠ Reader thread error: {read_error}")
+
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    if proc.returncode != 0:
+        print(f"  ✗ Exit code: {proc.returncode}  (full log: {log_path})")
 
     return subprocess.CompletedProcess(
         cmd, proc.returncode,
@@ -438,8 +482,8 @@ def run_tests(
             python_exe, "-m", "pytest",
             str(test_dir_abs),
             "-n", str(num_procs),
-            "--tb=short",
-            "-q",
+            # "--tb=short",
+            # "-q",
         ]
 
         proc = _run_to_log(pytest_cmd, repo_path, test_log, env=env, timeout=timeout)
