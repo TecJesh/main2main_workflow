@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from TA_main2main_workflow.utils import (
@@ -34,14 +36,17 @@ from TA_main2main_workflow.utils import (
 
 
 def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
-                env: dict | None = None, timeout: int = 3600,
+                env: dict | None = None, timeout: int | None = None,
                 progress_line: bool = False) -> subprocess.CompletedProcess:
-    """Run a command, tee output to log file and console, with a real timeout.
+    """Run a command, tee output to log file and console.
 
     Output is streamed to the log file (full) and console (last line with
-    \\r or every line depending on progress_line).  The timeout covers the
-    ENTIRE run — if the subprocess hangs, it is killed after `timeout`
-    seconds rather than blocking forever.
+    \\r or every line depending on progress_line).
+
+    If *timeout* is set and the subprocess does not exit within that many
+    seconds, the entire process group is killed (via os.killpg).  Pass
+    timeout=None (the default) to block indefinitely — suitable for
+    commands whose runtime is unbounded (e.g. pytest).
 
     Returns a CompletedProcess with returncode and a pointer to the log.
     """
@@ -52,9 +57,12 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
 
     print(f"  Running: {' '.join(cmd)}")
 
+    # start_new_session=True gives the process its own process group.
+    # On timeout we can kill the entire group (pytest-xdist workers too).
     proc = subprocess.Popen(
         cmd, cwd=cwd, env=proc_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True,
     )
     assert proc.stdout is not None
 
@@ -92,19 +100,35 @@ def _run_to_log(cmd: list[str], cwd: Path, log_path: Path,
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        print(f"\n  ✗ Timeout after {timeout}s — killing process (pid {proc.pid})...")
-        proc.kill()
+        print(f"\n  ✗ Timeout after {timeout}s — killing process group "
+              f"(pgid {proc.pid})...")
+        # Kill the entire process group — catches pytest-xdist workers
+        # that inherited the session from the main process.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
         try:
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            print(f"  ✗ Process did not respond to SIGKILL")
+            print(f"  ✗ Process group did not respond to SIGKILL")
 
-    # ── Wait for reader thread to finish flushing the last lines ──
-    #     Must happen BEFORE raising TimeoutExpired so the log is complete.
+    # ── Close stdout pipe to unblock the reader thread ──
+    #     pytest-xdist workers may inherit the write end of the pipe,
+    #     keeping it open after the main process exits.  Closing our
+    #     read end forces EOF on the pipe, unblocking the reader.
+    try:
+        proc.stdout.close()
+    except Exception:
+        pass
+
+    # Wait for the reader thread to finish flushing the last lines
     reader.join(timeout=10)
 
     if read_error:
-        print(f"  ⚠ Reader thread error: {read_error}")
+        # Ignore ValueError from closed pipe — this is expected
+        if not isinstance(read_error, ValueError) or "closed" not in str(read_error).lower():
+            print(f"  ⚠ Reader thread error: {read_error}")
 
     if timed_out:
         raise subprocess.TimeoutExpired(cmd, timeout)
@@ -435,7 +459,6 @@ def run_tests(
     test_dir: str = "third_party/ascend/unittest/pytest_ut",
     num_procs: int = 16,
     conda_env: str = "",
-    timeout: int = 3600,
     python_exe: str = "",
 ) -> dict:
     """Run pytest unit tests and return structured results.
@@ -475,18 +498,78 @@ def run_tests(
         # Print bishengir-compile path before running tests
         import shutil
         bishengir_compile_path = shutil.which("bishengir-compile")
-        if bishengir_compile_path:
-            print(f"  bishengir-compile: {bishengir_compile_path}")
+        print(f"  bishengir-compile: {bishengir_compile_path or 'NOT FOUND'}")
 
-        pytest_cmd = [
-            python_exe, "-m", "pytest",
-            str(test_dir_abs),
-            "-n", str(num_procs),
-            # "--tb=short",
-            # "-q",
-        ]
+        # Prefer pytest console script; fall back to python -m pytest
+        pytest_bin = shutil.which("pytest")
+        if pytest_bin:
+            pytest_cmd = [
+                pytest_bin, str(test_dir_abs),
+                "-n", str(num_procs), "--tb=short",
+            ]
+        else:
+            pytest_cmd = [
+                python_exe, "-m", "pytest",
+                str(test_dir_abs),
+                "-n", str(num_procs),
+                "--tb=short",
+            ]
 
-        proc = _run_to_log(pytest_cmd, repo_path, test_log, env=env, timeout=timeout)
+        # Run pytest with stdout→file (no pipe, no inherited fd issues).
+        # pytest-xdist workers inherit the write end of a pipe but NOT
+        # a plain file fd opened by the parent — this avoids the
+        # "98% stuck" hang caused by workers holding the pipe open.
+        proc_env = os.environ.copy()
+        if env:
+            proc_env.update(env)
+        print(f"  cwd: {repo_path}")
+        print(f"  cmd: {' '.join(pytest_cmd)}")
+        print(f"  pytest running (log: {test_log})")
+
+        # Write stdout to file (no pipe → no fd inheritance hang).
+        # A background thread tails the file to print progress to console.
+        test_log.parent.mkdir(parents=True, exist_ok=True)
+        with test_log.open("w", encoding="utf-8") as fh:
+            proc = subprocess.Popen(
+                pytest_cmd, cwd=repo_path, env=proc_env,
+                stdout=fh, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+            # Tail the log file for live console output.
+            # Use binary mode so tell() returns absolute byte positions
+            # (text mode tell() returns opaque cookies, broken across opens).
+            def _tail_log() -> None:
+                pos = 0
+                while proc.poll() is None:
+                    try:
+                        if test_log.stat().st_size > pos:
+                            with test_log.open("rb") as rf:
+                                rf.seek(pos)
+                                new = rf.read()
+                                if new:
+                                    print(new.decode("utf-8", errors="replace"),
+                                          end="", flush=True)
+                                    pos += len(new)
+                        else:
+                            time.sleep(0.5)
+                    except Exception:
+                        time.sleep(0.5)
+                # Drain any remaining output after process exits
+                try:
+                    with test_log.open("rb") as rf:
+                        rf.seek(pos)
+                        remaining = rf.read()
+                        if remaining:
+                            print(remaining.decode("utf-8", errors="replace"),
+                                  end="", flush=True)
+                except Exception:
+                    pass
+
+            tail_thread = threading.Thread(target=_tail_log, daemon=True)
+            tail_thread.start()
+            proc.wait()
+            tail_thread.join(timeout=5)
 
         passed = proc.returncode == 0
         summary = {
