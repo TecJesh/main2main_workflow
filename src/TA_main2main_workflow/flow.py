@@ -2550,6 +2550,13 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 ("IR Apply+Rebuild", "FAIL", "llvm-project not found"))
             return False
 
+        # ── Ensure llvm-project workspace is clean before checkout + patch ──
+        if not self._ensure_llvm_workspace_clean(reason="ir-apply-patches"):
+            print_error("Cannot clean llvm-project workspace — aborting IR patch rebuild")
+            self.state.summary_rows.append(
+                ("IR Apply+Rebuild", "FAIL", "workspace not clean"))
+            return False
+
         # ── [3.4] Apply patch to llvm-project ──
         # Deterministic: clean → checkout → apply. No AI involved.
         from TA_main2main_workflow.scripts.build_test import apply_llvm_patches
@@ -2821,6 +2828,16 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         self._print_workspace_info("Build Baseline LLVM")
 
+        # ── Allow skipping baseline LLVM build for debugging ──
+        if os.getenv("SKIP_BASELINE_LLVM", "false").lower() == "true":
+            print_info("SKIP_BASELINE_LLVM=true — skipping baseline LLVM build")
+            print_warn("Ensure LLVM is already built at LLVM_INSTALL_PREFIX_SYNC")
+            if not self.state.llvm_prefix:
+                self.state.llvm_prefix = str(_llvm_install_prefix())
+            self.state.summary_rows.append(
+                ("Baseline LLVM", "SKIP", "SKIP_BASELINE_LLVM set"))
+            return True
+
         llvm_project = _llvm_project_path()
         llvm_install = _llvm_install_prefix()
 
@@ -2852,6 +2869,11 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             return False
         print_key_value("LLVM commit", llvm_hash[:12])
         print_info(f"  (from origin/main)")
+
+        # ── Ensure llvm-project workspace is clean before checkout ──
+        if not self._ensure_llvm_workspace_clean(reason="baseline-llvm-build"):
+            print_error("Cannot clean llvm-project workspace — aborting baseline build")
+            return False
 
         # ── 2. Checkout the LLVM commit ──
         print_info(f"Checking out LLVM commit {llvm_hash[:12]} in llvm-project...")
@@ -3024,21 +3046,49 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             ("Baseline LLVM", "PASS", f"Built {llvm_hash[:12]}"))
         return True
 
-    def _stash_and_drop_llvm_patch(self) -> None:
-        """Stash any pending changes in llvm-project and drop them.
+    def _ensure_llvm_workspace_clean(self, reason: str = "") -> bool:
+        """Ensure the llvm-project working tree is clean before building.
 
-        Used after a failed LLVM rebuild to clean up the patch so that the
-        AI can generate a fresh patch from a clean working tree.
+        Checks git status; if dirty, stashes and drops all uncommitted
+        changes (including untracked files).  Falls back to 'git checkout
+        -- .' + 'git clean -fd' if stash fails.
+
+        Returns True if the workspace is clean (or was cleaned successfully).
         """
         llvm_project = _llvm_project_path()
         if not llvm_project.exists():
-            print_warn("[llvm-stash] llvm-project not found — cannot stash")
-            return
+            print_warn("[llvm-clean] llvm-project not found — cannot verify workspace")
+            return True  # nothing to clean
 
-        print_info("[llvm-stash] Stashing and dropping LLVM patch changes...")
+        # ── Check if working tree is dirty ──
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(llvm_project),
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+        except Exception as e:
+            print_warn(f"[llvm-clean] Could not check git status: {e}")
+            return True  # proceed and let the build step surface errors
+
+        if not status:
+            print_info(f"[llvm-clean] llvm-project workspace is clean"
+                       f"{f' ({reason})' if reason else ''}")
+            return True
+
+        # ── Workspace is dirty — clean it ──
+        dirty_files = status.splitlines()
+        print_warn(f"[llvm-clean] llvm-project has {len(dirty_files)} uncommitted"
+                   f" file(s){f' ({reason})' if reason else ''} — cleaning...")
+        for f in dirty_files[:10]:
+            print(f"      {f}")
+        if len(dirty_files) > 10:
+            print(f"      ... and {len(dirty_files) - 10} more")
+
         try:
             subprocess.run(
-                ["git", "stash", "push", "-u", "-m", "ta-ir-patch-failed"],
+                ["git", "stash", "push", "-u", "-m",
+                 f"ta-auto-clean{': ' + reason if reason else ''}"],
                 cwd=str(llvm_project),
                 capture_output=True, text=True, timeout=30,
             )
@@ -3047,20 +3097,31 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 cwd=str(llvm_project),
                 capture_output=True, text=True, timeout=30,
             )
-            print_info("[llvm-stash] Changes stashed and dropped — working tree clean")
+            print_status(True, "[llvm-clean] Workspace cleaned (stash + drop)")
+            return True
         except Exception as e:
-            print_warn(f"[llvm-stash] Stash/drop failed: {e} — "
+            print_warn(f"[llvm-clean] Stash/drop failed: {e} — "
                        f"forcing clean with checkout")
-            subprocess.run(
-                ["git", "checkout", "--", "."],
-                cwd=str(llvm_project),
-                capture_output=True, text=True, timeout=60,
-            )
-            subprocess.run(
-                ["git", "clean", "-fd"],
-                cwd=str(llvm_project),
-                capture_output=True, text=True, timeout=60,
-            )
+            try:
+                subprocess.run(
+                    ["git", "checkout", "--", "."],
+                    cwd=str(llvm_project),
+                    capture_output=True, text=True, timeout=60,
+                )
+                subprocess.run(
+                    ["git", "clean", "-fd"],
+                    cwd=str(llvm_project),
+                    capture_output=True, text=True, timeout=60,
+                )
+                print_status(True, "[llvm-clean] Workspace cleaned (checkout + clean)")
+                return True
+            except Exception as e2:
+                print_error(f"[llvm-clean] Failed to clean workspace: {e2}")
+                return False
+
+    def _stash_and_drop_llvm_patch(self) -> None:
+        """Deprecated: use _ensure_llvm_workspace_clean() instead."""
+        self._ensure_llvm_workspace_clean(reason="ir-patch-failed")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Per-step test + fix loop (single-step mode)
