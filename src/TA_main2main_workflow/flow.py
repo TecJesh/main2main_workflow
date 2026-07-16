@@ -2911,6 +2911,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         # ── 4. Build LLVM ──
         llvm_build_log = WORKSPACE_DIR / "llvm_build_baseline.log"
+        llvm_build_log.parent.mkdir(parents=True, exist_ok=True)
 
         build_dir = llvm_project / "build"
         if build_dir.exists():
@@ -2929,27 +2930,51 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             "-DCMAKE_C_COMPILER=clang",
             "-DCMAKE_CXX_COMPILER=clang++",
         ]
-        print_info("Configuring LLVM with cmake...")
-        cmake_proc = subprocess.run(
-            cmake_cmd, cwd=str(build_dir), timeout=300,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
-        llvm_build_log.write_text(
-            f"=== cmake ===\n{cmake_proc.stdout}\n", encoding="utf-8")
-        if cmake_proc.returncode != 0:
-            print_error(f"cmake failed (exit {cmake_proc.returncode})")
+
+        # ── Helper: run a command with live output streaming ──
+        def _stream_cmd(cmd: list[str], cwd: Path, log_fh, timeout: int,
+                        label: str) -> int:
+            """Stream subprocess output line-by-line to console and log file.
+            Returns the process exit code."""
+            print_info(f"{label} (streaming to {llvm_build_log.name})...")
+            proc = subprocess.Popen(
+                cmd, cwd=str(cwd),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            assert proc.stdout is not None
+            last_line = ""
+            for line in proc.stdout:
+                log_fh.write(line)
+                stripped = line.rstrip()
+                if stripped:
+                    last_line = stripped
+                    # \r returns to line start, \033[K clears trailing residue
+                    print(f"\r  {stripped[:140]}\033[K", end="", flush=True)
+            proc.wait(timeout=timeout)
+            if last_line:
+                print()  # final newline after \r lines
+            return proc.returncode
+
+        # ── cmake configure ──
+        with llvm_build_log.open("w", encoding="utf-8") as fh:
+            fh.write(f"=== cmake ===\n{' '.join(cmake_cmd)}\n\n")
+            fh.flush()
+            rc = _stream_cmd(cmake_cmd, build_dir, fh, timeout=300,
+                             label="Configuring LLVM with cmake")
+        if rc != 0:
+            print_error(f"cmake failed (exit {rc}) — see {llvm_build_log}")
             return False
         print_status(True, "cmake configure OK")
 
-        print_info("Building LLVM with ninja (this may take a while)...")
-        ninja_proc = subprocess.run(
-            ["ninja", "install"], cwd=str(build_dir), timeout=7200,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
+        # ── ninja build + install ──
+        print_info("Building LLVM with ninja (this may take ~0.5 hours)...")
         with llvm_build_log.open("a", encoding="utf-8") as fh:
-            fh.write(f"\n=== ninja install ===\n{ninja_proc.stdout}\n")
-        if ninja_proc.returncode != 0:
-            print_error(f"ninja install failed (exit {ninja_proc.returncode})")
+            fh.write(f"\n=== ninja install ===\n")
+            fh.flush()
+            rc = _stream_cmd(["ninja", "install"], build_dir, fh, timeout=7200,
+                             label="ninja install")
+        if rc != 0:
+            print_error(f"ninja install failed (exit {rc}) — see {llvm_build_log}")
             return False
         print_status(True, "ninja install OK")
 
