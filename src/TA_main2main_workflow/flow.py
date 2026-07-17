@@ -3231,11 +3231,13 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """
         error_logs: list[str] = []
 
-        # Test log directory
+        # Test log directory — includes raw logs and JUnit XML reports
         test_log_dir = WORKSPACE_DIR / "test-logs"
         if test_log_dir.exists():
             for log_file in sorted(test_log_dir.rglob("*.log")):
                 error_logs.append(str(log_file))
+            for xml_file in sorted(test_log_dir.rglob("*.xml")):
+                error_logs.append(str(xml_file))
 
         # Test result JSON
         test_result_path = WORKSPACE_DIR / TEST_RESULT_FILE

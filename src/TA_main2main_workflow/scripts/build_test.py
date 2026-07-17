@@ -477,7 +477,6 @@ def run_tests(
     test_log_dir = WORKSPACE_DIR / "test-logs"
     test_log_dir.mkdir(parents=True, exist_ok=True)
 
-    test_log = test_log_dir / "pytest.log"
     test_dir_path = repo_path / test_dir
 
     env = {}
@@ -507,53 +506,49 @@ def run_tests(
         bishengir_compile_path = shutil.which("bishengir-compile")
         print(f"  bishengir-compile: {bishengir_compile_path or 'NOT FOUND'}")
 
-        # Prefer pytest console script; fall back to python -m pytest
+        # JUnit XML for structured result parsing (replaces raw log regex).
+        junit_xml = test_log_dir / "pytest-junit.xml"
+
+        # Prefer pytest console script; fall back to python -m pytest.
+        # -s   : no capture — stdout/stderr inherit from the terminal.
+        #        pytest-xdist skips its internal IO-thread capture layer,
+        #        avoiding the fork()+IO-thread deadlock that hangs at 97%.
+        # --junitxml : structured XML report for AI to read test results.
         pytest_bin = shutil.which("pytest")
         if pytest_bin:
             pytest_cmd = [
                 pytest_bin, str(test_dir_abs),
                 "-n", str(num_procs),
-                "-o", "xdist.spawn=forkserver",
-                "--dist=worksteal",
+                "-sv",
+                f"--junitxml={junit_xml}",
             ]
         else:
             pytest_cmd = [
                 python_exe, "-m", "pytest",
                 str(test_dir_abs),
                 "-n", str(num_procs),
-                "-o", "xdist.spawn=forkserver",
-                "--dist=worksteal",
+                "-sv",
+                f"--junitxml={junit_xml}",
             ]
 
         proc_env = os.environ.copy()
         if env:
             proc_env.update(env)
 
-        # PYTHONUNBUFFERED=1 forces stdout to be unbuffered even when
-        # connected to a pipe (tee).  Without this, Python uses 8KB
-        # full-buffering for file/pipe stdout, hiding real-time output.
-        proc_env["PYTHONUNBUFFERED"] = "1"
-
         print(f"  cwd: {repo_path}")
         print(f"  cmd: {' '.join(pytest_cmd)}")
-        print(f"  pytest output → terminal + {test_log}")
+        print(f"  junitxml: {junit_xml}")
+        print(f"  (stdout inherits terminal — no pipe, no tee, no capture)")
 
-        test_log.parent.mkdir(parents=True, exist_ok=True)
-
-        # Run pytest via "tee" so output goes to BOTH the terminal (live,
-        # line-buffered, like a human typing the command) and the log file
-        # (for post-run analysis).  No Popen / fd isolation / tail-thread
-        # tricks — just a plain shell pipeline with pipefail so pytest's
-        # exit code survives.
-        _tee_cmd = (
-            f"set -o pipefail; "
-            f"{' '.join(pytest_cmd)} 2>&1 | tee {test_log}"
-        )
+        # Run pytest directly, inheriting the terminal.  No pipe / tee /
+        # fd redirection at all — exactly like a human typing the command.
+        # pytest -s keeps the TTY line discipline, so xdist does not
+        # activate its internal capture IO threads.
+        # No timeout — block until pytest exits on its own.
         _start = time.time()
         result = subprocess.run(
-            ["/bin/bash", "-c", _tee_cmd],
+            pytest_cmd,
             cwd=repo_path, env=proc_env,
-            timeout=7200,  # 2 hour hard cap
         )
         _elapsed = time.time() - _start
         print(f"  pytest finished in {_elapsed:.0f}s, returncode={result.returncode}")
@@ -562,22 +557,21 @@ def run_tests(
         summary = {
             "exit_code": result.returncode,
             "passed": passed,
-            "test_log": str(test_log),
+            "test_log": str(junit_xml),
             "test_dir": str(test_dir_path),
         }
 
-        if test_log.exists():
-            log_text = test_log.read_text(encoding="utf-8", errors="replace")
-            import re
-            match = re.search(r'(\d+)\s+passed', log_text)
-            if match:
-                summary["passed_count"] = int(match.group(1))
-            match = re.search(r'(\d+)\s+failed', log_text)
-            if match:
-                summary["failed_count"] = int(match.group(1))
-            match = re.search(r'(\d+)\s+error', log_text)
-            if match:
-                summary["error_count"] = int(match.group(1))
+        # Parse JUnit XML for pass/fail/error counts
+        if junit_xml.exists():
+            try:
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(junit_xml)
+                root = tree.getroot()
+                summary["passed_count"] = int(root.get("tests", 0))
+                summary["failed_count"] = int(root.get("failures", 0))
+                summary["error_count"] = int(root.get("errors", 0))
+            except Exception as _e:
+                print(f"  WARNING: could not parse JUnit XML: {_e}")
 
     precommit_config = repo_path / ".pre-commit-config.yaml"
     if precommit_config.exists():
