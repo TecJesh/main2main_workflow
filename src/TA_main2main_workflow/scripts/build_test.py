@@ -513,209 +513,54 @@ def run_tests(
             pytest_cmd = [
                 pytest_bin, str(test_dir_abs),
                 "-n", str(num_procs),
+                "-o", "xdist.spawn=forkserver",
+                "--dist=worksteal",
             ]
         else:
             pytest_cmd = [
                 python_exe, "-m", "pytest",
                 str(test_dir_abs),
                 "-n", str(num_procs),
+                "-o", "xdist.spawn=forkserver",
+                "--dist=worksteal",
             ]
 
-        # Run pytest with stdout→file (no pipe, no inherited fd issues).
-        # pytest-xdist workers inherit the write end of a pipe but NOT
-        # a plain file fd opened by the parent — this avoids the
-        # "98% stuck" hang caused by workers holding the pipe open.
         proc_env = os.environ.copy()
         if env:
             proc_env.update(env)
 
-        # Force pytest-xdist to use "forkserver" instead of "fork" for
-        # spawning workers.  The default "fork" is unsafe when the parent
-        # process has threads (pytest-xdist's own event loop, logging, etc.),
-        # because fork() only copies the calling thread.  Locked mutexes and
-        # execnet gateways in the frozen child cause the worker to silently
-        # die or hang on shutdown, producing the "97% stuck" symptom where
-        # all workers sit in futex_wait_queue_me forever.
-        proc_env["PYTEST_XDIST_SPAWN"] = "forkserver"
+        # PYTHONUNBUFFERED=1 forces stdout to be unbuffered even when
+        # connected to a pipe (tee).  Without this, Python uses 8KB
+        # full-buffering for file/pipe stdout, hiding real-time output.
+        proc_env["PYTHONUNBUFFERED"] = "1"
 
         print(f"  cwd: {repo_path}")
         print(f"  cmd: {' '.join(pytest_cmd)}")
-        print(f"  pytest running (log: {test_log})")
+        print(f"  pytest output → terminal + {test_log}")
 
-        # Write stdout to file (no pipe → no fd inheritance hang).
-        # A background thread tails the file to print progress to console.
         test_log.parent.mkdir(parents=True, exist_ok=True)
 
-        # ── Diagnostic: capture parent process state before spawning pytest ──
-        import platform as _platform
-        _parent_pid = os.getpid()
-        print(f"  [diag] parent pid: {_parent_pid}")
-        print(f"  [diag] python: {sys.executable}")
-        print(f"  [diag] platform: {_platform.platform()}")
-        _pytest_version = ""
-        try:
-            import pkg_resources
-            _pytest_version = pkg_resources.get_distribution("pytest").version
-        except Exception:
-            try:
-                _pv = subprocess.run(
-                    [pytest_cmd[0], "--version"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                _pytest_version = _pv.stdout.strip().split("\n")[0]
-            except Exception:
-                _pytest_version = "unknown"
-        print(f"  [diag] pytest: {_pytest_version}")
-        print(f"  [diag] pytest-xdist workers: {num_procs}")
+        # Run pytest via "tee" so output goes to BOTH the terminal (live,
+        # line-buffered, like a human typing the command) and the log file
+        # (for post-run analysis).  No Popen / fd isolation / tail-thread
+        # tricks — just a plain shell pipeline with pipefail so pytest's
+        # exit code survives.
+        _tee_cmd = (
+            f"set -o pipefail; "
+            f"{' '.join(pytest_cmd)} 2>&1 | tee {test_log}"
+        )
+        _start = time.time()
+        result = subprocess.run(
+            ["/bin/bash", "-c", _tee_cmd],
+            cwd=repo_path, env=proc_env,
+            timeout=7200,  # 2 hour hard cap
+        )
+        _elapsed = time.time() - _start
+        print(f"  pytest finished in {_elapsed:.0f}s, returncode={result.returncode}")
 
-        with test_log.open("w", encoding="utf-8") as fh:
-            _fh_fileno = fh.fileno()
-            print(f"  [diag] log fd: {_fh_fileno}, log path: {test_log}")
-
-            _spawn_start = time.time()
-            proc = subprocess.Popen(
-                pytest_cmd, cwd=repo_path, env=proc_env,
-                stdin=subprocess.DEVNULL,
-                stdout=fh, stderr=subprocess.STDOUT,
-                start_new_session=True,
-                close_fds=True,
-            )
-            _spawn_elapsed = time.time() - _spawn_start
-            print(f"  [diag] Popen spawn took {_spawn_elapsed:.2f}s, "
-                  f"pid={proc.pid}, pgid={os.getpgid(proc.pid)}")
-
-            # ── Diagnostic: capture fd table of pytest process ──
-            _fd_dir = Path(f"/proc/{proc.pid}/fd")
-            if _fd_dir.exists():
-                try:
-                    _fd_links = sorted(_fd_dir.iterdir())
-                    _fd_info = []
-                    for _l in _fd_links[:15]:
-                        try:
-                            _fd_info.append(f"{_l.name}→{_l.resolve()}")
-                        except Exception:
-                            _fd_info.append(f"{_l.name}→?")
-                    print(f"  [diag] pytest fd table ({len(_fd_links)} fds):")
-                    for _f in _fd_info:
-                        print(f"         {_f}")
-                    if len(_fd_links) > 15:
-                        print(f"         ... and {len(_fd_links) - 15} more")
-                except Exception as _e:
-                    print(f"  [diag] could not read fd table: {_e}")
-            else:
-                print(f"  [diag] /proc/{proc.pid}/fd not available")
-
-            # Tail the log file for live console output.
-            # Use binary mode so tell() returns absolute byte positions
-            # (text mode tell() returns opaque cookies, broken across opens).
-            _tail_pos = 0
-            _tail_loops = 0
-            _tail_stall_count = 0
-
-            def _tail_log() -> None:
-                nonlocal _tail_pos, _tail_loops, _tail_stall_count
-                while proc.poll() is None:
-                    _tail_loops += 1
-                    try:
-                        if test_log.stat().st_size > _tail_pos:
-                            _tail_stall_count = 0
-                            with test_log.open("rb") as rf:
-                                rf.seek(_tail_pos)
-                                new = rf.read()
-                                if new:
-                                    print(new.decode("utf-8", errors="replace"),
-                                          end="", flush=True)
-                                    _tail_pos += len(new)
-                        else:
-                            _tail_stall_count += 1
-                            time.sleep(0.5)
-                    except Exception:
-                        time.sleep(0.5)
-                # Drain any remaining output after process exits
-                try:
-                    with test_log.open("rb") as rf:
-                        rf.seek(_tail_pos)
-                        remaining = rf.read()
-                        if remaining:
-                            print(remaining.decode("utf-8", errors="replace"),
-                                  end="", flush=True)
-                except Exception:
-                    pass
-
-            tail_thread = threading.Thread(target=_tail_log, daemon=True)
-            tail_thread.start()
-
-            # ── Diagnostic: print process tree periodically ──
-            def _diag_process_tree(label: str) -> None:
-                try:
-                    _tree = subprocess.run(
-                        ["ps", "--forest", "-o", "pid,pgid,ppid,stat,wchan:20,comm",
-                         "--ppid", str(proc.pid)],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    print(f"\n  [diag] {label} — process tree under pytest "
-                          f"(pid={proc.pid}):")
-                    if _tree.stdout.strip():
-                        for _line in _tree.stdout.strip().splitlines():
-                            print(f"         {_line}")
-                    else:
-                        print(f"         (empty — no children)")
-                except Exception as _e:
-                    print(f"\n  [diag] {label} — ps failed: {_e}")
-
-            # Wait for pytest with a generous timeout (2 hours).
-            # If pytest-xdist workers hang due to fd inheritance or any
-            # other reason, kill the entire process group and move on.
-            PYTEST_TIMEOUT = 1500  # 25 minutes
-            _wait_start = time.time()
-
-            while True:
-                try:
-                    proc.wait(timeout=30)
-                    break  # exited normally
-                except subprocess.TimeoutExpired:
-                    _waited = time.time() - _wait_start
-                    _rc = proc.poll()
-                    _tail_alive = tail_thread.is_alive()
-                    _log_size = test_log.stat().st_size if test_log.exists() else 0
-                    print(f"\n  [diag] still waiting after {_waited:.0f}s "
-                          f"(timeout={PYTEST_TIMEOUT}s), "
-                          f"proc.poll()={_rc}, "
-                          f"tail_thread alive={_tail_alive}, "
-                          f"tail loops={_tail_loops}, "
-                          f"tail stalls={_tail_stall_count}, "
-                          f"log size={_log_size} bytes")
-                    _diag_process_tree(f"waited {_waited:.0f}s")
-
-                    if _waited >= PYTEST_TIMEOUT:
-                        print(f"\n  ✗ pytest timed out after {PYTEST_TIMEOUT}s "
-                              f"— killing process group (pgid {proc.pid})...")
-                        _diag_process_tree("BEFORE kill")
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except (ProcessLookupError, OSError):
-                            pass
-                        try:
-                            proc.wait(timeout=30)
-                        except subprocess.TimeoutExpired:
-                            print(f"  ✗ Process group did not respond to SIGKILL")
-                            _diag_process_tree("AFTER killpg + 30s wait")
-                        break
-
-            _wall_time = time.time() - _wait_start
-            print(f"  [diag] proc.wait() returned after {_wall_time:.1f}s, "
-                  f"returncode={proc.returncode}")
-
-            tail_thread.join(timeout=5)
-            if tail_thread.is_alive():
-                print(f"  [diag] WARNING: tail thread still alive after join(timeout=5)")
-            print(f"  [diag] tail thread joined, "
-                  f"tail loops={_tail_loops}, "
-                  f"tail stalls={_tail_stall_count}")
-
-        passed = proc.returncode == 0
+        passed = result.returncode == 0
         summary = {
-            "exit_code": proc.returncode,
+            "exit_code": result.returncode,
             "passed": passed,
             "test_log": str(test_log),
             "test_dir": str(test_dir_path),
