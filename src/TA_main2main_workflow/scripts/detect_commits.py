@@ -13,10 +13,12 @@ Output: workspace/detect.json
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, DETECT_FILE, run_git, get_repo_head, get_merge_base,
+    ENV_BASE_BRANCH, get_base_branch_ref,
 )
 
 
@@ -81,12 +83,14 @@ def detect(
 
     Returns (result_dict, has_new_commits).
     """
-    # ── Fetch latest from origin/main (private fork base) ──
+    # ── Fetch latest from the configured base branch ──
+    base_branch = os.getenv(ENV_BASE_BRANCH, "main")
+    base_ref = get_base_branch_ref()
     try:
-        run_git(triton_ascend_path, "fetch", "origin", "main")
-        print("[detect] Fetched origin/main (private fork)")
+        run_git(triton_ascend_path, "fetch", "origin", base_branch)
+        print(f"[detect] Fetched {base_ref} (private fork)")
     except Exception:
-        print("[detect] Warning: could not fetch origin/main, using local refs")
+        print(f"[detect] Warning: could not fetch {base_ref}, using local refs")
 
     # ── Fetch latest from upstream-triton ──
     if not target_commit:
@@ -95,22 +99,22 @@ def detect(
         except Exception:
             print("[detect] Warning: could not fetch upstream-triton, using local refs")
 
-    # ── Use origin/main as the ascend reference (not checkout HEAD) ──
-    # The work branch will be created from origin/main, so the merge_base
-    # must be computed against origin/main — otherwise we'd include commits
-    # that are already on main.
+    # ── Use the configured base branch as the ascend reference (not checkout HEAD) ──
+    # The work branch will be created from the base branch, so the merge_base
+    # must be computed against it — otherwise we'd include commits
+    # that are already on the base branch.
     try:
-        ascend_head = run_git(triton_ascend_path, "rev-parse", "origin/main").strip()
+        ascend_head = run_git(triton_ascend_path, "rev-parse", base_ref).strip()
     except Exception:
         ascend_head = get_repo_head(triton_ascend_path)
-        print("[detect] Warning: origin/main not available, using checkout HEAD")
+        print(f"[detect] Warning: {base_ref} not available, using checkout HEAD")
 
     target = target_commit if target_commit else get_repo_head(triton_path)
 
     # ── Debug: print key refs ──
     checkout_head = get_repo_head(triton_ascend_path)
     print(f"[detect] Checkout HEAD : {checkout_head[:12]}")
-    print(f"[detect] origin/main  : {ascend_head[:12]}")
+    print(f"[detect] {base_ref}  : {ascend_head[:12]}")
     print(f"[detect] upstream target: {target[:12]}")
 
     merge_base = get_merge_base(triton_ascend_path, ascend_head, target)

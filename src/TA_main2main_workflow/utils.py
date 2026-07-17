@@ -40,6 +40,18 @@ ENV_LINE_BUDGET = "TA_LINE_BUDGET"
 ENV_COMMIT_BUDGET = "TA_COMMIT_BUDGET"
 # Env var to enable single-step mode (per-step merge → IR → build → test → fix)
 ENV_SINGLE_STEP_MODE = "TA_SINGLE_STEP_MODE"
+# Env var to control the base branch for work branches, diffs, and pre-commit.
+# Defaults to "main".  Set to "master", "develop", etc. to use a different base.
+ENV_BASE_BRANCH = "TA_BASE_BRANCH"
+
+
+def get_base_branch_ref(remote: str = "origin") -> str:
+    """Return the full base-branch ref (e.g. origin/main).
+
+    Controlled by the TA_BASE_BRANCH env var; defaults to 'main'.
+    """
+    branch = os.getenv(ENV_BASE_BRANCH, "main")
+    return f"{remote}/{branch}"
 
 # ── Output file names ────────────────────────────────────────────────────────
 DETECT_FILE = "detect.json"

@@ -21,6 +21,7 @@ from pathlib import Path
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, MERGE_RESULT_FILE, MERGE_LOG_FILE, CONFLICT_LOG_DIR,
     run_git, run_git_no_check, has_merge_conflicts, get_conflict_files,
+    ENV_BASE_BRANCH, get_base_branch_ref,
 )
 
 
@@ -105,9 +106,8 @@ def _create_work_branch(repo: Path, suffix: str = "") -> str:
 
     _abort_stale_merge(repo)
 
-    # Choose branch point: origin/main by default (the private fork's main branch,
-    # i.e. TecJesh/triton-ascend when run in CI). Set TA_WORK_BRANCH_BASE=upstream-ascend
-    # to use triton-lang/triton-ascend/main instead.
+    # Choose branch point: origin/<TA_BASE_BRANCH> by default.
+    # Set TA_WORK_BRANCH_BASE=upstream-ascend to use triton-lang/triton-ascend/main instead.
     branch_base = os.getenv("TA_WORK_BRANCH_BASE", "origin")
 
     if branch_base == "upstream-ascend":
@@ -116,13 +116,13 @@ def _create_work_branch(repo: Path, suffix: str = "") -> str:
         run_git(repo, "fetch", upstream_remote, "main")
         base_ref = f"{upstream_remote}/main"
     else:
-        base_ref = "origin/main"
-        # Make sure we have the latest origin/main
-        print("[merge] Fetching latest from origin...")
+        base_ref = get_base_branch_ref()
+        base_branch = os.getenv(ENV_BASE_BRANCH, "main")
+        print(f"[merge] Fetching latest {base_ref} from origin...")
         try:
-            run_git(repo, "fetch", "origin", "main")
+            run_git(repo, "fetch", "origin", base_branch)
         except Exception:
-            print("[merge] Warning: could not fetch origin/main, using local ref")
+            print(f"[merge] Warning: could not fetch {base_ref}, using local ref")
 
     # Resolve base ref to a commit so we can log both the name and the SHA
     base_sha = run_git(repo, "rev-parse", base_ref).strip()

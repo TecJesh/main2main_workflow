@@ -30,6 +30,7 @@ from pathlib import Path
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, FINAL_TARGET_PATCH_FILE, FINAL_SUMMARY_FILE,
     run_git, run_git_no_check, print_error,
+    ENV_BASE_BRANCH, get_base_branch_ref,
 )
 
 
@@ -39,7 +40,7 @@ def _detect_default_branch(repo: Path, remote: str = "origin") -> str:
         ref = run_git(repo, "symbolic-ref", f"refs/remotes/{remote}/HEAD").strip()
         return ref.rsplit("/", 1)[-1]
     except subprocess.CalledProcessError:
-        return "main"
+        return os.getenv(ENV_BASE_BRANCH, "main")
 
 
 def _ensure_gh_auth(repo: Path) -> None:
@@ -137,7 +138,7 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
 
     Steps:
       1. Clean temp files first (result_profiling/, __pycache__/, *.lock, *.pyc)
-      2. Run: pre-commit run --from-ref origin/main --to-ref HEAD
+      2. Run: pre-commit run --from-ref <base_ref> --to-ref HEAD
       3. If pre-commit modified files → git add -u && git commit --amend --no-edit
       4. Re-clean temp files after amend
 
@@ -146,6 +147,8 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
     """
     from TA_main2main_workflow.scripts.pre_ci_check import cleanup_temp_files
 
+    base_ref = get_base_branch_ref()
+
     print("[push] ── Pre-commit check before PR ──")
 
     # ── Step 1: clean temp files ──
@@ -153,10 +156,10 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
     cleanup_temp_files(repo)
 
     # ── Step 2: run pre-commit ──
-    print("[push] Running: pre-commit run --from-ref origin/main --to-ref HEAD")
+    print(f"[push] Running: pre-commit run --from-ref {base_ref} --to-ref HEAD")
     try:
         pc_proc = subprocess.run(
-            ["pre-commit", "run", "--from-ref", "origin/main", "--to-ref", "HEAD"],
+            ["pre-commit", "run", "--from-ref", base_ref, "--to-ref", "HEAD"],
             cwd=repo,
             capture_output=True,
             text=True,
@@ -287,7 +290,7 @@ def push_and_create_pr(
 
     Flow:
       1. Authenticate gh CLI
-      2. Run pre-commit --from-ref origin/main --to-ref HEAD, amend if needed
+      2. Run pre-commit --from-ref <base_ref> --to-ref HEAD, amend if needed
       3. Clean temp files
       4. Commit any remaining uncommitted changes
       5. Push work branch
@@ -300,12 +303,13 @@ def push_and_create_pr(
     if not work_branch:
         work_branch = run_git(repo, "branch", "--show-current").strip()
 
+    base_ref = get_base_branch_ref()
     try:
-        base_ref = run_git(repo, "merge-base", "origin/main", "HEAD").strip()
+        merge_base = run_git(repo, "merge-base", base_ref, "HEAD").strip()
     except subprocess.CalledProcessError:
-        base_ref = "HEAD~1"
+        merge_base = "HEAD~1"
 
-    patch_content = run_git(repo, "diff", base_ref, "HEAD")
+    patch_content = run_git(repo, "diff", merge_base, "HEAD")
     patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
     patch_path.write_text(patch_content, encoding="utf-8")
     print(f"[push] Cumulative patch written to {patch_path}")
@@ -416,7 +420,7 @@ def push_step_progress(
     _ensure_gh_auth(repo)
 
     # ── Generate step-aware patch ──
-    patch_content = run_git(repo, "diff", "origin/main", "HEAD")
+    patch_content = run_git(repo, "diff", get_base_branch_ref(), "HEAD")
     patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
     patch_path.write_text(patch_content, encoding="utf-8")
 

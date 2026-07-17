@@ -46,7 +46,7 @@ from TA_main2main_workflow.utils import (
     commit_submodule, push_submodule, submodule_has_changes,
     IR_ANALYSIS_DIR, IR_OPS_REPORT_FILE,
     IR_CHANGES_REPORT_FILE, IR_DIAGNOSIS_FILE, IR_MAX_ITERATIONS,
-    ENV_SINGLE_STEP_MODE, LLVM_CHANGE_ANALYSIS_DIR,
+    ENV_SINGLE_STEP_MODE, ENV_BASE_BRANCH, get_base_branch_ref, LLVM_CHANGE_ANALYSIS_DIR,
     print_header, print_section, print_step, print_status, print_info,
     print_warn, print_error, print_key_value,
     print_flow_progress, print_conflict_list, print_summary_table,
@@ -1007,16 +1007,18 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             ascend_path, "rev-parse", "HEAD"
         ).strip()
 
-        # ── Use origin/main as the base ref for patch diffs ──
-        # The work branch is created from origin/main, so all diffs should
-        # be computed against origin/main, not the checkout HEAD.
+        # ── Use the configured base branch for patch diffs ──
+        # The work branch is created from the base branch, so all diffs should
+        # be computed against it, not the checkout HEAD.
+        base_branch = os.getenv(ENV_BASE_BRANCH, "main")
+        base_ref = get_base_branch_ref()
         try:
-            run_git(ascend_path, "fetch", "origin", "main")
+            run_git(ascend_path, "fetch", "origin", base_branch)
         except Exception:
-            print_warn("Could not fetch origin/main, using checkout HEAD as base")
+            print_warn(f"Could not fetch {base_ref}, using checkout HEAD as base")
         try:
             self.state.ascend_head = run_git(
-                ascend_path, "rev-parse", "origin/main").strip()
+                ascend_path, "rev-parse", base_ref).strip()
         except Exception:
             self.state.ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
 
@@ -1025,7 +1027,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         print_key_value("upstream triton", self.state.triton_path)
         print_key_value("target commit", self.state.target_commit or "<upstream HEAD>")
         print_key_value("original branch", self.state.original_branch)
-        print_key_value("base (origin/main)", self.state.ascend_head[:12])
+        print_key_value(f"base ({base_ref})", self.state.ascend_head[:12])
 
         self._print_workspace_info("Phase 0: Initialize")
 
@@ -2845,16 +2847,18 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             print_error(f"llvm-project not found at {llvm_project}")
             return False
 
-        # ── 1. Read LLVM hash from origin/main (work branch base) ──
-        # Use git show to get the hash from origin/main, NOT the checkout
+        # ── 1. Read LLVM hash from base branch (work branch base) ──
+        # Use git show to get the hash from the base branch, NOT the checkout
         # filesystem — the checkout may be on a stale branch.
+        base_branch = os.getenv(ENV_BASE_BRANCH, "main")
+        base_ref = get_base_branch_ref()
         try:
-            run_git(ascend_path, "fetch", "origin", "main")
+            run_git(ascend_path, "fetch", "origin", base_branch)
         except Exception:
-            print_warn("[baseline-llvm] Could not fetch origin/main, using local ref")
+            print_warn(f"[baseline-llvm] Could not fetch {base_ref}, using local ref")
         try:
             llvm_hash = run_git(
-                ascend_path, "show", "origin/main:cmake/llvm-hash.txt"
+                ascend_path, "show", f"{base_ref}:cmake/llvm-hash.txt"
             ).strip()
         except Exception:
             # Fallback: read from checkout filesystem
@@ -2863,12 +2867,12 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 print_error(f"LLVM hash file not found: {llvm_hash_file}")
                 return False
             llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
-            print_warn("[baseline-llvm] Using checkout llvm-hash.txt (origin/main not available)")
+            print_warn(f"[baseline-llvm] Using checkout llvm-hash.txt ({base_ref} not available)")
         if not llvm_hash:
             print_error("LLVM hash is empty")
             return False
         print_key_value("LLVM commit", llvm_hash[:12])
-        print_info(f"  (from origin/main)")
+        print_info(f"  (from {base_ref})")
 
         # ── Ensure llvm-project workspace is clean before checkout ──
         if not self._ensure_llvm_workspace_clean(reason="baseline-llvm-build"):

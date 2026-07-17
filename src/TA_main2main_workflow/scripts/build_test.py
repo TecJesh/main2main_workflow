@@ -32,6 +32,7 @@ from pathlib import Path
 
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, BUILD_RESULT_FILE, BUILD_LOG_FILE, TEST_RESULT_FILE,
+    get_base_branch_ref,
 )
 
 
@@ -505,14 +506,13 @@ def run_tests(
         if pytest_bin:
             pytest_cmd = [
                 pytest_bin, str(test_dir_abs),
-                "-n", str(num_procs), "--tb=short",
+                "-n", str(num_procs),
             ]
         else:
             pytest_cmd = [
                 python_exe, "-m", "pytest",
                 str(test_dir_abs),
                 "-n", str(num_procs),
-                "--tb=short",
             ]
 
         # Run pytest with stdout→file (no pipe, no inherited fd issues).
@@ -599,7 +599,7 @@ def run_tests(
         precommit_passed = True
         try:
             pc_proc = subprocess.run(
-                ["pre-commit", "run", "--from-ref", "origin/main", "--to-ref", "HEAD"],
+                ["pre-commit", "run", "--from-ref", get_base_branch_ref(), "--to-ref", "HEAD"],
                 cwd=repo_path,
                 stdout=precommit_log.open("w"),
                 stderr=subprocess.STDOUT,
