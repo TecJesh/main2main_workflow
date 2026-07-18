@@ -564,23 +564,21 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     def _push_submodule_if_needed(self) -> None:
         """Push AscendNPU-IR submodule changes to its remote.
 
+        Raises RuntimeError on failure so the error is surfaced to
+        GitHub Actions and the workflow exits with code 1.
+
         Uses the same branch name as the parent repo's work branch so the
         two repos stay in sync. Pushes with --force-with-lease to avoid
         clobbering existing remote state.
-
-        Failure is non-fatal — the parent repo push proceeds regardless.
-        Records the result in summary_rows for visibility.
         """
         ascend_path = Path(self.state.triton_ascend_path)
-        submodule_push_state = push_submodule(ascend_path, self.state.work_branch)
-        if submodule_push_state:
-            self.state.summary_rows.append(
-                ("Push AscendNPU-IR", "PASS", self.state.work_branch)
-            )
-        else:
-            self.state.summary_rows.append(
-                ("Push AscendNPU-IR", "WARN", "Push failed — commit may only exist locally")
-            )
+        if not push_submodule(ascend_path, self.state.work_branch):
+            raise RuntimeError(
+                f"Failed to push AscendNPU-IR submodule branch "
+                f"'{self.state.work_branch}'")
+        self.state.summary_rows.append(
+            ("Push AscendNPU-IR", "PASS", self.state.work_branch)
+        )
 
     def _write_merge_metadata(self) -> None:
         """Write work branch, target commit, and step progress for CI orchestration."""
@@ -911,7 +909,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     print_info(f"  - {f}")
             commit_target = target_commit[:12] if target_commit else "upstream"
             commit_msg = (
-                f"fix: AI-generated fix for build/test failures\n\n"
+                f"[Sync](fix) AI-generated build/test failures fix "
+                f"for merging {commit_target}\n\n"
                 f"Upstream target: {commit_target}\n"
                 f"Fix attempt: {attempt}\n"
                 f"Work branch: {work_branch}\n"
@@ -1664,7 +1663,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         target_short = self.state.target_commit[:12]
         commit_msg = (
-            f"fix: AI-generated fix for build/test failures\n\n"
+            f"[Sync](fix) AI-generated build/test failures fix "
+            f"for merging {target_short}\n\n"
             f"Upstream target: {target_short}\n"
             f"Fix attempt: {self.state.retry_count}\n"
             f"Work branch: {self.state.work_branch}\n"
@@ -1686,6 +1686,11 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         # ── Commit submodule changes first (inside AscendNPU-IR) ──
         self._commit_submodule_if_needed()
 
+        # ── Clean temp artifacts BEFORE staging ──
+        # Clean first, then check status — otherwise temp files that
+        # AI fixes didn't touch would cause a false-positive "need to commit".
+        cleanup_temp_files(ascend_path)
+
         status = run_git(ascend_path, "status", "--porcelain").strip()
         if not status:
             print_info("No uncommitted fix changes — nothing to commit")
@@ -1693,9 +1698,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         print_section("Commit Bug Fixes")
 
-        # ── Clean temp artifacts BEFORE staging ──
-        # git add -A would otherwise pick up build outputs, cache dirs, etc.
-        cleanup_temp_files(ascend_path)
+        target_short = self.state.target_commit[:12]
 
         # ── Read AI-written commit message ──
         commit_msg_path = step_dir / "commit_message.txt"
@@ -1711,11 +1714,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 summary_text = summary_path.read_text(encoding="utf-8").strip()
                 commit_summary = summary_text.split("\n")[0].lstrip("#").strip()[:72]
             else:
-                commit_summary = "fix: resolve build/test failures for upstream sync"
-
-        target_short = self.state.target_commit[:12]
+                commit_summary = f"Resolve build/test failures for merging {target_short}"
         commit_msg = (
-            f"fix: {commit_summary}\n\n"
+            f"[Sync](fix) {commit_summary}\n\n"
             f"Upstream target: {target_short}\n"
             f"Fix attempt: {self.state.retry_count}\n"
             f"Work branch: {self.state.work_branch}\n"

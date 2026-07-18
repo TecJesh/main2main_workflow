@@ -568,14 +568,13 @@ def run_tests(
                 import xml.etree.ElementTree as ET
                 tree = ET.parse(junit_xml)
                 root = tree.getroot()
-                suite = root
+                suites = [root]
                 if root.tag == "testsuites":
                     suites = root.findall("testsuite")
-                    if suites:
-                        suite = suites[0]
-                _tp = int(suite.get("tests", 0))
-                _pf = int(suite.get("failures", 0))
-                _pe = int(suite.get("errors", 0))
+                for suite in suites:
+                    _tp += int(suite.get("tests", 0))
+                    _pf += int(suite.get("failures", 0))
+                    _pe += int(suite.get("errors", 0))
             except Exception:
                 pass
 

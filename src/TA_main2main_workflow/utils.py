@@ -235,6 +235,8 @@ def run_git(repo: Path | str, *args: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return result.stdout
 
@@ -245,6 +247,8 @@ def run_git_no_check(repo: Path | str, *args: str) -> subprocess.CompletedProces
         cwd=str(repo),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
