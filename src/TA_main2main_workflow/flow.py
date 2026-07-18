@@ -3670,6 +3670,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 github_repo=github_repo,
                 work_branch=self.state.work_branch,
                 summary_path=pr_body_path,
+                target_commit=self.state.target_commit,
             )
             self.state.pr_url = pr_url
             print_status(True, f"PR created: {pr_url}")

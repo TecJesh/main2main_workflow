@@ -227,30 +227,21 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
     return True
 
 
-def _build_pr_title(ts: str = "") -> str:
-    """Build PR title in format: [user](type) description
+def _build_pr_title(target_commit: str = "") -> str:
+    """Build PR title in conventional commit format.
 
-    Example: [TA](sync) merge upstream triton commits (20240612-120000)
+    Example: [Sync](feat) Merge upstream triton commits (abc12345)
 
     Env vars:
-      PR_AUTHOR — user tag (default: git user.name or "TA")
-      PR_TYPE   — conventional commit type (default: "sync")
+      PR_AUTHOR — user tag (default: "Sync")
+      PR_TYPE   — conventional commit type (default: "feat")
     """
-    author = os.getenv("PR_AUTHOR", "").strip()
-    if not author:
-        # Fall back to git user name
-        try:
-            author = subprocess.run(
-                ["git", "config", "user.name"],
-                check=True, capture_output=True, text=True,
-            ).stdout.strip()
-        except subprocess.CalledProcessError:
-            author = "TA"
-
-    pr_type = os.getenv("PR_TYPE", "sync").strip()
-    ts = ts or datetime.now().strftime("%Y%m%d-%H%M%S")
-
-    return f"[{author}]({pr_type}) merge upstream triton commits ({ts})"
+    author = os.getenv("PR_AUTHOR", "Sync").strip()
+    pr_type = os.getenv("PR_TYPE", "feat").strip()
+    if target_commit:
+        return f"[{author}]({pr_type}) Merge upstream triton commits {target_commit[:8]}"
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"[{author}]({pr_type}) Merge upstream triton commits {ts}"
 
 
 def _create_pr_via_api(
@@ -347,6 +338,7 @@ def push_and_create_pr(
     github_repo: str = "triton-lang/triton-ascend",
     work_branch: str = "",
     summary_path: Path | None = None,
+    target_commit: str = "",
 ) -> str:
     """Push the current work branch and create a GitHub PR.
 
@@ -460,8 +452,7 @@ def push_and_create_pr(
         print("[push] WARNING: could not detect origin owner, "
               "PR may fail without owner:branch format")
 
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    pr_title = _build_pr_title(ts)
+    pr_title = _build_pr_title(target_commit)
 
     print(f"[push] Creating PR via gh CLI:")
     print(f"        head = {_head}")
