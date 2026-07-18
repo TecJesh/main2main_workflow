@@ -84,9 +84,9 @@ def _ensure_upstream_ascend_remote(repo: Path) -> str:
 def _create_work_branch(repo: Path, suffix: str = "") -> str:
     """Create and checkout a work branch for the merge.
 
-    Default: branch from origin/main (current checkout).  Set
-    TA_WORK_BRANCH_BASE=upstream-ascend to branch from
-    triton-lang/triton-ascend/main instead (original behaviour).
+    Default: branch from triton-lang/triton-ascend/upstream-sync.
+    Set TA_WORK_BRANCH_BASE=origin to branch from the local fork instead,
+    and TA_BASE_BRANCH to change the branch name on either remote.
     """
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     branch = f"auto/upstream-sync-{ts}{'-' + suffix if suffix else ''}"
@@ -106,15 +106,18 @@ def _create_work_branch(repo: Path, suffix: str = "") -> str:
 
     _abort_stale_merge(repo)
 
-    # Choose branch point: origin/<TA_BASE_BRANCH> by default.
-    # Set TA_WORK_BRANCH_BASE=upstream-ascend to use triton-lang/triton-ascend/main instead.
-    branch_base = os.getenv("TA_WORK_BRANCH_BASE", "origin")
+    # Base branch for work branches.  Defaults to the upstream repo's
+    # upstream-sync branch (triton-lang/triton-ascend).  Set
+    # TA_WORK_BRANCH_BASE=origin to branch from the local fork instead.
+    _upstream_branch = os.getenv(ENV_BASE_BRANCH, "upstream-sync")
+    branch_base = os.getenv("TA_WORK_BRANCH_BASE", "upstream-ascend")
 
     if branch_base == "upstream-ascend":
         upstream_remote = _ensure_upstream_ascend_remote(repo)
-        print(f"[merge] Fetching latest main from '{upstream_remote}'...")
-        run_git(repo, "fetch", upstream_remote, "main")
-        base_ref = f"{upstream_remote}/main"
+        print(f"[merge] Fetching latest {_upstream_branch} from "
+              f"'{upstream_remote}'...")
+        run_git(repo, "fetch", upstream_remote, _upstream_branch)
+        base_ref = f"{upstream_remote}/{_upstream_branch}"
     else:
         base_ref = get_base_branch_ref()
         base_branch = os.getenv(ENV_BASE_BRANCH, "main")

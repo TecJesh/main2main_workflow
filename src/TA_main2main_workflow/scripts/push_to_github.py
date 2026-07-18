@@ -310,9 +310,12 @@ def _create_pr_via_gh(
 ) -> str:
     """Create a GitHub PR via the gh CLI.
 
-    Uses 'gh pr create' which handles auth and cross-fork PRs natively.
-    Requires gh CLI to be installed and authenticated.
+    Uses the user's GH_TOKEN (classic PAT with fork write access) to
+    authenticate.  The auto GITHUB_TOKEN from actions/checkout is scoped
+    to the upstream repo only — GH_TOKEN overrides it so the PR can
+    reference branches on the user's fork.
     """
+    gh_token = os.environ.get("GH_TOKEN") or ""
     gh_cmd = [
         "gh", "pr", "create",
         "--title", title,
@@ -321,10 +324,12 @@ def _create_pr_via_gh(
         "--base", base_branch,
         "--repo", github_repo,
     ]
-    print(f"[push] Running: {' '.join(gh_cmd)}")
+    print(f"[push] Running: GITHUB_TOKEN=*** {' '.join(gh_cmd)}")
     result = subprocess.run(
         gh_cmd,
         capture_output=True, text=True, timeout=60,
+        env={**os.environ, "GITHUB_TOKEN": gh_token,
+             "GH_TOKEN": gh_token},
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -422,12 +427,26 @@ def push_and_create_pr(
         pass
     print("[push] ==============================")
 
-    try:
+    # Push with GH_TOKEN (personal PAT), clearing any extraheader that
+    # actions/checkout set (auto GITHUB_TOKEN is scoped to upstream only).
+    _token = os.environ.get("GH_TOKEN") or ""
+    if _token:
+        _push_result = subprocess.run(
+            ["git", "-c", "http.https://github.com/.extraheader=",
+             "push", "-u", "origin", work_branch],
+            cwd=str(repo), capture_output=True, text=True,
+            env={**os.environ, "GITHUB_TOKEN": _token},
+        )
+        if _push_result.stdout.strip():
+            print(f"[push] stdout:\n{_push_result.stdout.strip()}")
+        if _push_result.returncode != 0:
+            print_error(
+                f"[push] git push FAILED (exit {_push_result.returncode}):\n"
+                f"{_push_result.stderr.strip() or '(no stderr)'}"
+            )
+            _push_result.check_returncode()
+    else:
         run_git(repo, "push", "-u", "origin", work_branch)
-    except subprocess.CalledProcessError as e:
-        stderr_detail = e.stderr.strip() if e.stderr else "(no stderr)"
-        print_error(f"git push failed (exit {e.returncode}): {stderr_detail}")
-        raise
 
     # ── Create PR via gh CLI ──
     base_branch = os.getenv("TA_PR_BASE_BRANCH", "upstream-sync")
