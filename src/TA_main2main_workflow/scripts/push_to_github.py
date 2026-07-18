@@ -38,9 +38,11 @@ def _detect_origin_owner(repo: Path, remote: str = "origin") -> str:
     """Extract the GitHub owner from the origin remote URL."""
     try:
         url = run_git(repo, "remote", "get-url", remote).strip()
+        # Strip credentials if present (e.g. x-access-token:ghp_xxx@...)
+        if "@" in url:
+            url = url.split("@", 1)[-1]
         # Handle https://github.com/owner/repo.git and git@github.com:owner/repo.git
         if "github.com" in url:
-            # strip protocol, host, and .git suffix
             url = url.replace("https://", "").replace("git@", "")
             url = url.replace("github.com/", "").replace("github.com:", "")
             if url.endswith(".git"):
@@ -299,6 +301,42 @@ def _create_pr_via_api(
         ) from e
 
 
+def _create_pr_via_gh(
+    github_repo: str,
+    title: str,
+    body: str,
+    head_ref: str,
+    base_branch: str,
+) -> str:
+    """Create a GitHub PR via the gh CLI.
+
+    Uses 'gh pr create' which handles auth and cross-fork PRs natively.
+    Requires gh CLI to be installed and authenticated.
+    """
+    gh_cmd = [
+        "gh", "pr", "create",
+        "--title", title,
+        "--body", body,
+        "--head", head_ref,
+        "--base", base_branch,
+        "--repo", github_repo,
+    ]
+    print(f"[push] Running: {' '.join(gh_cmd)}")
+    result = subprocess.run(
+        gh_cmd,
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gh pr create failed (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    pr_url = result.stdout.strip()
+    if not pr_url:
+        raise RuntimeError("gh pr create returned empty output")
+    return pr_url
+
+
 def push_and_create_pr(
     ascend_path: Path,
     github_repo: str = "triton-lang/triton-ascend",
@@ -321,6 +359,9 @@ def push_and_create_pr(
 
     if not work_branch:
         work_branch = run_git(repo, "branch", "--show-current").strip()
+
+    # Capture owner BEFORE _ensure_gh_auth rewrites origin URL with token.
+    _head_owner = _detect_origin_owner(repo)
 
     base_ref = get_base_branch_ref()
     try:
@@ -388,32 +429,31 @@ def push_and_create_pr(
         print_error(f"git push failed (exit {e.returncode}): {stderr_detail}")
         raise
 
-    # ── Create PR via GitHub REST API ──
-    # Use the REST API directly instead of gh CLI to avoid host-detection
-    # failures when git remotes are rewritten by url.insteadOf proxy.
-    base_branch = _detect_default_branch(repo)
+    # ── Create PR via gh CLI ──
+    base_branch = os.getenv("TA_PR_BASE_BRANCH", "upstream-sync")
     pr_description = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
 
-    # Resolve head to "owner:branch" (required for cross-fork PRs).
-    _head_owner = _detect_origin_owner(repo)
+    # head = "owner:branch" (required for cross-fork PRs).
+    # _head_owner is captured early; _detect_origin_owner strips any
+    # token credentials that flow.py's _setup_git_auth_for_push injected.
     _head = f"{_head_owner}:{work_branch}" if _head_owner else work_branch
+    if not _head_owner:
+        print("[push] WARNING: could not detect origin owner, "
+              "PR may fail without owner:branch format")
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     pr_title = _build_pr_title(ts)
 
-    gh_token = os.getenv("GH_TOKEN", "") or os.getenv("GITHUB_TOKEN", "")
-    if not gh_token:
-        raise RuntimeError("GH_TOKEN or GITHUB_TOKEN must be set to create PR")
-
-    print(f"[push] Creating PR via API: {pr_title}")
-    print(f"[push] head={_head} base={base_branch} repo={github_repo}")
-    pr_url = _create_pr_via_api(
+    print(f"[push] Creating PR via gh CLI:")
+    print(f"        head = {_head}")
+    print(f"        base = {base_branch}")
+    print(f"        repo = {github_repo}")
+    pr_url = _create_pr_via_gh(
         github_repo=github_repo,
         title=pr_title,
         body=pr_description,
-        head=_head,
-        base=base_branch,
-        token=gh_token,
+        head_ref=_head,
+        base_branch=base_branch,
     )
     print(f"[push] PR created: {pr_url}")
     return pr_url
