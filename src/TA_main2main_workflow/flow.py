@@ -3650,7 +3650,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         self._print_workspace_info("Push to GitHub & Create PR")
 
-        github_repo = os.getenv("GITHUB_REPO", "TecJesh/triton-ascend")
+        github_repo = os.getenv("GITHUB_REPO", "triton-lang/triton-ascend")
         if not github_repo:
             print_error("GITHUB_REPO is empty — cannot create PR")
             self.state.summary_rows.append(("Push & PR", "FAIL", "GITHUB_REPO empty"))

@@ -34,13 +34,32 @@ from TA_main2main_workflow.utils import (
 )
 
 
+def _detect_origin_owner(repo: Path, remote: str = "origin") -> str:
+    """Extract the GitHub owner from the origin remote URL."""
+    try:
+        url = run_git(repo, "remote", "get-url", remote).strip()
+        # Handle https://github.com/owner/repo.git and git@github.com:owner/repo.git
+        if "github.com" in url:
+            # strip protocol, host, and .git suffix
+            url = url.replace("https://", "").replace("git@", "")
+            url = url.replace("github.com/", "").replace("github.com:", "")
+            if url.endswith(".git"):
+                url = url[:-4]
+            parts = url.split("/")
+            if parts:
+                return parts[0]
+    except Exception:
+        pass
+    return ""
+
+
 def _detect_default_branch(repo: Path, remote: str = "origin") -> str:
     """Detect the default branch of the remote."""
     try:
         ref = run_git(repo, "symbolic-ref", f"refs/remotes/{remote}/HEAD").strip()
         return ref.rsplit("/", 1)[-1]
     except subprocess.CalledProcessError:
-        return os.getenv(ENV_BASE_BRANCH, "main")
+        return os.getenv("TA_PR_BASE_BRANCH", "upstream-sync")
 
 
 def _ensure_gh_auth(repo: Path) -> None:
@@ -282,7 +301,7 @@ def _create_pr_via_api(
 
 def push_and_create_pr(
     ascend_path: Path,
-    github_repo: str = "TecJesh/triton-ascend",
+    github_repo: str = "triton-lang/triton-ascend",
     work_branch: str = "",
     summary_path: Path | None = None,
 ) -> str:
@@ -375,6 +394,10 @@ def push_and_create_pr(
     base_branch = _detect_default_branch(repo)
     pr_description = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
 
+    # Resolve head to "owner:branch" (required for cross-fork PRs).
+    _head_owner = _detect_origin_owner(repo)
+    _head = f"{_head_owner}:{work_branch}" if _head_owner else work_branch
+
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     pr_title = _build_pr_title(ts)
 
@@ -383,11 +406,12 @@ def push_and_create_pr(
         raise RuntimeError("GH_TOKEN or GITHUB_TOKEN must be set to create PR")
 
     print(f"[push] Creating PR via API: {pr_title}")
+    print(f"[push] head={_head} base={base_branch} repo={github_repo}")
     pr_url = _create_pr_via_api(
         github_repo=github_repo,
         title=pr_title,
         body=pr_description,
-        head=work_branch,
+        head=_head,
         base=base_branch,
         token=gh_token,
     )
@@ -397,7 +421,7 @@ def push_and_create_pr(
 
 def push_step_progress(
     ascend_path: Path,
-    github_repo: str = "TecJesh/triton-ascend",
+    github_repo: str = "triton-lang/triton-ascend",
     work_branch: str = "",
     step_id: str = "",
     step_num: int = 1,

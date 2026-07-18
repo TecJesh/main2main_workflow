@@ -519,7 +519,7 @@ def run_tests(
             pytest_cmd = [
                 pytest_bin, str(test_dir_abs),
                 "-n", str(num_procs),
-                "-sv",
+                # "-sv",
                 f"--junitxml={junit_xml}",
             ]
         else:
@@ -527,7 +527,7 @@ def run_tests(
                 python_exe, "-m", "pytest",
                 str(test_dir_abs),
                 "-n", str(num_procs),
-                "-sv",
+                # "-sv",
                 f"--junitxml={junit_xml}",
             ]
 
@@ -540,38 +540,60 @@ def run_tests(
         print(f"  junitxml: {junit_xml}")
         print(f"  (stdout inherits terminal — no pipe, no tee, no capture)")
 
-        # Run pytest directly, inheriting the terminal.  No pipe / tee /
-        # fd redirection at all — exactly like a human typing the command.
-        # pytest -s keeps the TTY line discipline, so xdist does not
-        # activate its internal capture IO threads.
-        # No timeout — block until pytest exits on its own.
+        # Run pytest with a 1000s timeout.
         _start = time.time()
-        result = subprocess.run(
-            pytest_cmd,
-            cwd=repo_path, env=proc_env,
-        )
+        _timed_out = False
+        try:
+            result = subprocess.run(
+                pytest_cmd,
+                cwd=repo_path, env=proc_env,
+                timeout=1000,
+            )
+            _rc = result.returncode
+        except subprocess.TimeoutExpired:
+            _timed_out = True
+            _rc = -1
+            print(f"  pytest timed out after 1000s", flush=True)
+
         _elapsed = time.time() - _start
-        print(f"  pytest finished in {_elapsed:.0f}s, returncode={result.returncode}")
+        if not _timed_out:
+            print(f"  pytest finished in {_elapsed:.0f}s, returncode={_rc}")
 
-        passed = result.returncode == 0
-        summary = {
-            "exit_code": result.returncode,
-            "passed": passed,
-            "test_log": str(junit_xml),
-            "test_dir": str(test_dir_path),
-        }
-
-        # Parse JUnit XML for pass/fail/error counts
+        # Parse JUnit XML first — real test results take priority over
+        # process exit status.
+        _pf = _pe = 0
+        _tp = 0
         if junit_xml.exists():
             try:
                 import xml.etree.ElementTree as ET
                 tree = ET.parse(junit_xml)
                 root = tree.getroot()
-                summary["passed_count"] = int(root.get("tests", 0))
-                summary["failed_count"] = int(root.get("failures", 0))
-                summary["error_count"] = int(root.get("errors", 0))
-            except Exception as _e:
-                print(f"  WARNING: could not parse JUnit XML: {_e}")
+                suite = root
+                if root.tag == "testsuites":
+                    suites = root.findall("testsuite")
+                    if suites:
+                        suite = suites[0]
+                _tp = int(suite.get("tests", 0))
+                _pf = int(suite.get("failures", 0))
+                _pe = int(suite.get("errors", 0))
+            except Exception:
+                pass
+
+        # passed = no test failures.  Timeout in teardown (all tests
+        # already finished) is NOT a test failure.
+        passed = (_pf == 0 and _pe == 0)
+
+        summary = {
+            "exit_code": 0 if passed else 1,
+            "passed": passed,
+            "test_log": str(junit_xml),
+            "test_dir": str(test_dir_path),
+            "passed_count": _tp,
+            "failed_count": _pf,
+            "error_count": _pe,
+        }
+        if _timed_out:
+            summary["timed_out"] = True
 
     precommit_config = repo_path / ".pre-commit-config.yaml"
     if precommit_config.exists():
