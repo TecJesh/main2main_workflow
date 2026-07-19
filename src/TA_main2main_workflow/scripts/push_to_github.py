@@ -35,21 +35,30 @@ from TA_main2main_workflow.utils import (
 
 
 def _detect_origin_owner(repo: Path, remote: str = "origin") -> str:
-    """Extract the GitHub owner from the origin remote URL."""
+    """Extract the GitHub owner from the origin remote URL.
+
+    Handles direct GitHub URLs, SSH URLs, and proxy URLs
+    (e.g. gh-proxy.test.osinfra.cn/https://github.com/owner/repo.git).
+    """
     try:
         url = run_git(repo, "remote", "get-url", remote).strip()
-        # Strip credentials if present (e.g. x-access-token:ghp_xxx@...)
+        # Strip credentials
         if "@" in url:
             url = url.split("@", 1)[-1]
-        # Handle https://github.com/owner/repo.git and git@github.com:owner/repo.git
-        if "github.com" in url:
-            url = url.replace("https://", "").replace("git@", "")
-            url = url.replace("github.com/", "").replace("github.com:", "")
-            if url.endswith(".git"):
-                url = url[:-4]
-            parts = url.split("/")
-            if parts:
-                return parts[0]
+        # If URL is behind a proxy, extract the real GitHub path
+        if "github.com/" in url:
+            # e.g. gh-proxy.test.osinfra.cn/https://github.com/owner/repo.git
+            url = url.split("github.com/", 1)[-1]
+        elif "github.com:" in url:
+            # e.g. git@github.com:owner/repo.git
+            url = url.split("github.com:", 1)[-1]
+        # Now url should be owner/repo or owner/repo.git
+        url = url.replace("https://", "").replace("git@", "")
+        if url.endswith(".git"):
+            url = url[:-4]
+        parts = url.split("/")
+        if parts and parts[0]:
+            return parts[0]
     except Exception:
         pass
     return ""
@@ -357,8 +366,10 @@ def push_and_create_pr(
     if not work_branch:
         work_branch = run_git(repo, "branch", "--show-current").strip()
 
-    # Capture owner BEFORE _ensure_gh_auth rewrites origin URL with token.
-    _head_owner = _detect_origin_owner(repo)
+    # Fork owner for push and PR head.  Defaults to TecJesh because
+    # in CI origin points to triton-lang/triton-ascend (upstream),
+    # so auto-detection would return the wrong owner.
+    _fork_owner = os.environ.get("TA_FORK_OWNER") or "TecJesh"
 
     base_ref = get_base_branch_ref()
     try:
@@ -419,24 +430,33 @@ def push_and_create_pr(
         pass
     print("[push] ==============================")
 
-    # Push with GH_TOKEN (personal PAT), clearing any extraheader that
-    # actions/checkout set (auto GITHUB_TOKEN is scoped to upstream only).
+    # Push to the fork (same pattern as AscendNPU-IR submodule push).
+    # Token embedded in the URL so the CI proxy can authenticate.
     _token = os.environ.get("GH_TOKEN") or ""
-    if _token:
-        _push_result = subprocess.run(
-            ["git", "-c", "http.https://github.com/.extraheader=",
-             "push", "-u", "origin", work_branch],
-            cwd=str(repo), capture_output=True, text=True,
-            env={**os.environ, "GITHUB_TOKEN": _token},
-        )
-        if _push_result.stdout.strip():
-            print(f"[push] stdout:\n{_push_result.stdout.strip()}")
-        if _push_result.returncode != 0:
-            print_error(
-                f"[push] git push FAILED (exit {_push_result.returncode}):\n"
-                f"{_push_result.stderr.strip() or '(no stderr)'}"
+    if _token and _fork_owner:
+        _fork_remote = "ta-fork-push"
+        _fork_url = f"https://x-access-token:{_token}@github.com/{_fork_owner}/triton-ascend.git"
+        # Remove stale remote, add fresh (like push_submodule does)
+        run_git_no_check(repo, "remote", "remove", _fork_remote)
+        run_git(repo, "remote", "add", _fork_remote, _fork_url)
+        print(f"[push] Added push remote '{_fork_remote}' → github.com/{_fork_owner}/triton-ascend.git")
+        try:
+            _push_result = subprocess.run(
+                ["git",
+                 "-c", "http.https://github.com/.extraheader=",
+                 "push", "--force-with-lease", _fork_remote, work_branch],
+                cwd=str(repo), capture_output=True, text=True,
             )
-            _push_result.check_returncode()
+            if _push_result.stdout.strip():
+                print(f"[push] stdout:\n{_push_result.stdout.strip()}")
+            if _push_result.returncode != 0:
+                print_error(
+                    f"[push] git push FAILED (exit {_push_result.returncode}):\n"
+                    f"{_push_result.stderr.strip() or '(no stderr)'}"
+                )
+                _push_result.check_returncode()
+        finally:
+            run_git(repo, "remote", "remove", _fork_remote)
     else:
         run_git(repo, "push", "-u", "origin", work_branch)
 
@@ -445,12 +465,7 @@ def push_and_create_pr(
     pr_description = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
 
     # head = "owner:branch" (required for cross-fork PRs).
-    # _head_owner is captured early; _detect_origin_owner strips any
-    # token credentials that flow.py's _setup_git_auth_for_push injected.
-    _head = f"{_head_owner}:{work_branch}" if _head_owner else work_branch
-    if not _head_owner:
-        print("[push] WARNING: could not detect origin owner, "
-              "PR may fail without owner:branch format")
+    _head = f"{_fork_owner}:{work_branch}" if _fork_owner else work_branch
 
     pr_title = _build_pr_title(target_commit)
 
