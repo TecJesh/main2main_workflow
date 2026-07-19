@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -330,8 +331,7 @@ def _create_pr_via_gh(
         capture_output=True, text=True, timeout=60,
         env={**os.environ,
              "GITHUB_TOKEN": gh_token,
-             "GH_TOKEN": gh_token,
-             "GH_HOST": "github.com"},
+             "GH_TOKEN": gh_token},
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -437,53 +437,80 @@ def push_and_create_pr(
     _token = os.environ.get("GH_TOKEN") or ""
     if _token and _fork_owner:
         _fork_remote = "ta-fork-push"
-        _fork_url = f"https://x-access-token:{_token}@github.com/{_fork_owner}/triton-ascend.git"
-        # Remove stale remote, add fresh (like push_submodule does)
-        run_git_no_check(repo, "remote", "remove", _fork_remote)
-        run_git(repo, "remote", "add", _fork_remote, _fork_url)
-        print(f"[push] Added push remote '{_fork_remote}' → github.com/{_fork_owner}/triton-ascend.git")
-        try:
+        _fork_url = (
+            f"https://x-access-token:{_token}@"
+            f"gh-proxy.test.osinfra.cn/"
+            f"https://github.com/{_fork_owner}/triton-ascend.git"
+        )
+        _last_push_error = ""
+        for _attempt in range(1, 6):
+            run_git_no_check(repo, "remote", "remove", _fork_remote)
+            run_git(repo, "remote", "add", _fork_remote, _fork_url)
             _push_result = subprocess.run(
                 ["git",
                  "-c", "http.https://github.com/.extraheader=",
                  "push", "--force-with-lease", _fork_remote, work_branch],
                 cwd=str(repo), capture_output=True, text=True,
             )
-            if _push_result.stdout.strip():
-                print(f"[push] stdout:\n{_push_result.stdout.strip()}")
-            if _push_result.returncode != 0:
-                print_error(
-                    f"[push] git push FAILED (exit {_push_result.returncode}):\n"
-                    f"{_push_result.stderr.strip() or '(no stderr)'}"
-                )
-                _push_result.check_returncode()
-        finally:
             run_git(repo, "remote", "remove", _fork_remote)
+            if _push_result.returncode == 0:
+                if _push_result.stdout.strip():
+                    print(f"[push] stdout:\n{_push_result.stdout.strip()}")
+                break
+            _last_push_error = _push_result.stderr.strip() or "(no stderr)"
+            print_error(
+                f"[push] git push attempt {_attempt}/5 FAILED "
+                f"(exit {_push_result.returncode}):\n{_last_push_error}"
+            )
+            if _attempt < 5:
+                time.sleep(10 * _attempt)
+        else:
+            raise RuntimeError(
+                f"git push failed after 5 attempts: {_last_push_error}")
     else:
         run_git(repo, "push", "-u", "origin", work_branch)
 
     # ── Create PR via gh CLI ──
+    # gh infers the GitHub host from git remotes.  In CI origin points
+    # to the proxy, so we temporarily swap it to the fork URL (with
+    # token) — gh recognizes github.com and GH_HOST isn't needed.
     base_branch = os.getenv("TA_PR_BASE_BRANCH", "upstream-sync")
     pr_description = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
 
-    # head = "owner:branch" (required for cross-fork PRs).
     _head = f"{_fork_owner}:{work_branch}" if _fork_owner else work_branch
-
     pr_title = _build_pr_title(target_commit)
 
     print(f"[push] Creating PR via gh CLI:")
     print(f"        head = {_head}")
     print(f"        base = {base_branch}")
     print(f"        repo = {github_repo}")
-    pr_url = _create_pr_via_gh(
-        github_repo=github_repo,
-        title=pr_title,
-        body=pr_description,
-        head_ref=_head,
-        base_branch=base_branch,
-    )
-    print(f"[push] PR created: {pr_url}")
-    return pr_url
+
+    _saved_origin = run_git(repo, "config", "--get", "remote.origin.url").strip()
+    _pr_origin = f"https://x-access-token:{_token}@github.com/{_fork_owner}/triton-ascend.git" if _token else f"https://github.com/{_fork_owner}/triton-ascend.git"
+    run_git(repo, "remote", "set-url", "origin", _pr_origin)
+
+    _last_pr_error = ""
+    for _attempt in range(1, 6):
+        try:
+            pr_url = _create_pr_via_gh(
+                github_repo=github_repo,
+                title=pr_title,
+                body=pr_description,
+                head_ref=_head,
+                base_branch=base_branch,
+            )
+            print(f"[push] PR created: {pr_url}")
+            return pr_url
+        except Exception as _e:
+            _last_pr_error = str(_e)
+            print_error(f"[push] PR create attempt {_attempt}/5 FAILED: "
+                        f"{_last_pr_error}")
+            if _attempt < 5:
+                time.sleep(10 * _attempt)
+        finally:
+            run_git(repo, "remote", "set-url", "origin", _saved_origin)
+    raise RuntimeError(
+        f"gh pr create failed after 5 attempts: {_last_pr_error}")
 
 
 def push_step_progress(
