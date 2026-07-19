@@ -127,6 +127,14 @@ def _create_work_branch(repo: Path, suffix: str = "") -> str:
         except Exception:
             print(f"[merge] Warning: could not fetch {base_ref}, using local ref")
 
+    # ── Reset to the pristine base ref and clean the working tree ──
+    # This guarantees the work branch starts from exactly the right
+    # commit, with no leftover artifacts from previous runs.
+    print(f"[merge] Resetting working tree to {base_ref}...")
+    run_git(repo, "checkout", "--detach", base_ref)
+    run_git(repo, "reset", "--hard", "HEAD")
+    run_git(repo, "clean", "-fd")
+
     # Resolve base ref to a commit so we can log both the name and the SHA
     base_sha = run_git(repo, "rev-parse", base_ref).strip()
     print(f"[merge] Base branch: {base_ref}  commit: {base_sha[:12]}")
