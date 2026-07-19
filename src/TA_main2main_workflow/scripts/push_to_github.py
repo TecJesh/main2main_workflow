@@ -324,12 +324,14 @@ def _create_pr_via_gh(
         "--base", base_branch,
         "--repo", github_repo,
     ]
-    print(f"[push] Running: GITHUB_TOKEN=*** {' '.join(gh_cmd)}")
+    print(f"[push] Running: GH_HOST=github.com {' '.join(gh_cmd)}")
     result = subprocess.run(
         gh_cmd,
         capture_output=True, text=True, timeout=60,
-        env={**os.environ, "GITHUB_TOKEN": gh_token,
-             "GH_TOKEN": gh_token},
+        env={**os.environ,
+             "GITHUB_TOKEN": gh_token,
+             "GH_TOKEN": gh_token,
+             "GH_HOST": "github.com"},
     )
     if result.returncode != 0:
         raise RuntimeError(
