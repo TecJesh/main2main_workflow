@@ -22,6 +22,7 @@ Output:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import signal
@@ -461,6 +462,62 @@ def build_triton_ascend(
     return result
 
 
+def _run_pytest_file(
+    cmd: list[str],
+    cwd: Path,
+    env: dict,
+    log_path: Path,
+    junit_xml: Path,
+    test: str,
+) -> dict:
+    """Run a single pytest file and return its result dict.
+
+    Captures stdout/stderr to *log_path* and parses the per-file JUnit XML.
+    Modeled after vllm-ascend's per-file pytest execution pattern:
+      python -m pytest -sv --color=yes <test_file>
+
+    No timeout — blocks until the test process exits, same as vllm-ascend's
+    ``_run_to_log``.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    proc = subprocess.run(
+        cmd, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True,
+    )
+    log_path.write_text(proc.stdout or "", encoding="utf-8")
+
+    # Parse per-file JUnit XML
+    _pf = _pe = 0
+    _tp = 0
+    if junit_xml.exists():
+        try:
+            import xml.etree.ElementTree as ET
+            tree = ET.parse(junit_xml)
+            root = tree.getroot()
+            suites = [root]
+            if root.tag == "testsuites":
+                suites = root.findall("testsuite")
+            for suite in suites:
+                _tp += int(suite.get("tests", 0))
+                _pf += int(suite.get("failures", 0))
+                _pe += int(suite.get("errors", 0))
+        except Exception:
+            pass
+
+    return {
+        "test": test,
+        "exit_code": proc.returncode,
+        "passed": (_pf == 0 and _pe == 0),
+        "passed_count": _tp,
+        "failed_count": _pf,
+        "error_count": _pe,
+        "log_path": str(log_path),
+        "junit_xml": str(junit_xml),
+    }
+
+
 def run_tests(
     repo_path: Path,
     test_dir: str = "third_party/ascend/unittest/pytest_ut",
@@ -469,6 +526,17 @@ def run_tests(
     python_exe: str = "",
 ) -> dict:
     """Run pytest unit tests and return structured results.
+
+    Discovers individual ``test_*.py`` files under *test_dir* and runs each
+    one as an independent pytest process (``python -m pytest -sv --color=yes
+    <test_file>``), matching the per-file isolation pattern used by
+    vllm-ascend's main2main workflow.  Tests execute in parallel via
+    ThreadPoolExecutor (max_workers = *num_procs*), avoiding the fork + IO
+    thread deadlock that can occur with pytest-xdist.
+
+    Each test file writes a dedicated ``.log`` and ``-junit.xml`` under
+    ``<workspace>/test-logs/``.  After all tests complete, results are
+    aggregated and written to ``<workspace>/test_result.json``.
 
     python_exe: Python executable for pytest (default '' uses PYTHON env var
                 or 'python3'). Set to 'python3.10' / 'python3.11' for dual tests.
@@ -493,12 +561,14 @@ def run_tests(
     if not test_dir_abs.exists():
         print(f"  WARNING: test directory not found: {test_dir_abs}")
         print(f"  Skipping tests — directory does not exist after merge.")
-        passed = False
-        summary = {
+        summary: dict = {
             "exit_code": -1,
             "passed": False,
             "error": f"Test directory not found: {test_dir_abs}",
             "test_dir": str(test_dir_abs),
+            "passed_count": 0,
+            "failed_count": 0,
+            "error_count": 0,
         }
     else:
         # Print bishengir-compile path before running tests
@@ -506,94 +576,95 @@ def run_tests(
         bishengir_compile_path = shutil.which("bishengir-compile")
         print(f"  bishengir-compile: {bishengir_compile_path or 'NOT FOUND'}")
 
-        # JUnit XML for structured result parsing (replaces raw log regex).
-        junit_xml = test_log_dir / "pytest-junit.xml"
-
-        # Prefer pytest console script; fall back to python -m pytest.
-        # -s   : no capture — stdout/stderr inherit from the terminal.
-        #        pytest-xdist skips its internal IO-thread capture layer,
-        #        avoiding the fork()+IO-thread deadlock that hangs at 97%.
-        # --junitxml : structured XML report for AI to read test results.
-        pytest_bin = shutil.which("pytest")
-        if pytest_bin:
-            pytest_cmd = [
-                pytest_bin, str(test_dir_abs),
-                "-n", str(num_procs),
-                # "-sv",
-                f"--junitxml={junit_xml}",
-            ]
+        # ── Discover individual test files (vllm-ascend per-file pattern) ──
+        test_files = sorted(
+            str(tf.relative_to(repo_path))
+            for tf in test_dir_abs.rglob("test_*.py")
+        )
+        if not test_files:
+            print(f"  WARNING: No test_*.py files found in {test_dir_abs}")
+            summary = {
+                "exit_code": 0,
+                "passed": True,
+                "test_log": str(test_log_dir),
+                "test_dir": str(test_dir_path),
+                "passed_count": 0,
+                "failed_count": 0,
+                "error_count": 0,
+            }
         else:
-            pytest_cmd = [
-                python_exe, "-m", "pytest",
-                str(test_dir_abs),
-                "-n", str(num_procs),
-                # "-sv",
-                f"--junitxml={junit_xml}",
-            ]
+            print(f"  Found {len(test_files)} test file(s) in {test_dir_abs}")
+            print(f"  Python: {python_exe}, parallel workers: {num_procs}")
 
-        proc_env = os.environ.copy()
-        if env:
-            proc_env.update(env)
+            proc_env = os.environ.copy()
+            if env:
+                proc_env.update(env)
 
-        print(f"  cwd: {repo_path}")
-        print(f"  cmd: {' '.join(pytest_cmd)}")
-        print(f"  junitxml: {junit_xml}")
-        print(f"  (stdout inherits terminal — no pipe, no tee, no capture)")
+            # ── Run each test file as an independent pytest process ──
+            t0 = time.monotonic()
+            all_results: list[dict] = []
 
-        # Run pytest with a 1000s timeout.
-        _start = time.time()
-        _timed_out = False
-        try:
-            result = subprocess.run(
-                pytest_cmd,
-                cwd=repo_path, env=proc_env,
-                timeout=1000,
-            )
-            _rc = result.returncode
-        except subprocess.TimeoutExpired:
-            _timed_out = True
-            _rc = -1
-            print(f"  pytest timed out after 1000s", flush=True)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_procs) as executor:
+                futs: dict[concurrent.futures.Future, str] = {}
+                for tf in test_files:
+                    slug = tf.replace("/", "__").replace(".py", "").replace("::", "--")
+                    log_path = test_log_dir / f"{slug}.log"
+                    junit_xml = test_log_dir / f"{slug}-junit.xml"
 
-        _elapsed = time.time() - _start
-        if not _timed_out:
-            print(f"  pytest finished in {_elapsed:.0f}s, returncode={_rc}")
+                    pytest_cmd = [
+                        python_exe, "-m", "pytest", "-sv", "--color=yes",
+                        f"--junitxml={junit_xml}",
+                        tf,
+                    ]
+                    fut = executor.submit(
+                        _run_pytest_file, pytest_cmd, repo_path, proc_env,
+                        log_path, junit_xml, tf,
+                    )
+                    futs[fut] = tf
+                    print(f"  [{tf}] started", flush=True)
 
-        # Parse JUnit XML first — real test results take priority over
-        # process exit status.
-        _pf = _pe = 0
-        _tp = 0
-        if junit_xml.exists():
-            try:
-                import xml.etree.ElementTree as ET
-                tree = ET.parse(junit_xml)
-                root = tree.getroot()
-                suites = [root]
-                if root.tag == "testsuites":
-                    suites = root.findall("testsuite")
-                for suite in suites:
-                    _tp += int(suite.get("tests", 0))
-                    _pf += int(suite.get("failures", 0))
-                    _pe += int(suite.get("errors", 0))
-            except Exception:
-                pass
+                for fut in concurrent.futures.as_completed(futs):
+                    r = fut.result()
+                    all_results.append(r)
+                    status = "PASS" if r["passed"] else "FAIL"
+                    print(
+                        f"  [{futs[fut]}] {status} — "
+                        f"passed={r['passed_count']}, failed={r['failed_count']}, "
+                        f"errors={r['error_count']}",
+                        flush=True,
+                    )
+                    # Print log tail on failure
+                    if not r["passed"]:
+                        lp = Path(r["log_path"])
+                        if lp.exists():
+                            try:
+                                content = lp.read_text(encoding="utf-8", errors="replace")
+                                tail = "\n".join(content.splitlines()[-40:])
+                                print(f"  [FAILED] log tail ({r['test']}):\n{tail}", flush=True)
+                            except Exception:
+                                pass
 
-        # passed = no test failures.  Timeout in teardown (all tests
-        # already finished) is NOT a test failure.
-        passed = (_pf == 0 and _pe == 0)
+            elapsed = time.monotonic() - t0
+            print(f"  All tests finished in {elapsed:.0f}s", flush=True)
 
-        summary = {
-            "exit_code": 0 if passed else 1,
-            "passed": passed,
-            "test_log": str(junit_xml),
-            "test_dir": str(test_dir_path),
-            "passed_count": _tp,
-            "failed_count": _pf,
-            "error_count": _pe,
-        }
-        if _timed_out:
-            summary["timed_out"] = True
+            # ── Aggregate ──
+            _tp = sum(r["passed_count"] for r in all_results)
+            _pf = sum(r["failed_count"] for r in all_results)
+            _pe = sum(r["error_count"] for r in all_results)
+            passed = (_pf == 0 and _pe == 0)
 
+            summary = {
+                "exit_code": 0 if passed else 1,
+                "passed": passed,
+                "test_log": str(test_log_dir),
+                "test_dir": str(test_dir_path),
+                "passed_count": _tp,
+                "failed_count": _pf,
+                "error_count": _pe,
+                "suite_results": {r["test"]: r for r in all_results},
+            }
+
+    # ── Pre-commit checks (unchanged from original) ──
     precommit_config = repo_path / ".pre-commit-config.yaml"
     if precommit_config.exists():
         print("\n  Running pre-commit checks...")
