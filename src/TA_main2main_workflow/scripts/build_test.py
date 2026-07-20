@@ -472,21 +472,26 @@ def _run_pytest_file(
 ) -> dict:
     """Run a single pytest file and return its result dict.
 
-    Captures stdout/stderr to *log_path* and parses the per-file JUnit XML.
-    Modeled after vllm-ascend's per-file pytest execution pattern:
-      python -m pytest -sv --color=yes <test_file>
+    Uses ``Popen`` + line-by-line streaming (matching vllm-ascend's
+    ``_run_to_log``) rather than ``subprocess.run()`` so that output is
+    written to the log file in real time and there is no risk of pipe
+    deadlock when called from a ThreadPoolExecutor worker thread.
 
-    No timeout — blocks until the test process exits, same as vllm-ascend's
-    ``_run_to_log``.
+    No timeout — blocks until the test process exits.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    proc = subprocess.run(
-        cmd, cwd=cwd, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True,
-    )
-    log_path.write_text(proc.stdout or "", encoding="utf-8")
+    with log_path.open("w", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, close_fds=True,
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            f.write(line)
+        exit_code = proc.wait()
 
     # Parse per-file JUnit XML
     _pf = _pe = 0
@@ -508,7 +513,7 @@ def _run_pytest_file(
 
     return {
         "test": test,
-        "exit_code": proc.returncode,
+        "exit_code": exit_code,
         "passed": (_pf == 0 and _pe == 0),
         "passed_count": _tp,
         "failed_count": _pf,
