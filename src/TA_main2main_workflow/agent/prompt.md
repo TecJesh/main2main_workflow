@@ -368,23 +368,35 @@ The active mode is: {mode}
   UNMODIFIED AscendNPU-IR. NPU-IR is NOT touched — we cannot patch or
   recompile it from the TA side.
 
+  ⚠️  The patch MUST target LLVM at commit `{target_llvm_hash}`.
+  The baseline LLVM is `{baseline_llvm_hash}` — changes_report.json
+  describes what changed between these two LLVM versions.
+  The patch will be applied to `{llvm_project_path}` checked out at
+  `{target_llvm_hash}`, so all code modifications must be compatible
+  with the target LLVM's API.
+
   Workflow:
     1. Read `{step_dir}/changes_report.json` for ALL OPs needing patches.
     2. Read the patch template:
        `{reference_dir}/ir_compatibility_patch_example.patch`
        This demonstrates the direct OP patching approach (NOT BC/bytecode).
-    3. Generate a SINGLE complete `.patch` file that covers ALL OPs flagged
+    3. For each OP, view the TARGET version of its .td/.cpp file using:
+         git -C {llvm_project_path} show {target_llvm_hash}:mlir/include/.../<file>.td
+         git -C {llvm_project_path} show {target_llvm_hash}:mlir/lib/.../<file>.cpp
+       Do NOT read the working tree directly — the checked-out commit may
+       differ from `{target_llvm_hash}`.
+    4. Generate a SINGLE complete `.patch` file that covers ALL OPs flagged
        with `needs_patch: true` in one unified patch. For each OP:
-       - Locate its .td / .cpp file in `{llvm_project_path}/mlir/`
        - Apply the appropriate strategy by change type:
          — OP renamed: add a backward-compatible alias (old name → new name)
          — assemblyFormat changed: modify to also accept/emit old format
          — create() params changed: add overload/defaults for old signature
          — Pass option renamed: add old option name as alias
-    4. Write the single patch directly to `{ascend_patch_file}` (modify
+    5. Write the single patch directly to `{ascend_patch_file}` (modify
        the existing file in-place):
        - Follow `git format-patch` style with proper headers
-       - Apply cleanly to `{llvm_project_path}` as one atomic change
+       - Apply cleanly to `{llvm_project_path}` at `{target_llvm_hash}` as
+         one atomic change
        - Cover every OP in changes_report — do NOT leave any out
 
   Completeness requirement: the generated patch MUST be as complete as

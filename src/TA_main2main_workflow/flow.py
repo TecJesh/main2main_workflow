@@ -2510,6 +2510,14 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 pass
         print_info("Invoking AI to modify the Ascend LLVM compatibility patch...")
 
+        # Read target LLVM hash (same as _do_ir_change_analysis uses)
+        llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
+        target_llvm_hash = ""
+        if llvm_hash_file.exists():
+            target_llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+        print_key_value("Baseline LLVM", f"{_ASCEND_BASELINE_LLVM_HASH[:12]}")
+        print_key_value("Target LLVM", f"{target_llvm_hash[:12]}")
+
         try:
             ai_result = run_opencode_adapter({
                 "step_id": "ir-generate-patch",
@@ -2529,6 +2537,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 "target_commit": self.state.target_commit,
                 "llvm_project_path": str(_llvm_project_path()),
                 "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "target_llvm_hash": target_llvm_hash,
                 "ascend_patch_file": str(ascend_patch),
             })
             _ = ai_result
