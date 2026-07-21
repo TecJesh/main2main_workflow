@@ -2330,12 +2330,32 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 )
                 if result.returncode == 0:
                     print_status(True, f"{label} commit {h[:12]} — found in llvm-project")
-                else:
-                    print_error(
-                        f"{label} commit {h[:12]} NOT found in llvm-project! "
-                        f"(git cat-file -t returned: {result.stderr.strip()})")
+                    continue
+
+                # ── Commit not found locally — try fetching from origin ──
+                print_warn(
+                    f"{label} commit {h[:12]} NOT found locally — "
+                    f"fetching from origin...")
+                fetched = False
+                for attempt in range(1, 7):
+                    fetch_proc = subprocess.run(
+                        ["git", "fetch", "origin", h, "--no-tags"],
+                        cwd=str(llvm_project),
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if fetch_proc.returncode == 0:
+                        fetched = True
+                        print_status(True,
+                            f"{label} commit {h[:12]} — fetched (attempt {attempt})")
+                        break
                     print_warn(
-                        f"Try: cd {llvm_project} && git fetch origin {h}")
+                        f"Fetch attempt {attempt}/6 for {label} commit "
+                        f"{h[:12]} failed — retrying...")
+                if not fetched:
+                    print_error(
+                        f"{label} commit {h[:12]} NOT found in llvm-project "
+                        f"after 6 fetch attempts! "
+                        f"(git cat-file -t returned: {result.stderr.strip()})")
                     self.state.summary_rows.append(
                         ("IR Change Analysis", "FAIL",
                          f"{label} commit {h[:12]} not in llvm-project"))

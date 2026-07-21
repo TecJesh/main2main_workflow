@@ -291,29 +291,46 @@ def _check_and_rebuild_llvm(repo_path: Path, force_rebuild: bool = False) -> str
             f"Clone it with: git clone https://github.com/llvm/llvm-project.git {llvm_project}"
         )
 
-    # Checkout the required commit (fetch from origin if missing)
-    proc = subprocess.run(
-        ["git", "checkout", required_hash],
+    # ── Ensure the target commit is available locally ──
+    # First check if the commit object exists via git cat-file -t.
+    # If it doesn't, fetch it from origin (with retries).
+    cat_proc = subprocess.run(
+        ["git", "cat-file", "-t", required_hash],
         cwd=llvm_project, capture_output=True, text=True,
     )
-    if proc.returncode != 0:
-        print(f"  [llvm] Commit {required_hash[:12]} not found locally — fetching from origin...")
+    if cat_proc.returncode != 0:
+        print(f"  [llvm] Commit {required_hash[:12]} NOT found locally — fetching from origin...")
         for attempt in range(1, 7):
             fetch_proc = subprocess.run(
-                ["git", "fetch", "origin", required_hash],
+                ["git", "fetch", "origin", required_hash, "--no-tags"],
                 cwd=llvm_project, capture_output=True, text=True, timeout=2000,
             )
             if fetch_proc.returncode == 0:
+                print(f"  [llvm] Fetch succeeded (attempt {attempt})")
                 break
             print(f"  [llvm] Fetch attempt {attempt}/6 failed — retrying...")
         else:
             raise RuntimeError(
                 f"Failed to fetch LLVM commit {required_hash[:12]} after 6 attempts")
-        _run_cmd(
-            ["git", "checkout", required_hash],
-            cwd=llvm_project,
-            timeout=2000,
-        )
+
+    # ── Clean working tree and checkout ──
+    # Stash any local modifications so checkout doesn't fail on dirty tree,
+    # then drop the stash (we want a pristine upstream checkout, not local edits).
+    subprocess.run(
+        ["git", "stash", "push", "--include-untracked",
+         "-m", f"auto-stash-before-checkout-{required_hash[:12]}"],
+        cwd=llvm_project, capture_output=True, text=True,
+    )
+    _run_cmd(
+        ["git", "checkout", required_hash],
+        cwd=llvm_project,
+        timeout=2000,
+    )
+    # Drop the stash we just created (discard any local working-tree changes)
+    subprocess.run(
+        ["git", "stash", "drop", "--quiet"],
+        cwd=llvm_project, capture_output=True, text=True,
+    )
 
     # Clean and rebuild
     llvm_build_log = WORKSPACE_DIR / "llvm_build.log"
