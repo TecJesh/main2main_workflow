@@ -101,6 +101,31 @@ The active mode is: {mode}
 
   Trigger: {mode} is "fix" (build or tests failed).
 
+  ═══ AscendNPU-IR compile errors (ascend_npu_ir_fix=true) ═══════════
+
+  When `ascend_npu_ir_fix` is "true", the build failure originates from
+  AscendNPU-IR (bishengir) code under `third_party/ascend/AscendNPU-IR/`.
+  LLVM version upgrades commonly break this code.  You MUST read and
+  apply the patterns from BOTH of these references:
+
+    1. {ascend_npu_ir_compat_ref}
+       — Complete catalog of all AscendNPU-IR LLVM 20→21→22 adaptations
+       (CMake compat macros, TableGen API changes, C++ API migrations,
+        dialect registration, pass infrastructure, build system fixes)
+
+    2. {reference_dir}/02-llvm-version-adaptation-and-compile-fixes.md
+       — LLVM/MLIR API change table, compat macros, patch mechanism
+
+  For each AscendNPU-IR compile error:
+    - Match the error against the catalog in (1) to find the exact fix
+      pattern (e.g. getDirectSuperClasses() API change → __LLVM_MAJOR_VERSION_22_COMPATIBLE__)
+    - Apply the fix using the version-compat macros when available
+    - DO NOT modify third_party LLVM source directly — use compat macros
+    - If the error is NOT in the catalog, apply the general LLVM API
+      adaptation patterns from (2)
+
+  ═══════════════════════════════════════════════════════════════════════
+
   Workflow:
     1. Read structured error output from {error_logs}
     2. Classify each failure:

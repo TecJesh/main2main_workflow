@@ -1833,7 +1833,40 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             )
             return False
 
-    def _do_ai_fix(self, ascend_path: Path, step_dir: Path, attempt: int) -> bool:
+    def _detect_ascend_npu_ir_errors(self) -> bool:
+        """Check whether the build log contains AscendNPU-IR compile errors.
+
+        AscendNPU-IR (bishengir) is at third_party/ascend/AscendNPU-IR/.
+        LLVM version changes often break its compilation — error patterns
+        include bishengir paths, dialect registration failures, and MLIR
+        API incompatibilities.
+        """
+        build_log = WORKSPACE_DIR / BUILD_LOG_FILE
+        if not build_log.exists():
+            return False
+        try:
+            content = build_log.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        # Patterns indicating AscendNPU-IR compilation failures
+        npu_ir_markers = [
+            "AscendNPU-IR",
+            "bishengir",
+            "bishengir-",
+            "NPUIR",
+            "HACC/IR",
+            "HFusion/IR",
+            "HIVM/IR",
+            "third_party/ascend/",
+            "AscendNPU",
+        ]
+        for marker in npu_ir_markers:
+            if marker in content:
+                return True
+        return False
+
+    def _do_ai_fix(self, ascend_path: Path, step_dir: Path, attempt: int,
+                   ascend_npu_ir_fix: bool = False) -> bool:
         """AI fix bug: invoke opencode/claude to fix build/test failures.
 
         AI context includes: step index, is_last_step, previous_step_summary
@@ -1903,6 +1936,10 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 "mode": "fix",
                 "error_logs": error_logs,
                 "target_commit": self.state.target_commit,
+                "ascend_npu_ir_fix": str(ascend_npu_ir_fix).lower(),
+                "ascend_npu_ir_compat_ref": str(
+                    Path(__file__).parent / "reference"
+                    / "AscendNPU-IR_LLVM_VERSION_COMPAT.md"),
             })
 
             print_ai_result(
@@ -2092,14 +2129,43 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
             # ── [4.1] Build TA ──
             print_info("Step 4.1: Building Triton-Ascend with patched LLVM...")
-            if not self._do_build(ascend_path, clean=True):
+            build_ok = self._do_build(ascend_path, clean=True)
+            if not build_ok:
                 if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
                     return False
-                self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
-                self.state.build_fix_count += 1
-                print_warn("Build failed after IR patches — will attempt AI fix")
-                self._do_ai_fix(ascend_path, WORKSPACE_DIR, 1)
-                continue
+                # ── AscendNPU-IR compile-error fix loop ──
+                # LLVM version changes often break AscendNPU-IR compilation.
+                # Loop: detect errors → AI fix with NPU-IR reference docs →
+                # rebuild until the build passes or retries exhausted.
+                for fix_attempt in range(1, self.state.max_retries + 1):
+                    self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
+                    self.state.build_fix_count += 1
+                    # Check if errors are AscendNPU-IR related
+                    is_npu_ir = self._detect_ascend_npu_ir_errors()
+                    if is_npu_ir:
+                        print_warn(
+                            f"AscendNPU-IR compile errors detected — "
+                            f"AI will reference AscendNPU-IR_LLVM_VERSION_COMPAT.md "
+                            f"(attempt {fix_attempt}/{self.state.max_retries})")
+                    else:
+                        print_warn(
+                            f"Build failed after IR patches — AI fix "
+                            f"(attempt {fix_attempt}/{self.state.max_retries})")
+                    self._do_ai_fix(ascend_path, WORKSPACE_DIR, fix_attempt,
+                                    ascend_npu_ir_fix=is_npu_ir)
+                    if self._do_build(ascend_path, clean=False):
+                        build_ok = True
+                        break
+                    print_warn(f"Build still failing after fix attempt {fix_attempt}")
+                if not build_ok:
+                    print_error(
+                        f"Build still failing after {self.state.max_retries} "
+                        f"fix attempts in IR patch iteration {iteration + 1}")
+                    self.state.ir_loop_details.append({
+                        "iteration": iteration + 1,
+                        "result": "BUILD_FIX_EXHAUSTED",
+                    })
+                    return False
 
             # ── [4.2] Pytest ──
             print_info("Step 4.2: Running pytest suite...")
