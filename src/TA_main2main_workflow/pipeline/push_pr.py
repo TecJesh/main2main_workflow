@@ -5,6 +5,8 @@ Steps:
   1. Ensure gh CLI is authenticated.
   2. Clean up temp files (result_profiling/, __pycache__/, *.lock, etc.).
   3. Run pre-commit run --from-ref origin/main --to-ref HEAD.
+from TA_main2main_workflow.utils.logging import get_logger
+log = get_logger(__name__)
   4. If pre-commit auto-fixes files, amend the latest commit.
   5. Push the work branch to origin.
   6. Open a PR via gh pr create with [user](type) title format.
@@ -95,23 +97,22 @@ def _ensure_gh_auth(repo: Path) -> None:
                 ["gh", "auth", "status"],
                 check=True, capture_output=True, text=True,
             )
-            print("[push] gh CLI already authenticated.")
+            log.info("[push] gh CLI already authenticated.")
         except subprocess.CalledProcessError:
-            print(
+            log.error(
                 "[push] gh not authenticated and GH_TOKEN not set. "
-                "Run 'gh auth login' locally or set GH_TOKEN in CI.",
-                file=sys.stderr,
+                "Run 'gh auth login' locally or set GH_TOKEN in CI."
             )
             sys.exit(1)
         subprocess.run(
             ["gh", "auth", "setup-git"],
             check=True, capture_output=True, text=True,
         )
-        print("[push] Git credential helper configured (via gh auth setup-git).")
+        log.info("[push] Git credential helper configured (via gh auth setup-git).")
         return
 
     # ── GH_TOKEN is set ──
-    print("[push] Using GH_TOKEN from environment")
+    log.info("[push] Using GH_TOKEN from environment")
 
     # Step 1: Explicitly login gh CLI against github.com.
     # This is essential when the git remote points to a proxy host —
@@ -121,18 +122,18 @@ def _ensure_gh_auth(repo: Path) -> None:
         input=gh_token + "\n", text=True, capture_output=True,
     )
     if result.returncode == 0:
-        print("[push] gh auth login --with-token: success")
+        log.info("[push] gh auth login --with-token: success")
     else:
-        print(f"[push] gh auth login stderr: {result.stderr.strip()}")
+        log.info(f"[push] gh auth login stderr: {result.stderr.strip()}")
 
     # Step 2: Verify the token works
     result = subprocess.run(
         ["gh", "auth", "status", "--hostname", "github.com"],
         capture_output=True, text=True,
     )
-    print(f"[push] gh auth status: {result.stdout.strip()}")
+    log.info(f"[push] gh auth status: {result.stdout.strip()}")
     if result.returncode != 0:
-        print(f"[push] gh auth status stderr: {result.stderr.strip()}")
+        log.info(f"[push] gh auth status stderr: {result.stderr.strip()}")
 
     # Step 3: Configure git credential helper (best-effort).
     # This may fail when the git remote points to a proxy host that gh
@@ -143,9 +144,9 @@ def _ensure_gh_auth(repo: Path) -> None:
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        print("[push] Git credential helper configured (via gh auth setup-git).")
+        log.info("[push] Git credential helper configured (via gh auth setup-git).")
     else:
-        print(f"[push] gh auth setup-git skipped "
+        log.info(f"[push] gh auth setup-git skipped "
               f"(exit {result.returncode}): {result.stderr.strip()}")
 
     # Step 4: Embed token in origin URL so git push works through the proxy.
@@ -159,9 +160,9 @@ def _ensure_gh_auth(repo: Path) -> None:
             new_url = f"https://x-access-token:{gh_token}@{clean_url}"
             run_git(repo, "remote", "set-url", "origin", new_url)
             safe = f"https://x-access-token:***@{clean_url}"
-            print(f"[push] origin URL rewritten with token: {safe}")
+            log.info(f"[push] origin URL rewritten with token: {safe}")
     except Exception as exc:
-        print(f"[push] Note: could not rewrite origin URL: {exc}")
+        log.info(f"[push] Note: could not rewrite origin URL: {exc}")
 
 
 def _run_pre_commit_and_amend(repo: Path) -> bool:
@@ -176,18 +177,18 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
     Returns True if pre-commit passed (with or without auto-fixes).
     Returns False if pre-commit found unfixable issues.
     """
-    from TA_main2main_workflow.scripts.pre_ci_check import cleanup_temp_files
+    from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
 
     base_ref = get_base_branch_ref()
 
-    print("[push] ── Pre-commit check before PR ──")
+    log.info("[push] ── Pre-commit check before PR ──")
 
     # ── Step 1: clean temp files ──
-    print("[push] Cleaning temp files before pre-commit...")
+    log.info("[push] Cleaning temp files before pre-commit...")
     cleanup_temp_files(repo)
 
     # ── Step 2: run pre-commit ──
-    print(f"[push] Running: pre-commit run --from-ref {base_ref} --to-ref HEAD")
+    log.info(f"[push] Running: pre-commit run --from-ref {base_ref} --to-ref HEAD")
     try:
         pc_proc = subprocess.run(
             ["pre-commit", "run", "--from-ref", base_ref, "--to-ref", "HEAD"],
@@ -197,17 +198,17 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
             timeout=300,
         )
     except subprocess.TimeoutExpired:
-        print("[push] ⚠ pre-commit timed out after 300s, continuing anyway")
+        log.info("[push] ⚠ pre-commit timed out after 300s, continuing anyway")
         return True
     except FileNotFoundError:
-        print("[push] ⚠ pre-commit not installed, skipping")
+        log.info("[push] ⚠ pre-commit not installed, skipping")
         return True
 
     # Print pre-commit output
     if pc_proc.stdout:
-        print(pc_proc.stdout)
+        log.info(pc_proc.stdout)
     if pc_proc.stderr:
-        print(pc_proc.stderr, file=sys.stderr)
+        log.error(pc_proc.stderr)
 
     precommit_passed = pc_proc.returncode == 0
 
@@ -216,22 +217,22 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
     has_modifications = bool(status_proc.stdout.strip())
 
     if has_modifications:
-        print("[push] Pre-commit modified files, amending latest commit...")
+        log.info("[push] Pre-commit modified files, amending latest commit...")
         # Stage only tracked files to avoid temp artifacts
         run_git(repo, "add", "-u")
         try:
             run_git(repo, "commit", "--amend", "--no-edit")
-            print("[push] Commit amended with pre-commit fixes.")
+            log.info("[push] Commit amended with pre-commit fixes.")
         except subprocess.CalledProcessError:
-            print("[push] Nothing to amend (already clean)")
+            log.info("[push] Nothing to amend (already clean)")
 
         # ── Step 4: re-clean temp files after amend ──
         cleanup_temp_files(repo)
     else:
         if precommit_passed:
-            print("[push] Pre-commit passed, no modifications needed.")
+            log.info("[push] Pre-commit passed, no modifications needed.")
         else:
-            print("[push] ⚠ Pre-commit reported issues but no files were modified "
+            log.info("[push] ⚠ Pre-commit reported issues but no files were modified "
                   "(may need manual review).")
 
     return True
@@ -325,7 +326,7 @@ def _create_pr_via_gh(
         "--base", base_branch,
         "--repo", github_repo,
     ]
-    print(f"[push] Running: GH_HOST=github.com {' '.join(gh_cmd)}")
+    log.info(f"[push] Running: GH_HOST=github.com {' '.join(gh_cmd)}")
     result = subprocess.run(
         gh_cmd,
         capture_output=True, text=True, timeout=60,
@@ -382,7 +383,7 @@ def push_and_create_pr(
     patch_content = run_git(repo, "diff", merge_base, "HEAD")
     patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
     patch_path.write_text(patch_content, encoding="utf-8")
-    print(f"[push] Cumulative patch written to {patch_path}")
+    log.info(f"[push] Cumulative patch written to {patch_path}")
 
     summary_file = summary_path or (WORKSPACE_DIR / FINAL_SUMMARY_FILE)
     if not summary_file.exists():
@@ -401,24 +402,24 @@ def push_and_create_pr(
     # ── Commit any remaining uncommitted changes (after pre-commit amend) ──
     status = run_git(repo, "status", "--porcelain").strip()
     if status:
-        print("[push] Staging uncommitted changes...")
+        log.info("[push] Staging uncommitted changes...")
         # Use "git add -u" (tracked-only) to avoid staging test artifacts,
         # cache files, or other transient files created during the flow.
         run_git(repo, "add", "-u")
         commit_msg = f"sync: upstream triton merge ({datetime.now().strftime('%Y%m%d-%H%M%S')})"
         try:
             run_git(repo, "commit", "-s", "-m", commit_msg)
-            print(f"[push] Committed: {commit_msg}")
+            log.info(f"[push] Committed: {commit_msg}")
         except subprocess.CalledProcessError:
-            print("[push] Nothing to commit (already clean)")
+            log.info("[push] Nothing to commit (already clean)")
 
     # ── Push ──
-    print(f"[push] Pushing branch '{work_branch}' to origin...")
+    log.info(f"[push] Pushing branch '{work_branch}' to origin...")
 
     # Debug: show what token / URL we're actually using
-    print("[push] === DEBUG push environment ===")
-    print(f"[push] GH_TOKEN set: {bool(os.getenv('GH_TOKEN'))}")
-    print(f"[push] GITHUB_TOKEN set: {bool(os.getenv('GITHUB_TOKEN'))}")
+    log.info("[push] === DEBUG push environment ===")
+    log.info(f"[push] GH_TOKEN set: {bool(os.getenv('GH_TOKEN'))}")
+    log.info(f"[push] GITHUB_TOKEN set: {bool(os.getenv('GITHUB_TOKEN'))}")
     try:
         remote_url = run_git(repo, "remote", "get-url", "origin").strip()
         # Mask any embedded token
@@ -426,11 +427,11 @@ def push_and_create_pr(
             safe_url = remote_url.split("@")[0].split(":")[-1] + "@" + remote_url.split("@")[1]
         else:
             safe_url = remote_url
-        print(f"[push] origin URL: {safe_url}")
-        print(f"[push] current branch: {run_git(repo, 'branch', '--show-current').strip()}")
+        log.info(f"[push] origin URL: {safe_url}")
+        log.info(f"[push] current branch: {run_git(repo, 'branch', '--show-current').strip()}")
     except Exception:
         pass
-    print("[push] ==============================")
+    log.info("[push] ==============================")
 
     # Push to the fork (same pattern as AscendNPU-IR submodule push).
     # Token embedded in the URL so the CI proxy can authenticate.
@@ -455,7 +456,7 @@ def push_and_create_pr(
             run_git(repo, "remote", "remove", _fork_remote)
             if _push_result.returncode == 0:
                 if _push_result.stdout.strip():
-                    print(f"[push] stdout:\n{_push_result.stdout.strip()}")
+                    log.info(f"[push] stdout:\n{_push_result.stdout.strip()}")
                 break
             _last_push_error = _push_result.stderr.strip() or "(no stderr)"
             print_error(
@@ -480,10 +481,10 @@ def push_and_create_pr(
     _head = f"{_fork_owner}:{work_branch}" if _fork_owner else work_branch
     pr_title = _build_pr_title(target_commit)
 
-    print(f"[push] Creating PR via gh CLI:")
-    print(f"        head = {_head}")
-    print(f"        base = {base_branch}")
-    print(f"        repo = {github_repo}")
+    log.info(f"[push] Creating PR via gh CLI:")
+    log.info(f"        head = {_head}")
+    log.info(f"        base = {base_branch}")
+    log.info(f"        repo = {github_repo}")
 
     _saved_origin = run_git(repo, "config", "--get", "remote.origin.url").strip()
     _pr_origin = f"https://x-access-token:{_token}@github.com/{_fork_owner}/triton-ascend.git" if _token else f"https://github.com/{_fork_owner}/triton-ascend.git"
@@ -499,7 +500,7 @@ def push_and_create_pr(
                 head_ref=_head,
                 base_branch=base_branch,
             )
-            print(f"[push] PR created: {pr_url}")
+            log.info(f"[push] PR created: {pr_url}")
             return pr_url
         except Exception as _e:
             _last_pr_error = str(_e)
@@ -511,102 +512,3 @@ def push_and_create_pr(
             run_git(repo, "remote", "set-url", "origin", _saved_origin)
     raise RuntimeError(
         f"gh pr create failed after 5 attempts: {_last_pr_error}")
-
-
-def push_step_progress(
-    ascend_path: Path,
-    github_repo: str = "triton-lang/triton-ascend",
-    work_branch: str = "",
-    step_id: str = "",
-    step_num: int = 1,
-    total_steps: int = 1,
-    pr_url: str = "",
-) -> str:
-    """Push work-branch progress after a single step and create/update a PR.
-
-    Called after each progressive step's commit. On the first call (pr_url
-    is empty) it creates a new PR; on subsequent calls it just pushes —
-    the existing PR picks up the new commits automatically.
-
-    Returns the PR URL (new or existing).
-    """
-    repo = Path(ascend_path)
-
-    if not work_branch:
-        work_branch = run_git(repo, "branch", "--show-current").strip()
-
-    _ensure_gh_auth(repo)
-
-    # ── Generate step-aware patch ──
-    patch_content = run_git(repo, "diff", get_base_branch_ref(), "HEAD")
-    patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
-    patch_path.write_text(patch_content, encoding="utf-8")
-
-    # ── Push ──
-    print(f"[push] [{step_id}] Pushing branch '{work_branch}' to origin...")
-    run_git(repo, "push", "-u", "origin", work_branch)
-
-    # ── Create PR on first call only ──
-    if not pr_url:
-        base_branch = _detect_default_branch(repo)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        pr_title = (
-            f"[Step {step_num}/{total_steps}] sync: upstream triton merge ({ts})"
-        )
-        pr_body = (
-            f"## Progressive Sync — Step {step_num}/{total_steps}\n\n"
-            f"**Work branch**: `{work_branch}`\n"
-            f"**Target repo**: `{github_repo}`\n"
-            f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"This PR will be updated as subsequent steps complete.\n"
-        )
-
-        print(f"[push] [{step_id}] Creating PR: {pr_title}")
-        gh_cmd = [
-            "gh", "pr", "create",
-            "--title", pr_title,
-            "--body", pr_body,
-            "--head", work_branch,
-            "--base", base_branch,
-            "--repo", github_repo,
-        ]
-        result = subprocess.run(
-            gh_cmd, check=True, capture_output=True, text=True, cwd=str(repo)
-        )
-        pr_url = result.stdout.strip()
-        print(f"[push] [{step_id}] PR created: {pr_url}")
-    else:
-        print(f"[push] [{step_id}] Pushed to existing PR: {pr_url}")
-
-    return pr_url
-
-
-def update_pr_description(
-    ascend_path: Path,
-    github_repo: str,
-    pr_url: str,
-    step_descriptions: list[str],
-) -> None:
-    """Update the PR body with a summary of all completed steps."""
-    if not pr_url:
-        return
-
-    body = (
-        "# Triton-Ascend Progressive Upstream Sync\n\n"
-        "## Completed Steps\n\n"
-    )
-    for desc in step_descriptions:
-        body += f"- {desc}\n"
-    body += (
-        f"\n---\n"
-        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    )
-
-    try:
-        subprocess.run(
-            ["gh", "pr", "edit", pr_url, "--body", body, "--repo", github_repo],
-            check=True, capture_output=True, text=True, cwd=str(ascend_path),
-        )
-        print(f"[push] Updated PR description: {pr_url}")
-    except subprocess.CalledProcessError as e:
-        print(f"[push] Warning: could not update PR description: {e}")

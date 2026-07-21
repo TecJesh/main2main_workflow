@@ -3,3 +3,4 @@ src/TA_main2main_workflow/workspace/
 src/TA_main2main_workflow/output/
 src/TA_main2main_workflow/__pycache__/
 *.pyc
+.vscode/

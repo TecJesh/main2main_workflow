@@ -1,29 +1,40 @@
-# TA Main2Main Upgrade Flow
+# TA Main2Main Workflow
 
-Automate triton-ascend's main2main upgrade against upstream Triton.
+Automate triton-ascend's upstream sync against Triton main branch.
 
 Each time Triton's `main` advances, triton-ascend must catch up: merge
-upstream changes, resolve conflicts, fix broken interfaces, build, and run
-e2e tests. This project drives that whole loop:
+upstream changes, resolve conflicts, fix broken interfaces, rebuild LLVM (if
+needed), build triton-ascend, and run tests. This project drives that whole
+loop with AI-assisted fix/retry.
 
-- detect the commit gap between triton-ascend and upstream Triton
-- create a work branch from the latest triton-ascend main
-- merge the target upstream commit into the work branch
-- run AI (opencode or claude) to resolve conflicts and fix build/test failures
-- run pytest on Ascend NPU, retry on failure (up to 3×)
-- when everything passes, optionally push a branch and open a PR
+## Pipeline
 
-Full walkthrough lives in [`docs/guide.md`](docs/guide.md); this README only
-covers how to install and run.
+```
+prepare  →  detect  →  plan  →  per-step loop:
+                                  merge → [resolve] → build ⇄ fix → test ⇄ fix → commit
+                               →  finalize → [push PR]
+```
+
+| Phase | Description |
+|-------|-------------|
+| prepare | Clone triton-ascend, configure `origin` / `triton-upstream` remotes, fetch, checkout base branch |
+| detect | Find merge-base between ascend HEAD and upstream target, list commits to merge |
+| plan | Group commits into steps by line budget, handle LLVM-hash changes as solo steps |
+| merge | `git merge --no-ff` the step's end commit into the current branch |
+| resolve | AI resolves merge conflicts (skipped if no conflicts) |
+| build | Rebuild LLVM (with AI fix if needed), then build triton-ascend. Retries on failure |
+| test | Run pytest on Ascend NPU. Retries with AI fix on failure |
+| commit | `git add -A && git commit -s` with structured message |
+| finalize | Generate cumulative patch and summary report |
+| push PR | Push branch and create GitHub PR (opt-in) |
 
 ## Requirements
 
-- Python 3.10–3.13
-- [`opencode`](https://opencode.ai) or `claude` CLI on `$PATH` (used as the AI adapter)
-- `git`, plus local checkouts of `triton` and `triton-ascend`
-- For real e2e tests: a host with Ascend NPUs
-- For automated PRs: [`gh`](https://cli.github.com/) logged in
-- LLVM toolchain (for building triton-ascend C++ extensions)
+- Python 3.10+
+- `opencode` or `claude` CLI on `$PATH` (AI adapter)
+- `git`, `cmake`, `ninja`, `clang`/`clang++` (for LLVM build)
+- For tests: a host with Ascend NPUs
+- For auto PR: `gh` CLI logged in
 
 ## Install
 
@@ -31,153 +42,146 @@ covers how to install and run.
 pip install -e .
 ```
 
-This registers the `ta-kickoff` and `ta-plot` console scripts.
+Registers the `ta-kickoff` console script.
 
-## Run
-
-```bash
-ta-kickoff \
-  --triton-ascend-path /path/to/triton-ascend \
-  --triton-path        /path/to/triton \
-  [--target-commit     <40-char SHA>]
-```
-
-- Both paths must be local git checkouts.
-- `--target-commit` is optional; defaults to upstream triton `HEAD`.
-- Each run wipes and recreates `workspace/` inside the installed package directory
-  (under `src/TA_main2main_workflow/` in editable installs, or
-  `<site-packages>/TA_main2main_workflow/` with `pip install`).
-  Use `TA_MAIN2MAIN_WORKSPACE` env var to override the location.
-
-CLI flags can also be supplied via env vars: `TRITON_ASCEND_PATH`, `TRITON_PATH`,
-`TRITON_TARGET_COMMIT` (CLI wins).
-
-### Common variations
+## Quick Start
 
 ```bash
-# Dry-run plumbing: skip both AI and NPU tests
-SKIP_AI_ANALYSIS=true SKIP_E2E_TEST=true ta-kickoff \
-  --triton-ascend-path /path/to/triton-ascend --triton-path /path/to/triton
+# Auto-clone triton-ascend to workspace/, sync to a specific upstream commit
+ta-kickoff --target-commit 99f44dd5a90c9ae30daa974704fcea0bcc4f5ba1
 
-# Target a specific upstream commit
-ta-kickoff \
-  --triton-ascend-path /path/to/triton-ascend \
-  --triton-path /path/to/triton \
-  --target-commit abc123def456
+# Use existing local repo
+ta-kickoff --triton-ascend-path /path/to/triton-ascend --target-commit abc123
 
-# Auto-push a branch and open a PR after a successful run
-PUSH_TO_GITHUB=true GITHUB_REPO=triton-lang/triton-ascend \
-ta-kickoff --triton-ascend-path ... --triton-path ...
-
-# Custom PR title: [jeshd](sync) merge upstream triton commits
-PR_AUTHOR=jeshd PR_TYPE=sync PUSH_TO_GITHUB=true \
-ta-kickoff --triton-ascend-path ... --triton-path ...
+# Dry-run: skip AI and tests (verify merge + build only)
+SKIP_AI_ANALYSIS=true SKIP_BUILD=false SKIP_E2E_TEST=true ta-kickoff --target-commit abc123
 ```
 
-### PR title format
+## CLI Arguments
 
-PR titles follow the pattern `[user](type) description`:
+| Argument | Env Variable | Default | Description |
+|----------|-------------|---------|-------------|
+| `--triton-ascend-path` | `TRITON_ASCEND_PATH` | — | Local path to triton-ascend repo (auto-clone if not set) |
+| `--triton-path` | `TRITON_PATH` | — | Local triton repo (offline mode, not used in remote mode) |
+| `--target-commit` | `TRITON_TARGET_COMMIT` | triton-upstream/main HEAD | Upstream commit SHA to sync to |
+| `--llvm-prefix` | `LLVM_INSTALL_PREFIX` | `workspace/llvm-install` | LLVM install prefix path |
+| `--build-procs` | `BUILD_PROCS` | 32 | Parallel workers for ninja / cmake build |
+| `--test-procs` | `TEST_PROCS` | 8 | Parallel pytest workers (`-n`) |
 
-```
-[TA](sync) merge upstream triton commits (20240612-120000)
-```
+## Environment Variables
 
-- `user`: from `PR_AUTHOR` env var, falls back to `git config user.name`, then `TA`
-- `type`: from `PR_TYPE` env var, defaults to `sync`
+### Repository
 
-### Pre-commit before PR
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRITON_ASCEND_PATH` | — | Local triton-ascend path; if empty, auto-clone from URL |
+| `TRITON_ASCEND_URL` | `https://github.com/triton-lang/triton-ascend.git` | Clone URL for triton-ascend |
+| `TRITON_PATH` | — | Local triton repo (offline mode) |
+| `TRITON_UPSTREAM_URL` | `https://github.com/triton-lang/triton.git` | Upstream Triton remote URL |
+| `TRITON_TARGET_COMMIT` | — | Target upstream commit SHA |
+| `TA_BASE_BRANCH` | `upstream_sync` | Base branch in triton-ascend to sync from |
+| `LLVM_REPO_URL` | `https://github.com/llvm/llvm-project.git` | LLVM clone URL |
+| `LLVM_INSTALL_PREFIX` | `workspace/llvm-install` | LLVM install prefix |
 
-Before pushing and creating a PR, the flow runs:
-```bash
-pre-commit run --from-ref origin/main --to-ref HEAD
-```
+### AI Backend
 
-If pre-commit auto-fixes files (e.g., formatting), those changes are
-automatically amended into the latest commit with `git commit --amend --no-edit`.
-Temp files (`result_profiling/`, `__pycache__/`, `*.lock`, `*.pyc`) are
-cleaned both before and after pre-commit to avoid accidentally committing them.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_BACKEND` | `auto` | AI adapter: `opencode`, `claude`, or `auto` (detect) |
+| `TA_AI_TIMEOUT_MINUTES` | 30 | AI call timeout in minutes |
+| `TA_AI_STALE_SECONDS` | 1200 | AI stale timeout (seconds) |
+| `TA_AI_MAX_STALE_RETRIES` | 3 | Max AI stale retries |
 
-### Environment variables
+### Build / Test
 
-| Variable | Purpose | Default |
-|---|---|---|
-| `TRITON_ASCEND_PATH` | triton-ascend repo path | cwd |
-| `TRITON_PATH` | upstream triton repo path | cwd |
-| `TRITON_TARGET_COMMIT` | target triton commit SHA | triton `HEAD` |
-| `AI_BACKEND` | AI adapter: `opencode` or `claude` | auto-detect |
-| `SKIP_AI_ANALYSIS` | skip AI, only run deterministic steps | `false` |
-| `SKIP_BUILD` | skip the build step | `false` |
-| `SKIP_E2E_TEST` | skip pytest, treat as passed | `false` |
-| `PUSH_TO_GITHUB` | push & create PR after all steps pass | `false` |
-| `GITHUB_REPO` | PR target, `owner/name` | `TecJesh/triton-ascend` |
-| `PR_AUTHOR` | user tag in PR title, e.g. `[TA](sync) ...` | git `user.name` or `TA` |
-| `PR_TYPE` | conventional commit type in PR title | `sync` |
-| `LLVM_INSTALL_PREFIX` | LLVM install path for building | — |
-| `CONDA_ENV` | Conda environment name | `ta-upgrade` |
-| `NUM_PROCS` | parallel pytest workers | `16` |
-| `AUTO_STASH` | auto-stash before sync | `false` |
-| `TA_PROGRESSIVE_MERGE` | enable progressive step merge | `true` |
-| `TA_LINE_BUDGET` | max source lines per step | `1000` |
-| `TA_COMMIT_BUDGET` | base commit-count budget per step | `5` |
-| `TA_MAIN2MAIN_WORKSPACE` | override workspace directory path | package dir |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BUILD_PROCS` | 32 | Parallel build workers (ninja `-j`, cmake, setup.py) |
+| `TEST_PROCS` | 8 | Parallel pytest workers (`-n`) |
 
-## Outputs
+### Retry / Budget
 
-Everything lands under `workspace/` inside the installed package directory.
-Override with `TA_MAIN2MAIN_WORKSPACE` env var. Default location:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TA_MAX_RETRIES` | 10 | Max retry attempts per step (build + test) |
+| `TA_LINE_BUDGET` | 1000 | Max source lines per merge step |
+| `TA_PROGRESSIVE_MERGE` | `true` | Enable progressive step merge |
+| `TA_IR_MAX_ITERATIONS` | 3 | Max IR patch iterations |
 
-- **Editable install** (`pip install -e .`): `src/TA_main2main_workflow/workspace/`
-- **Regular install** (`pip install .`): `<venv>/lib/.../site-packages/TA_main2main_workflow/workspace/`
+### Skip Flags
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TA_RESUME` | `false` | Skip steps whose output files already exist |
+| `SKIP_AI_ANALYSIS` | `false` | Skip all AI calls (conflict resolution, fix) |
+| `SKIP_BUILD` | `false` | Skip triton-ascend build |
+| `SKIP_E2E_TEST` | `false` | Skip pytest, treat as passed |
+| `SKIP_LLVM_REBUILD` | `false` | Skip LLVM rebuild |
+| `SKIP_IR_PATCH` | `false` | Skip IR patch generation |
+| `SKIP_BASELINE_LLVM` | `false` | Skip baseline LLVM build |
+
+### Git / PR
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PUSH_TO_GITHUB` | `false` | Push branch and create PR after success |
+| `GITHUB_REPO` | `triton-lang/triton-ascend` | PR target `owner/name` |
+| `TA_MAIN2MAIN_WORKSPACE` | `./workspace` | Override workspace directory |
+
+## Workspace Layout
 
 ```
 workspace/
-├── detect.json              # merge-base, target commit, changed files
-├── merge_result.json        # merge status, conflict info
-├── merge.log                # raw git merge output
-├── build_result.json        # build step results
-├── build.log                # raw build output
-├── test_result.json         # pytest summary
+├── triton-ascend/            # auto-cloned (if no local path given)
+├── llvm-project/             # auto-cloned LLVM
+├── llvm-build/               # LLVM build directory (outside llvm-project)
+├── llvm-install/             # LLVM install prefix
+├── detect.json               # merge-base, target commit, changed files
+├── steps.json                # step plan
+├── steps/
+│   └── step-N/
+│       ├── merge_result.json
+│       ├── build_result.json
+│       ├── build.log / build.err
+│       ├── llvm-cmake.log / llvm-cmake.err
+│       ├── llvm-ninja.log / llvm-ninja.err
+│       ├── upstream.patch
+│       ├── changed_files.txt
+│       └── commits.txt
 ├── test-logs/
-│   ├── pytest.log
-│   └── precommit.log
-├── conflicts/               # conflict snapshots (if any)
-├── fixes/                   # per-fix-attempt logs
-│   └── fix-<N>/
-├── step-0/
-│   ├── step_summary.md      # AI-written summary
-│   ├── step_target.patch    # cumulative diff
-│   └── analysis.md          # fix diagnosis
-├── final_summary.md         # final sync summary
-├── final_target.patch       # cumulative patch
-└── FAILURE.md               # failure report (if failed)
+│   └── pytest-junit.xml
+├── final_summary.md
+└── final_target.patch
 ```
 
-## Project layout
+## Project Layout
 
 ```
 src/TA_main2main_workflow/
-├── flow.py              # CrewAI Flow: nodes, routing, retry loop
-├── main.py              # `ta-kickoff` / `ta-plot` CLI entrypoints
-├── utils.py             # filename constants + git helpers + console output
+├── flow.py                  # Pipeline orchestrator
+├── main.py                  # `ta-kickoff` CLI entrypoint
+├── pipeline/
+│   ├── prepare.py           # Phase 0: workspace setup
+│   ├── detect.py            # Phase 1: detect upstream commits
+│   ├── plan.py              # Phase 2: plan merge steps
+│   ├── merge.py             # Phase 3: git merge
+│   ├── resolve.py           # Phase 3: AI conflict resolution
+│   ├── build.py             # Phase 3: LLVM + triton-ascend build
+│   ├── test.py              # Phase 3: pytest
+│   ├── fix.py               # Phase 3: AI fix
+│   ├── commit.py            # Phase 3: commit progress
+│   ├── finalize.py          # Phase 4: summary + patch
+│   ├── pre_ci.py            # pre-commit checks
+│   └── push_pr.py           # push + create PR
+├── utils/
+│   ├── config.py            # TAConfig dataclass
+│   ├── context.py           # WorkflowContext dataclass
+│   ├── git.py               # run_git with built-in retry
+│   ├── logging.py           # TALogger
+│   ├── tracker.py           # timed() context manager
+│   ├── errors.py            # Exception types
+│   └── submodule.py         # AscendNPU-IR submodule helpers
 ├── agent/
-│   ├── opencode_adapter.py   # spawns `opencode run`, parses JSONL events
-│   └── prompt.md             # single-agent task prompt
-├── reference/           # knowledge base the agent reads at runtime
-│   ├── adapt-guide.md
-│   ├── code-structure-guide.md
-│   ├── diagnosis-guide.md
-│   ├── error-pattern-examples.md
-│   └── npu-oom-handling.md
-└── scripts/             # deterministic helpers (no AI)
-    ├── build_test.py
-    ├── detect_commits.py
-    ├── merge_upstream.py
-    ├── plan_steps.py          # step planner: splits commits by line budget
-    ├── pre_ci_check.py
-    ├── push_to_github.py
-    └── update_commit_reference.py
+│   └── opencode_adapter.py  # AI adapter (opencode / claude)
+└── reference/               # AI knowledge base
 ```
-
-For a step-by-step explanation of every node and the per-step artifacts, see
-[`docs/guide.md`](docs/guide.md). For conventions and gotchas that affect code
-changes to this repo itself, see [`AGENTS.md`](AGENTS.md).
