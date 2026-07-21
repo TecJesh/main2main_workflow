@@ -2177,8 +2177,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         # ── Pre-scan: find candidate files with MLIR OP usage ──
         print_info("Pre-scanning Ascend backend for MLIR OP patterns...")
         candidate_files: list[str] = []
+        ascend_root = ascend_path / "third_party" / "ascend"
         scan_dirs = [
-            ascend_path / "third_party" / "ascend" / "lib",
+            ascend_root,
             ascend_path / "lib" / "Target" / "Ascend",
         ]
         op_patterns = [
@@ -2192,7 +2193,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             for pattern in op_patterns:
                 try:
                     result = subprocess.run(
-                        ["grep", "-rl", pattern, str(sd)],
+                        ["grep", "-rl", "--exclude-dir=patch",
+                         "--exclude-dir=cmake", pattern, str(sd)],
                         capture_output=True, text=True, timeout=30,
                     )
                     for f in result.stdout.splitlines():
