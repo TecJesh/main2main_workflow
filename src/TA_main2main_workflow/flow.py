@@ -2605,13 +2605,29 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         print_status(True, f"{ascend_patch.name} applied to llvm-project")
 
+        # ── Show git status after patch for debugging ──
+        status_proc = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=str(llvm_project), capture_output=True, text=True, timeout=30,
+        )
+        if status_proc.stdout.strip():
+            print_info("llvm-project git status after patch:")
+            for line in status_proc.stdout.strip().splitlines():
+                print(f"    {line}")
+        else:
+            print_info("llvm-project working tree is clean after patch")
+
         # ── [3.5] Rebuild LLVM ──
-        from TA_main2main_workflow.scripts.build_test import \
-            _check_and_rebuild_llvm
+        from TA_main2main_workflow.scripts.build_test import build_llvm
         try:
-            print_info("Step 3.5: Rebuilding LLVM (this takes ~1-2 hours)...")
-            llvm_prefix = _check_and_rebuild_llvm(
-                ascend_path, force_rebuild=True)
+            print_info("Step 3.5: Rebuilding LLVM (this takes ~15-30 minutes)...")
+            # Patch is already applied — just build, no hash/checkout logic.
+            llvm_prefix = build_llvm(
+                llvm_project,
+                Path(os.path.expanduser(
+                    os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync"))),
+                required_hash=target_llvm_hash,
+            )
             if llvm_prefix and not self.state.llvm_prefix:
                 self.state.llvm_prefix = llvm_prefix
             print_status(True, "LLVM rebuild complete")

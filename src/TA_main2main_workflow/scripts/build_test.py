@@ -232,6 +232,74 @@ def apply_llvm_patches(patch_dir: Path, llvm_project: Path,
     return {"applied": [str(patch_file)], "failed": [], "all_ok": True}
 
 
+def build_llvm(llvm_project: Path, llvm_install: Path,
+               required_hash: str = "") -> str:
+    """Build and install LLVM from the current working tree state.
+
+    Does NOT check out commits, fetch, stash, or compare hashes.
+    Assumes the caller has already prepared the working tree (checked
+    out the correct commit, applied any patches, etc.).
+
+    Cleans the build directory, runs cmake + ninja install, copies
+    FileCheck, and writes the hash cache.
+
+    Returns the LLVM install prefix path.
+    """
+    import shutil
+
+    print(f"\n{'=' * 60}")
+    print(f"  Building LLVM from current working tree")
+    if required_hash:
+        print(f"  Target hash: {required_hash[:12]}")
+    print(f"{'=' * 60}")
+
+    # Clean build directory
+    llvm_build_log = WORKSPACE_DIR / "llvm_build.log"
+    build_dir = llvm_project / "build"
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    build_dir.mkdir()
+
+    cmake_cmd = [
+        "cmake", str(llvm_project / "llvm"),
+        "-G", "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DLLVM_ENABLE_ASSERTIONS=ON",
+        "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
+        "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU",
+        f"-DCMAKE_INSTALL_PREFIX={llvm_install}",
+        "-DCMAKE_C_COMPILER=clang",
+        "-DCMAKE_CXX_COMPILER=clang++",
+    ]
+    print(f"  [llvm] Configuring...")
+    _run_to_log(cmake_cmd, build_dir, llvm_build_log, timeout=300, progress_line=True)
+
+    print(f"  [llvm] Building (this may take a while)...")
+    _run_to_log(
+        ["ninja", "install"],
+        build_dir, llvm_build_log, timeout=7200, progress_line=True,
+    )
+
+    # Copy FileCheck — not installed by ninja install
+    filecheck_src = build_dir / "bin" / "FileCheck"
+    filecheck_dst = llvm_install / "bin" / "FileCheck"
+    if filecheck_src.exists():
+        filecheck_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(filecheck_src, filecheck_dst)
+        print(f"  [llvm] Copied FileCheck to {filecheck_dst}")
+    else:
+        print(f"  [llvm] WARNING: FileCheck not found at {filecheck_src}")
+
+    # Write the hash cache
+    llvm_install.mkdir(parents=True, exist_ok=True)
+    hash_cache = llvm_install / ".llvm_hash"
+    if required_hash:
+        hash_cache.write_text(required_hash, encoding="utf-8")
+    print(f"  [llvm] Build complete — install prefix: {llvm_install}")
+
+    return str(llvm_install)
+
+
 def _check_and_rebuild_llvm(repo_path: Path, force_rebuild: bool = False) -> str:
     """Check if LLVM version changed and rebuild if needed.
 
@@ -332,51 +400,7 @@ def _check_and_rebuild_llvm(repo_path: Path, force_rebuild: bool = False) -> str
         cwd=llvm_project, capture_output=True, text=True,
     )
 
-    # Clean and rebuild
-    llvm_build_log = WORKSPACE_DIR / "llvm_build.log"
-    build_dir = llvm_project / "build"
-    if build_dir.exists():
-        import shutil
-        shutil.rmtree(build_dir)
-    build_dir.mkdir()
-
-    cmake_cmd = [
-        "cmake", str(llvm_project / "llvm"),
-        "-G", "Ninja",
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DLLVM_ENABLE_ASSERTIONS=ON",
-        "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
-        "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU",
-        f"-DCMAKE_INSTALL_PREFIX={llvm_install}",
-        "-DCMAKE_C_COMPILER=clang",
-        "-DCMAKE_CXX_COMPILER=clang++",
-    ]
-    print(f"  [llvm] Configuring...")
-    _run_to_log(cmake_cmd, build_dir, llvm_build_log, timeout=300, progress_line=True)
-
-    print(f"  [llvm] Building (this may take a while)...")
-    _run_to_log(
-        ["ninja", "install"],
-        build_dir, llvm_build_log, timeout=7200, progress_line=True,
-    )
-
-    # Copy FileCheck — not installed by ninja install
-    filecheck_src = build_dir / "bin" / "FileCheck"
-    filecheck_dst = llvm_install / "bin" / "FileCheck"
-    if filecheck_src.exists():
-        import shutil
-        filecheck_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(filecheck_src, filecheck_dst)
-        print(f"  [llvm] Copied FileCheck to {filecheck_dst}")
-    else:
-        print(f"  [llvm] WARNING: FileCheck not found at {filecheck_src}")
-
-    # Write the hash cache
-    llvm_install.mkdir(parents=True, exist_ok=True)
-    hash_cache.write_text(required_hash, encoding="utf-8")
-    print(f"  [llvm] Rebuild complete — install prefix: {llvm_install}")
-
-    return str(llvm_install)
+    return build_llvm(llvm_project, llvm_install, required_hash)
 
 
 def _run_cmd(cmd: list[str], cwd: Path, timeout: int = 300) -> str:
