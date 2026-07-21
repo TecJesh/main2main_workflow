@@ -272,13 +272,21 @@ def build_llvm(llvm_project: Path, llvm_install: Path,
         "-DCMAKE_CXX_COMPILER=clang++",
     ]
     print(f"  [llvm] Configuring...")
-    _run_to_log(cmake_cmd, build_dir, llvm_build_log, timeout=300, progress_line=True)
+    cmake_result = _run_to_log(cmake_cmd, build_dir, llvm_build_log, timeout=300, progress_line=True)
+    if cmake_result.returncode != 0:
+        raise RuntimeError(
+            f"LLVM cmake configure failed (exit {cmake_result.returncode}). "
+            f"See {llvm_build_log}")
 
     print(f"  [llvm] Building (this may take a while)...")
-    _run_to_log(
+    ninja_result = _run_to_log(
         ["ninja", "install"],
         build_dir, llvm_build_log, timeout=7200, progress_line=True,
     )
+    if ninja_result.returncode != 0:
+        raise RuntimeError(
+            f"LLVM ninja build failed (exit {ninja_result.returncode}). "
+            f"See {llvm_build_log}")
 
     # Copy FileCheck — not installed by ninja install
     filecheck_src = build_dir / "bin" / "FileCheck"
