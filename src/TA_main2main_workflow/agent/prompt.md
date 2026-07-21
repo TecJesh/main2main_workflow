@@ -381,7 +381,8 @@ The active mode is: {mode}
          — assemblyFormat changed: modify to also accept/emit old format
          — create() params changed: add overload/defaults for old signature
          — Pass option renamed: add old option name as alias
-    4. Write the single patch to `{step_dir}/generated_patches/ir_compat.patch`:
+    4. Write the single patch directly to `{ascend_patch_file}` (modify
+       the existing file in-place):
        - Follow `git format-patch` style with proper headers
        - Apply cleanly to `{llvm_project_path}` as one atomic change
        - Cover every OP in changes_report — do NOT leave any out
@@ -460,9 +461,8 @@ The active mode is: {mode}
   step_summary.md, or review.md. Do NOT analyze merge history.
 
 ── For ir_generate_patch mode ──
-  Output ONLY `{step_dir}/generated_patches/ir_compat.patch` — the unified
-  patch file specified in the ir_generate_patch section above. Do NOT write
-  analysis.md, step_summary.md, or review.md.
+  Output ONLY by modifying `{ascend_patch_file}` in-place — the existing
+  patch file. Do NOT write analysis.md, step_summary.md, or review.md.
 
 ── For ir_diagnose mode ──
   Output ONLY `{step_dir}/ir_diagnosis.json` — the structured JSON specified
