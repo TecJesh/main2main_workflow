@@ -2125,6 +2125,12 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             # ── [3.4 + 3.5] Apply patches + rebuild LLVM ──
             print_info("Step 3.4-3.5: Applying patches and rebuilding LLVM (this may take a while)...")
             if not self._do_ir_apply_patches_and_rebuild():
+                print_error(
+                    "LLVM patch apply/rebuild failed after all retries — "
+                    "cannot proceed without a working LLVM build. "
+                    "Terminating IR patch loop.")
+                self.state.summary_rows.append(
+                    ("IR Patch Loop", "FATAL", "LLVM rebuild exhausted"))
                 return False
 
             # ── [4.1] Build TA ──
@@ -2631,7 +2637,12 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         return True
 
     def _do_ir_apply_patches_and_rebuild(self) -> bool:
-        """[3.4 + 3.5] Apply the Ascend LLVM patch and rebuild."""
+        """[3.4 + 3.5] Apply the Ascend LLVM patch and rebuild.
+
+        Retry loop (max 10): if patch apply fails or LLVM build fails,
+        AI fixes the patch and we retry from scratch (clean → checkout →
+        apply → build).
+        """
         print_header("Phase 3.4-3.5: Apply Patches + Rebuild LLVM")
         ascend_path = Path(self.state.triton_ascend_path)
 
@@ -2650,17 +2661,6 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 ("IR Apply+Rebuild", "FAIL", "llvm-project not found"))
             return False
 
-        # ── Ensure llvm-project workspace is clean before checkout + patch ──
-        if not self._ensure_llvm_workspace_clean(reason="ir-apply-patches"):
-            print_error("Cannot clean llvm-project workspace — aborting IR patch rebuild")
-            self.state.summary_rows.append(
-                ("IR Apply+Rebuild", "FAIL", "workspace not clean"))
-            return False
-
-        # ── [3.4] Apply patch to llvm-project ──
-        # Deterministic: clean → checkout → apply. No AI involved.
-        from TA_main2main_workflow.scripts.build_test import apply_llvm_patches
-
         # Read the target LLVM hash from triton-ascend
         llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
         target_llvm_hash = ""
@@ -2668,54 +2668,144 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             target_llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
             print_key_value("Target LLVM hash", target_llvm_hash[:12])
 
-        print_info(f"Step 3.4: Applying {ascend_patch.name} to llvm-project...")
-        patch_result = apply_llvm_patches(
-            ascend_patch.parent, llvm_project,
-            target_hash=target_llvm_hash, patch_file=ascend_patch)
-        if not patch_result["all_ok"]:
-            failed = patch_result["failed"]
-            print_error(f"LLVM patch apply failed: "
-                        f"{failed[0]['error'][:200] if failed else 'unknown'}")
-            self.state.summary_rows.append(
-                ("IR Apply+Rebuild", "FAIL", "patch did not apply cleanly"))
-            return False
+        from TA_main2main_workflow.scripts.build_test import (
+            apply_llvm_patches, build_llvm)
 
-        print_status(True, f"{ascend_patch.name} applied to llvm-project")
+        _MAX_PATCH_RETRIES = 10
 
-        # ── Show git status after patch for debugging ──
-        status_proc = subprocess.run(
-            ["git", "status", "--short"],
-            cwd=str(llvm_project), capture_output=True, text=True, timeout=30,
-        )
-        if status_proc.stdout.strip():
-            print_info("llvm-project git status after patch:")
-            for line in status_proc.stdout.strip().splitlines():
-                print(f"    {line}")
-        else:
-            print_info("llvm-project working tree is clean after patch")
+        for retry in range(_MAX_PATCH_RETRIES + 1):
+            is_retry = retry > 0
+            if is_retry:
+                print_header(
+                    f"Patch Apply/Rebuild Retry {retry}/{_MAX_PATCH_RETRIES}")
 
-        # ── [3.5] Rebuild LLVM ──
-        from TA_main2main_workflow.scripts.build_test import build_llvm
-        try:
-            print_info("Step 3.5: Rebuilding LLVM (this takes ~15-30 minutes)...")
-            # Patch is already applied — just build, no hash/checkout logic.
-            llvm_prefix = build_llvm(
-                llvm_project,
-                Path(os.path.expanduser(
-                    os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync"))),
-                required_hash=target_llvm_hash,
+            # ── Ensure llvm-project workspace is clean ──
+            if not self._ensure_llvm_workspace_clean(reason="ir-apply-patches"):
+                print_error("Cannot clean llvm-project workspace")
+                self.state.summary_rows.append(
+                    ("IR Apply+Rebuild", "FAIL", "workspace not clean"))
+                return False
+
+            # ── [3.4] Apply patch ──
+            print_info(f"Step 3.4: Applying {ascend_patch.name} to llvm-project...")
+            patch_result = apply_llvm_patches(
+                ascend_patch.parent, llvm_project,
+                target_hash=target_llvm_hash, patch_file=ascend_patch)
+            if not patch_result["all_ok"]:
+                failed = patch_result["failed"]
+                error_msg = failed[0]['error'][:500] if failed else "unknown"
+                print_error(f"LLVM patch apply failed: {error_msg}")
+                if retry < _MAX_PATCH_RETRIES:
+                    print_warn(
+                        f"Patch apply failed — AI will fix the patch "
+                        f"(retry {retry + 1}/{_MAX_PATCH_RETRIES})")
+                    self._do_ir_fix_patch(
+                        ascend_path, ascend_patch, target_llvm_hash,
+                        error_type="apply", error_msg=error_msg,
+                        retry=retry + 1)
+                    continue
+                self.state.summary_rows.append(
+                    ("IR Apply+Rebuild", "FAIL",
+                     f"patch apply failed after {_MAX_PATCH_RETRIES} retries"))
+                return False
+
+            print_status(True, f"{ascend_patch.name} applied to llvm-project")
+
+            # ── Show git status after patch ──
+            status_proc = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=str(llvm_project), capture_output=True, text=True, timeout=30,
             )
-            if llvm_prefix and not self.state.llvm_prefix:
-                self.state.llvm_prefix = llvm_prefix
-            print_status(True, "LLVM rebuild complete")
-            self.state.summary_rows.append(
-                ("LLVM Patch Apply+Rebuild", "PASS", "patch applied, LLVM rebuilt"))
-            return True
+            if status_proc.stdout.strip():
+                print_info("llvm-project git status after patch:")
+                for line in status_proc.stdout.strip().splitlines():
+                    print(f"    {line}")
+            else:
+                print_info("llvm-project working tree is clean after patch")
+
+            # ── [3.5] Rebuild LLVM ──
+            try:
+                print_info("Step 3.5: Rebuilding LLVM (this takes ~15-30 minutes)...")
+                llvm_install = Path(os.path.expanduser(
+                    os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")))
+                llvm_prefix = build_llvm(
+                    llvm_project, llvm_install,
+                    required_hash=target_llvm_hash,
+                )
+                if llvm_prefix and not self.state.llvm_prefix:
+                    self.state.llvm_prefix = llvm_prefix
+                print_status(True, "LLVM rebuild complete")
+                self.state.summary_rows.append(
+                    ("LLVM Patch Apply+Rebuild", "PASS",
+                     "patch applied, LLVM rebuilt"
+                     + (f" (after {retry} retries)" if is_retry else "")))
+                return True
+            except Exception as e:
+                build_error = str(e)[:500]
+                # Also capture tail of build log for AI context
+                build_log = WORKSPACE_DIR / "llvm_build.log"
+                if build_log.exists():
+                    try:
+                        log_tail = build_log.read_text(
+                            encoding="utf-8", errors="replace")[-3000:]
+                        build_error = (
+                            f"Build exception: {e}\n\n"
+                            f"Build log tail:\n{log_tail}")
+                    except Exception:
+                        pass
+                print_error(f"LLVM rebuild failed: {e}")
+                if retry < _MAX_PATCH_RETRIES:
+                    print_warn(
+                        f"LLVM build failed — AI will fix the patch "
+                        f"(retry {retry + 1}/{_MAX_PATCH_RETRIES})")
+                    self._do_ir_fix_patch(
+                        ascend_path, ascend_patch, target_llvm_hash,
+                        error_type="build", error_msg=build_error,
+                        retry=retry + 1)
+                    continue
+                self.state.summary_rows.append(
+                    ("IR Apply+Rebuild", "FAIL",
+                     f"LLVM build failed after {_MAX_PATCH_RETRIES} retries"))
+                return False
+
+        return False
+
+    def _do_ir_fix_patch(self, ascend_path: Path, ascend_patch: Path,
+                         target_llvm_hash: str, error_type: str,
+                         error_msg: str, retry: int) -> None:
+        """Invoke AI to fix a broken IR compatibility patch.
+
+        Called when patch apply or LLVM build fails.  AI re-examines the
+        target LLVM commit and IR compatibility references, then fixes
+        the patch in-place.
+        """
+        print_info(f"Invoking AI to fix patch ({error_type} failure, retry {retry})...")
+        try:
+            ai_result = run_opencode_adapter({
+                "step_id": f"ir-fix-patch-{retry}",
+                "previous_step_id": "ir-generate-patch",
+                "previous_step_summary_path": "",
+                "is_last_step": "false",
+                "step_index": "ir",
+                "step_dir": str(ascend_patch.parent),
+                "fix_dir": str(ascend_patch.parent),
+                "conflict_dir": "",
+                "ascend_path": str(ascend_path),
+                "triton_path": self.state.triton_path,
+                "reference_dir": _REFERENCE_DIR,
+                "mode": "ir_generate_patch",
+                "error_logs": json.dumps([], ensure_ascii=False),
+                "target_commit": self.state.target_commit,
+                "llvm_project_path": str(_llvm_project_path()),
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "target_llvm_hash": target_llvm_hash,
+                "ascend_patch_file": str(ascend_patch),
+                "patch_error_type": error_type,
+                "patch_error_msg": error_msg,
+            })
+            _ = ai_result
         except Exception as e:
-            print_error(f"LLVM rebuild failed: {e}")
-            self.state.summary_rows.append(
-                ("LLVM Patch Apply+Rebuild", "FAIL", str(e)[:60]))
-            return False
+            print_error(f"AI patch fix failed: {e}")
 
     def _do_pytest(self) -> bool:
         """[4.2] Build TA and run pytest.

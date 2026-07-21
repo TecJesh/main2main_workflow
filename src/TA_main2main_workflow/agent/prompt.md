@@ -518,6 +518,30 @@ The active mode is: {mode}
 
   Trigger: {mode} is "ir_generate_patch" (generate TA-side LLVM OP patches).
 
+  ═══ PATCH FIX RETRY (patch_error_type present) ═════════════════════════
+
+  When `patch_error_type` is "apply" or "build", a previously generated
+  patch FAILED.  You are fixing it — NOT starting from scratch.
+
+  patch_error_type: {patch_error_type}
+  patch_error_msg:  {patch_error_msg}
+
+  Fix strategy:
+    - **apply failure**: the patch does not apply cleanly to the target
+      LLVM commit.  Re-read the target files via git show, check line
+      numbers and context, and regenerate the patch to match exactly.
+    - **build failure**: the patch applied but LLVM compilation failed.
+      Read the build error carefully — it tells you exactly which file
+      and line has the problem.  Common causes:
+        * Wrong API for the target LLVM version (check git show output)
+        * Missing/extra parameters in create()/build() calls
+        * Type mismatches in attribute definitions
+        * Missing includes or forward declarations
+      Fix the relevant section of the patch while keeping all OTHER
+      sections intact — do NOT drop OPs that were correctly patched.
+
+  ═══════════════════════════════════════════════════════════════════════
+
   Core strategy: patch TA-side LLVM so it generates IR compatible with the
   UNMODIFIED AscendNPU-IR. NPU-IR is NOT touched — we cannot patch or
   recompile it from the TA side.
@@ -531,22 +555,27 @@ The active mode is: {mode}
 
   Workflow:
     1. Read `{step_dir}/changes_report.json` for ALL OPs needing patches.
-    2. Read the patch template:
+    2. Read the patch generation guide:
+       `{reference_dir}/05-ir-patch-generation-guide.md`
+       — core strategy, patch patterns, format requirements, validation steps.
+    3. Read the patch template for concrete format examples:
        `{reference_dir}/ir_compatibility_patch_example.patch`
        This demonstrates the direct OP patching approach (NOT BC/bytecode).
-    3. For each OP, view the TARGET version of its .td/.cpp file using:
+    4. For each OP, view the TARGET version of its .td/.cpp file using:
          git -C {llvm_project_path} show {target_llvm_hash}:mlir/include/.../<file>.td
          git -C {llvm_project_path} show {target_llvm_hash}:mlir/lib/.../<file>.cpp
        Do NOT read the working tree directly — the checked-out commit may
        differ from `{target_llvm_hash}`.
-    4. Generate a SINGLE complete `.patch` file that covers ALL OPs flagged
+    5. Generate a SINGLE complete `.patch` file that covers ALL OPs flagged
        with `needs_patch: true` in one unified patch. For each OP:
-       - Apply the appropriate strategy by change type:
+       - Apply the appropriate strategy by change type (per the guide):
          — OP renamed: add a backward-compatible alias (old name → new name)
          — assemblyFormat changed: modify to also accept/emit old format
          — create() params changed: add overload/defaults for old signature
          — Pass option renamed: add old option name as alias
-    5. Write the single patch directly to `{ascend_patch_file}` (modify
+         — attributes changed: add backward-compat getter/wrapper
+         — custom printer/parser changed: preserve old output format
+    6. Write the single patch directly to `{ascend_patch_file}` (modify
        the existing file in-place):
        - Follow `git format-patch` style with proper headers
        - Apply cleanly to `{llvm_project_path}` at `{target_llvm_hash}` as
