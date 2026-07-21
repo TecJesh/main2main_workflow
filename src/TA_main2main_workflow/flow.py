@@ -16,7 +16,9 @@ from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.tracker import timed
 from TA_main2main_workflow.utils import (
-    UpgradeCompleted, UpgradeFailed, WORKSPACE_DIR,
+    UpgradeCompleted,
+    UpgradeFailed,
+    WORKSPACE_DIR,
 )
 from TA_main2main_workflow.pipeline.prepare import prepare
 from TA_main2main_workflow.pipeline.detect import run_detect
@@ -98,10 +100,12 @@ class TA_Main2MainFlow:
 
             ctx = commit_step(ctx, self.config)
             ctx = ctx.copy_with(current_step=ctx.current_step + 1)
-            log.status(True, f"Step {sid} completed ({ctx.current_step}/{ctx.total_steps})")
+            log.status(
+                True, f"Step {sid} completed ({ctx.current_step}/{ctx.total_steps})"
+            )
 
         # ── Phase 4: Finalize ───────────────────────────────────────────
-        ctx = finalize(ctx, self.config)
+        ctx = finalize(ctx)
 
         if self.config.push_to_github:
             self._push_pr(ctx)
@@ -110,6 +114,7 @@ class TA_Main2MainFlow:
 
     def _push_pr(self, ctx: WorkflowContext) -> None:
         from TA_main2main_workflow.pipeline.push_pr import push_and_create_pr
+
         try:
             pr_url = push_and_create_pr(
                 ascend_path=Path(ctx.triton_ascend_path),
@@ -120,6 +125,3 @@ class TA_Main2MainFlow:
             log.status(True, f"PR created: {pr_url}")
         except Exception as e:
             log.error(f"Failed to create PR: {e}")
-
-
-

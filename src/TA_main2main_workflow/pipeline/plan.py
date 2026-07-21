@@ -14,7 +14,10 @@ from typing import Any
 from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils import (
-    WORKSPACE_DIR, STEPS_FILE, STEPS_DIR, LINE_BUDGET, LLVM_HASH_FILE,
+    WORKSPACE_DIR,
+    STEPS_FILE,
+    STEPS_DIR,
+    LLVM_HASH_FILE,
     run_git,
 )
 from TA_main2main_workflow.utils.logging import get_logger
@@ -48,13 +51,17 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     target = ctx.target_commit
     line_budget = config.line_budget
 
-    commits = _list_commits(triton_path, base, target)
-    log.info(f"[plan] Scanning {len(commits)} upstream commits ({base[:8]}..{target[:8]})")
+    commits = ctx.upstream_commits
+    log.info(
+        f"[plan] Scanning {len(commits)} upstream commits ({base[:8]}..{target[:8]})"
+    )
     log.info(f"[plan] Line budget: {line_budget}")
 
     if config.progressive_merge and len(commits) > 1:
         lines_per_commit, llvm_commits = _scan_commits(triton_path, commits)
-        steps = _plan_steps_inner(commits, lines_per_commit, base, line_budget, llvm_commits)
+        steps = _plan_steps_inner(
+            commits, lines_per_commit, base, line_budget, llvm_commits
+        )
         _enrich_steps(triton_path, steps)
 
         plan = {
@@ -70,14 +77,17 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         return ctx.copy_with(steps=steps, total_steps=len(steps))
     else:
         return ctx.copy_with(
-            total_steps=1, progressive_merge=False,
-            steps=[{
-                "index": 1, "id": "step-1",
-                "commit_count": len(commits),
-                "start_commit": base,
-                "end_commit": target,
-                "source_changed_lines": ctx.changed_lines_total,
-            }],
+            total_steps=1,
+            steps=[
+                {
+                    "index": 1,
+                    "id": "step-1",
+                    "commit_count": len(commits),
+                    "start_commit": base,
+                    "end_commit": target,
+                    "source_changed_lines": ctx.changed_lines_total,
+                }
+            ],
         )
 
 
@@ -85,21 +95,13 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 # Internal helpers (formerly in scripts/plan_steps.py)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:
-    output = run_git(repo, "log", "--reverse", "--format=%H%x1f%s", f"{base}..{target}")
-    commits: list[dict[str, str]] = []
-    for line in output.strip().splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\x1f", 1)
-        commits.append({"sha": parts[0].strip(), "subject": parts[1].strip() if len(parts) > 1 else ""})
-    return commits
-
 
 def _source_lines_for_commit(repo: Path, sha: str) -> int:
     """Return total lines changed in a single commit."""
     try:
-        output = run_git(repo, "diff-tree", "--no-commit-id", "--shortstat", sha, quiet=True)
+        output = run_git(
+            repo, "diff-tree", "--no-commit-id", "--shortstat", sha, quiet=True
+        )
     except Exception:
         return 0
     # " 5 files changed, 123 insertions(+), 45 deletions(-)"
@@ -121,13 +123,17 @@ def _parse_shortstat(output: str) -> int:
 
 def _commit_changed_llvm_hash(repo: Path, sha: str) -> bool:
     try:
-        output = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha, quiet=True)
+        output = run_git(
+            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha, quiet=True
+        )
         return LLVM_HASH_FILE in output
     except Exception:
         return False
 
 
-def _scan_commits(repo: Path, commits: list[dict[str, str]]) -> tuple[dict[str, int], set[str]]:
+def _scan_commits(
+    repo: Path, commits: list[dict[str, str]]
+) -> tuple[dict[str, int], set[str]]:
     lines_per_commit: dict[str, int] = {}
     llvm_commits: set[str] = set()
     for i, c in enumerate(commits):
@@ -141,16 +147,34 @@ def _scan_commits(repo: Path, commits: list[dict[str, str]]) -> tuple[dict[str, 
     return lines_per_commit, llvm_commits
 
 
-def _make_step(index: int, commits: list[dict[str, str]], start: str, lines: int, budget: int, reason: str = "line_budget") -> dict[str, Any]:
+def _make_step(
+    index: int,
+    commits: list[dict[str, str]],
+    start: str,
+    lines: int,
+    budget: int,
+    reason: str = "line_budget",
+) -> dict[str, Any]:
     return {
-        "index": index, "id": f"step-{index}",
-        "commits": commits, "commit_count": len(commits),
-        "start_commit": start, "end_commit": commits[-1]["sha"],
-        "source_changed_lines": lines, "line_budget": budget, "reason": reason,
+        "index": index,
+        "id": f"step-{index}",
+        "commits": commits,
+        "commit_count": len(commits),
+        "start_commit": start,
+        "end_commit": commits[-1]["sha"],
+        "source_changed_lines": lines,
+        "line_budget": budget,
+        "reason": reason,
     }
 
 
-def _plan_steps_inner(commits: list[dict[str, str]], lines_per_commit: dict[str, int], base: str, budget: int, llvm_commits: set[str]) -> list[dict[str, Any]]:
+def _plan_steps_inner(
+    commits: list[dict[str, str]],
+    lines_per_commit: dict[str, int],
+    base: str,
+    budget: int,
+    llvm_commits: set[str],
+) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     step_commits: list[dict[str, str]] = []
     step_lines = 0
@@ -163,26 +187,45 @@ def _plan_steps_inner(commits: list[dict[str, str]], lines_per_commit: dict[str,
         # LLVM change → solo step
         if sha in llvm_commits:
             if step_commits:
-                steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, budget))
+                steps.append(
+                    _make_step(len(steps) + 1, step_commits, start, step_lines, budget)
+                )
                 start = steps[-1]["end_commit"]
                 step_commits, step_lines = [], 0
-            steps.append(_make_step(len(steps) + 1, [commit], start, lines, budget, reason="llvm_version"))
+            steps.append(
+                _make_step(
+                    len(steps) + 1,
+                    [commit],
+                    start,
+                    lines,
+                    budget,
+                    reason="llvm_version",
+                )
+            )
             start = steps[-1]["end_commit"]
             continue
 
         # Oversized → solo step
         if lines > budget:
             if step_commits:
-                steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, budget))
+                steps.append(
+                    _make_step(len(steps) + 1, step_commits, start, step_lines, budget)
+                )
                 start = steps[-1]["end_commit"]
                 step_commits, step_lines = [], 0
-            steps.append(_make_step(len(steps) + 1, [commit], start, lines, budget, reason="oversized"))
+            steps.append(
+                _make_step(
+                    len(steps) + 1, [commit], start, lines, budget, reason="oversized"
+                )
+            )
             start = steps[-1]["end_commit"]
             continue
 
         # Would exceed budget → flush
         if step_lines + lines > budget:
-            steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, budget))
+            steps.append(
+                _make_step(len(steps) + 1, step_commits, start, step_lines, budget)
+            )
             start = steps[-1]["end_commit"]
             step_commits, step_lines = [], 0
 
@@ -190,25 +233,41 @@ def _plan_steps_inner(commits: list[dict[str, str]], lines_per_commit: dict[str,
         step_lines += lines
 
     if step_commits:
-        steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines, budget))
+        steps.append(
+            _make_step(len(steps) + 1, step_commits, start, step_lines, budget)
+        )
 
     return steps
 
 
 def _enrich_steps(repo: Path, steps: list[dict[str, Any]]) -> None:
     for step in steps:
-        step["upstream_patch"] = run_git(repo, "diff", f"{step['start_commit']}..{step['end_commit']}", quiet=True)
-        step["changed_files"] = run_git(repo, "diff", "--name-only", f"{step['start_commit']}..{step['end_commit']}", quiet=True)
+        step["upstream_patch"] = run_git(
+            repo, "diff", f"{step['start_commit']}..{step['end_commit']}", quiet=True
+        )
+        step["changed_files"] = run_git(
+            repo,
+            "diff",
+            "--name-only",
+            f"{step['start_commit']}..{step['end_commit']}",
+            quiet=True,
+        )
 
 
 def _write_plan(plan: dict[str, Any]) -> None:
     steps_dir = WORKSPACE_DIR / STEPS_DIR
     steps_dir.mkdir(parents=True, exist_ok=True)
-    (WORKSPACE_DIR / STEPS_FILE).write_text(json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (WORKSPACE_DIR / STEPS_FILE).write_text(
+        json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     for step in plan["steps"]:
         step_dir = steps_dir / step["id"]
         step_dir.mkdir(parents=True, exist_ok=True)
-        (step_dir / "upstream.patch").write_text(step["upstream_patch"], encoding="utf-8")
-        (step_dir / "changed_files.txt").write_text(step["changed_files"], encoding="utf-8")
+        (step_dir / "upstream.patch").write_text(
+            step["upstream_patch"], encoding="utf-8"
+        )
+        (step_dir / "changed_files.txt").write_text(
+            step["changed_files"], encoding="utf-8"
+        )
         lines = [f"{c['sha'][:8]}  {c['subject']}" for c in step["commits"]]
         (step_dir / "commits.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")

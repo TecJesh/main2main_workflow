@@ -5,8 +5,6 @@ Steps:
   1. Ensure gh CLI is authenticated.
   2. Clean up temp files (result_profiling/, __pycache__/, *.lock, etc.).
   3. Run pre-commit run --from-ref origin/main --to-ref HEAD.
-from TA_main2main_workflow.utils.logging import get_logger
-log = get_logger(__name__)
   4. If pre-commit auto-fixes files, amend the latest commit.
   5. Push the work branch to origin.
   6. Open a PR via gh pr create with [user](type) title format.
@@ -31,10 +29,17 @@ from datetime import datetime
 from pathlib import Path
 
 from TA_main2main_workflow.utils import (
-    WORKSPACE_DIR, FINAL_TARGET_PATCH_FILE, FINAL_SUMMARY_FILE,
-    run_git, run_git_no_check, print_error,
-    ENV_BASE_BRANCH, get_base_branch_ref,
+    WORKSPACE_DIR,
+    FINAL_TARGET_PATCH_FILE,
+    FINAL_SUMMARY_FILE,
+    run_git,
+    run_git_no_check,
+    ENV_BASE_BRANCH,
+    get_base_branch_ref,
 )
+from TA_main2main_workflow.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 
 def _detect_origin_owner(repo: Path, remote: str = "origin") -> str:
@@ -95,7 +100,9 @@ def _ensure_gh_auth(repo: Path) -> None:
         try:
             subprocess.run(
                 ["gh", "auth", "status"],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
             log.info("[push] gh CLI already authenticated.")
         except subprocess.CalledProcessError:
@@ -106,7 +113,9 @@ def _ensure_gh_auth(repo: Path) -> None:
             sys.exit(1)
         subprocess.run(
             ["gh", "auth", "setup-git"],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         log.info("[push] Git credential helper configured (via gh auth setup-git).")
         return
@@ -119,7 +128,9 @@ def _ensure_gh_auth(repo: Path) -> None:
     # gh needs to know about github.com independently of git remotes.
     result = subprocess.run(
         ["gh", "auth", "login", "--with-token", "--hostname", "github.com"],
-        input=gh_token + "\n", text=True, capture_output=True,
+        input=gh_token + "\n",
+        text=True,
+        capture_output=True,
     )
     if result.returncode == 0:
         log.info("[push] gh auth login --with-token: success")
@@ -129,7 +140,8 @@ def _ensure_gh_auth(repo: Path) -> None:
     # Step 2: Verify the token works
     result = subprocess.run(
         ["gh", "auth", "status", "--hostname", "github.com"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     log.info(f"[push] gh auth status: {result.stdout.strip()}")
     if result.returncode != 0:
@@ -141,13 +153,16 @@ def _ensure_gh_auth(repo: Path) -> None:
     # the token directly in the origin URL.
     result = subprocess.run(
         ["gh", "auth", "setup-git", "--hostname", "github.com"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
         log.info("[push] Git credential helper configured (via gh auth setup-git).")
     else:
-        log.info(f"[push] gh auth setup-git skipped "
-              f"(exit {result.returncode}): {result.stderr.strip()}")
+        log.info(
+            f"[push] gh auth setup-git skipped "
+            f"(exit {result.returncode}): {result.stderr.strip()}"
+        )
 
     # Step 4: Embed token in origin URL so git push works through the proxy.
     # (gh auth setup-git may not help when url.insteadOf rewrites the host.)
@@ -232,8 +247,10 @@ def _run_pre_commit_and_amend(repo: Path) -> bool:
         if precommit_passed:
             log.info("[push] Pre-commit passed, no modifications needed.")
         else:
-            log.info("[push] ⚠ Pre-commit reported issues but no files were modified "
-                  "(may need manual review).")
+            log.info(
+                "[push] ⚠ Pre-commit reported issues but no files were modified "
+                "(may need manual review)."
+            )
 
     return True
 
@@ -250,7 +267,9 @@ def _build_pr_title(target_commit: str = "") -> str:
     author = os.getenv("PR_AUTHOR", "Sync").strip()
     pr_type = os.getenv("PR_TYPE", "feat").strip()
     if target_commit:
-        return f"[{author}]({pr_type}) Merge upstream triton commits {target_commit[:8]}"
+        return (
+            f"[{author}]({pr_type}) Merge upstream triton commits {target_commit[:8]}"
+        )
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"[{author}]({pr_type}) Merge upstream triton commits {ts}"
 
@@ -270,12 +289,14 @@ def _create_pr_via_api(
     url.insteadOf proxy.
     """
     url = f"https://api.github.com/repos/{github_repo}/pulls"
-    payload = json.dumps({
-        "title": title,
-        "body": body,
-        "head": head,
-        "base": base,
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -298,9 +319,7 @@ def _create_pr_via_api(
             return pr_url
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"GitHub API error {e.code}: {error_body}"
-        ) from e
+        raise RuntimeError(f"GitHub API error {e.code}: {error_body}") from e
 
 
 def _create_pr_via_gh(
@@ -319,25 +338,31 @@ def _create_pr_via_gh(
     """
     gh_token = os.environ.get("GH_TOKEN") or ""
     gh_cmd = [
-        "gh", "pr", "create",
-        "--title", title,
-        "--body", body,
-        "--head", head_ref,
-        "--base", base_branch,
-        "--repo", github_repo,
+        "gh",
+        "pr",
+        "create",
+        "--title",
+        title,
+        "--body",
+        body,
+        "--head",
+        head_ref,
+        "--base",
+        base_branch,
+        "--repo",
+        github_repo,
     ]
     log.info(f"[push] Running: GH_HOST=github.com {' '.join(gh_cmd)}")
     result = subprocess.run(
         gh_cmd,
-        capture_output=True, text=True, timeout=60,
-        env={**os.environ,
-             "GITHUB_TOKEN": gh_token,
-             "GH_TOKEN": gh_token},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "GITHUB_TOKEN": gh_token, "GH_TOKEN": gh_token},
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"gh pr create failed (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
+            f"gh pr create failed (exit {result.returncode}): {result.stderr.strip()}"
         )
     pr_url = result.stdout.strip()
     if not pr_url:
@@ -406,7 +431,9 @@ def push_and_create_pr(
         # Use "git add -u" (tracked-only) to avoid staging test artifacts,
         # cache files, or other transient files created during the flow.
         run_git(repo, "add", "-u")
-        commit_msg = f"sync: upstream triton merge ({datetime.now().strftime('%Y%m%d-%H%M%S')})"
+        commit_msg = (
+            f"sync: upstream triton merge ({datetime.now().strftime('%Y%m%d-%H%M%S')})"
+        )
         try:
             run_git(repo, "commit", "-s", "-m", commit_msg)
             log.info(f"[push] Committed: {commit_msg}")
@@ -424,11 +451,15 @@ def push_and_create_pr(
         remote_url = run_git(repo, "remote", "get-url", "origin").strip()
         # Mask any embedded token
         if "@" in remote_url:
-            safe_url = remote_url.split("@")[0].split(":")[-1] + "@" + remote_url.split("@")[1]
+            safe_url = (
+                remote_url.split("@")[0].split(":")[-1] + "@" + remote_url.split("@")[1]
+            )
         else:
             safe_url = remote_url
         log.info(f"[push] origin URL: {safe_url}")
-        log.info(f"[push] current branch: {run_git(repo, 'branch', '--show-current').strip()}")
+        log.info(
+            f"[push] current branch: {run_git(repo, 'branch', '--show-current').strip()}"
+        )
     except Exception:
         pass
     log.info("[push] ==============================")
@@ -448,10 +479,18 @@ def push_and_create_pr(
             run_git_no_check(repo, "remote", "remove", _fork_remote)
             run_git(repo, "remote", "add", _fork_remote, _fork_url)
             _push_result = subprocess.run(
-                ["git",
-                 "-c", "http.https://github.com/.extraheader=",
-                 "push", "--force-with-lease", _fork_remote, work_branch],
-                cwd=str(repo), capture_output=True, text=True,
+                [
+                    "git",
+                    "-c",
+                    "http.https://github.com/.extraheader=",
+                    "push",
+                    "--force-with-lease",
+                    _fork_remote,
+                    work_branch,
+                ],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
             )
             run_git(repo, "remote", "remove", _fork_remote)
             if _push_result.returncode == 0:
@@ -459,15 +498,14 @@ def push_and_create_pr(
                     log.info(f"[push] stdout:\n{_push_result.stdout.strip()}")
                 break
             _last_push_error = _push_result.stderr.strip() or "(no stderr)"
-            print_error(
+            log.error(
                 f"[push] git push attempt {_attempt}/5 FAILED "
                 f"(exit {_push_result.returncode}):\n{_last_push_error}"
             )
             if _attempt < 5:
                 time.sleep(10 * _attempt)
         else:
-            raise RuntimeError(
-                f"git push failed after 5 attempts: {_last_push_error}")
+            raise RuntimeError(f"git push failed after 5 attempts: {_last_push_error}")
     else:
         run_git(repo, "push", "-u", "origin", work_branch)
 
@@ -476,7 +514,9 @@ def push_and_create_pr(
     # to the proxy, so we temporarily swap it to the fork URL (with
     # token) — gh recognizes github.com and GH_HOST isn't needed.
     base_branch = os.getenv("TA_PR_BASE_BRANCH", "upstream-sync")
-    pr_description = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
+    pr_description = (
+        summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
+    )
 
     _head = f"{_fork_owner}:{work_branch}" if _fork_owner else work_branch
     pr_title = _build_pr_title(target_commit)
@@ -487,7 +527,11 @@ def push_and_create_pr(
     log.info(f"        repo = {github_repo}")
 
     _saved_origin = run_git(repo, "config", "--get", "remote.origin.url").strip()
-    _pr_origin = f"https://x-access-token:{_token}@github.com/{_fork_owner}/triton-ascend.git" if _token else f"https://github.com/{_fork_owner}/triton-ascend.git"
+    _pr_origin = (
+        f"https://x-access-token:{_token}@github.com/{_fork_owner}/triton-ascend.git"
+        if _token
+        else f"https://github.com/{_fork_owner}/triton-ascend.git"
+    )
     run_git(repo, "remote", "set-url", "origin", _pr_origin)
 
     _last_pr_error = ""
@@ -504,11 +548,9 @@ def push_and_create_pr(
             return pr_url
         except Exception as _e:
             _last_pr_error = str(_e)
-            print_error(f"[push] PR create attempt {_attempt}/5 FAILED: "
-                        f"{_last_pr_error}")
+            log.error(f"[push] PR create attempt {_attempt}/5 FAILED: {_last_pr_error}")
             if _attempt < 5:
                 time.sleep(10 * _attempt)
         finally:
             run_git(repo, "remote", "set-url", "origin", _saved_origin)
-    raise RuntimeError(
-        f"gh pr create failed after 5 attempts: {_last_pr_error}")
+    raise RuntimeError(f"gh pr create failed after 5 attempts: {_last_pr_error}")

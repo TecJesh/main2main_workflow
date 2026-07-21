@@ -27,6 +27,7 @@ def timed(name: str):
     finally:
         elapsed = time.monotonic() - start
         from TA_main2main_workflow.utils.logging import get_logger
+
         get_logger(__name__).info(f"⏱  {name} took {elapsed:.1f}s")
 
 

@@ -23,6 +23,7 @@ def run_git(repo: Path | str, *args: str, quiet: bool = False) -> str:
     Set *quiet* to suppress logging (useful for bulk calls like scanning commits).
     """
     from TA_main2main_workflow.utils.logging import get_logger
+
     log = get_logger("git")
     if not quiet:
         log.info(f"[{Path(repo).name}] $ git {' '.join(args)}")
@@ -72,16 +73,3 @@ def run_git_no_check(repo: Path | str, *args: str) -> subprocess.CompletedProces
         encoding="utf-8",
         errors="replace",
     )
-
-
-def get_repo_head(repo: Path) -> str:
-    if not repo.exists():
-        raise FileNotFoundError(f"Repository path does not exist: {repo}")
-    return run_git(repo, "rev-parse", "HEAD").strip()
-
-
-
-def get_modified_files(repo: Path, base_ref: str = "HEAD") -> list[str]:
-    result = run_git(repo, "diff", "--name-only", base_ref)
-    return [f for f in result.strip().splitlines() if f]
-

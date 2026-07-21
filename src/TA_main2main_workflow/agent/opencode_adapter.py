@@ -40,6 +40,7 @@ _HEARTBEAT_INTERVAL = 15  # print "." every 15s of silence (claude only)
 
 # ── backend detection ────────────────────────────────────────────────────────
 
+
 def _detect_backend() -> str:
     """Detect which AI backend to use. Checks AI_BACKEND env var first,
     then falls back to whatever is available on PATH."""
@@ -72,14 +73,17 @@ _MODE_LABELS: dict[str, str] = {
 
 # ── prompt loader ────────────────────────────────────────────────────────────
 
+
 def _build_prompt(inputs: dict[str, Any]) -> str:
     from collections import defaultdict
+
     template = _PROMPT_PATH.read_text(encoding="utf-8")
     ctx = defaultdict(str, {k: str(v) for k, v in inputs.items()})
     return template.format_map(ctx)
 
 
 # ── result model ─────────────────────────────────────────────────────────────
+
 
 class AIResult(BaseModel):
     modified_files: list[str] = Field(default_factory=list)
@@ -91,6 +95,7 @@ class AIResult(BaseModel):
 
 
 # ── main entry point ─────────────────────────────────────────────────────────
+
 
 def run_opencode_adapter(inputs: dict[str, Any]) -> AIResult:
     """Run the AI adapter for conflict resolution or test fixing.
@@ -125,7 +130,10 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AIResult:
     if result.modified_files:
         print(f"    Modified: {', '.join(result.modified_files)}", flush=True)
     if result.resolved_conflicts:
-        print(f"    Resolved conflicts: {', '.join(result.resolved_conflicts)}", flush=True)
+        print(
+            f"    Resolved conflicts: {', '.join(result.resolved_conflicts)}",
+            flush=True,
+        )
     if result.is_noop:
         print(f"    (no changes needed)", flush=True)
 
@@ -135,6 +143,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AIResult:
 # ═══════════════════════════════════════════════════════════════════════════════
 # opencode backend (JSONL streaming)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _run_opencode(inputs: dict[str, Any]) -> AIResult:
     """opencode backend: JSONL streaming with stale-timeout retry."""
@@ -170,12 +179,17 @@ def _run_opencode(inputs: dict[str, Any]) -> AIResult:
 
         if reason == "stale_timeout" and attempt < _MAX_STALE_RETRIES:
             retry = attempt + 1
-            print(f"\n[opencode] retrying after stale timeout ({retry}/{_MAX_STALE_RETRIES})", flush=True)
+            print(
+                f"\n[opencode] retrying after stale timeout ({retry}/{_MAX_STALE_RETRIES})",
+                flush=True,
+            )
             prompt = _build_opencode_continue(base_prompt, inputs, retry)
             continue
 
         if stderr_path and stderr_path.exists():
-            stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+            stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[
+                -2000:
+            ]
             if stderr_content:
                 print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
         break
@@ -186,8 +200,10 @@ def _run_opencode(inputs: dict[str, Any]) -> AIResult:
     return result
 
 
-def _build_opencode_continue(base_prompt: str, inputs: dict[str, Any], retry: int) -> str:
-    return f"""Continue the task for step {inputs.get('step_id', '')}.
+def _build_opencode_continue(
+    base_prompt: str, inputs: dict[str, Any], retry: int
+) -> str:
+    return f"""Continue the task for step {inputs.get("step_id", "")}.
 
 The previous opencode run produced no output for {_STALE_SECONDS} seconds and
 was terminated. This is continuation retry {retry}/{_MAX_STALE_RETRIES}.
@@ -212,7 +228,9 @@ def _print_prompt(prompt: str, attempt: int) -> None:
     print(f"{'━' * 60}", flush=True)
     if len(prompt) > 8000:
         print(prompt[:4000])
-        print(f"\n... [{len(prompt) - 8000} chars truncated, see log for full prompt] ...\n")
+        print(
+            f"\n... [{len(prompt) - 8000} chars truncated, see log for full prompt] ...\n"
+        )
         print(prompt[-4000:])
     else:
         print(prompt)
@@ -249,8 +267,10 @@ def _run_opencode_once(
     stderr_fh = stderr_path.open("a", encoding="utf-8") if stderr_path else None
     proc = subprocess.Popen(
         [
-            "opencode", "run",
-            "--format", "json",
+            "opencode",
+            "run",
+            "--format",
+            "json",
             "--dangerously-skip-permissions",
             prompt,
         ],
@@ -287,12 +307,18 @@ def _run_opencode_once(
             except queue.Empty:
                 now = time.monotonic()
                 if now > deadline:
-                    print(f"\n[opencode] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process", flush=True)
+                    print(
+                        f"\n[opencode] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process",
+                        flush=True,
+                    )
                     proc.kill()
                     stop_reason = "total_timeout"
                     break
                 if now - last_output_time > _STALE_SECONDS:
-                    print(f"\n[opencode] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process", flush=True)
+                    print(
+                        f"\n[opencode] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process",
+                        flush=True,
+                    )
                     proc.kill()
                     stop_reason = "stale_timeout"
                     break
@@ -363,8 +389,15 @@ def _print_opencode_event(line: str, state: _EventState) -> None:
         elif status == "completed":
             output = st.get("output", "")
             if output:
-                display = output if len(output) <= 2000 else output[:2000] + "\n... [truncated]"
-                print(f"\n  {'─' * 56}\n  [AI output]\n  {display}\n  {'─' * 56}", flush=True)
+                display = (
+                    output
+                    if len(output) <= 2000
+                    else output[:2000] + "\n... [truncated]"
+                )
+                print(
+                    f"\n  {'─' * 56}\n  [AI output]\n  {display}\n  {'─' * 56}",
+                    flush=True,
+                )
 
 
 def _log_opencode_event(line: str, state: _EventState, fh: Any) -> None:
@@ -402,6 +435,7 @@ def _log_opencode_event(line: str, state: _EventState, fh: Any) -> None:
 # in the meantime), this implementation streams stdout line-by-line in real
 # time. A heartbeat "." is printed every 15s of silence to show liveness.
 
+
 def _run_claude(inputs: dict[str, Any]) -> AIResult:
     """Run Claude Code with real-time streaming output.
 
@@ -431,7 +465,10 @@ def _run_claude(inputs: dict[str, Any]) -> AIResult:
     if log_path:
         _log_prompt(prompt, 0, log_path)
 
-    print(f"\n  > [claude] Starting Claude Code (timeout={_TIMEOUT_MINUTES}min)...", flush=True)
+    print(
+        f"\n  > [claude] Starting Claude Code (timeout={_TIMEOUT_MINUTES}min)...",
+        flush=True,
+    )
     print(f"     (streaming output in real time — '.' = still thinking)", flush=True)
 
     # ── Launch claude ──────────────────────────────────────────────────────
@@ -475,12 +512,18 @@ def _run_claude(inputs: dict[str, Any]) -> AIResult:
             if line is None:
                 now = time.monotonic()
                 if now > deadline:
-                    print(f"\n  [claude] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process", flush=True)
+                    print(
+                        f"\n  [claude] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process",
+                        flush=True,
+                    )
                     proc.kill()
                     stop_reason = "total_timeout"
                     break
                 if now - last_output_time > _STALE_SECONDS:
-                    print(f"\n  [claude] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process", flush=True)
+                    print(
+                        f"\n  [claude] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process",
+                        flush=True,
+                    )
                     proc.kill()
                     stop_reason = "stale_timeout"
                     break
@@ -520,7 +563,9 @@ def _run_claude(inputs: dict[str, Any]) -> AIResult:
     if proc.returncode != 0:
         print(f"\n  [claude] exited with code {proc.returncode}", flush=True)
         if stderr_path and stderr_path.exists():
-            stderr_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+            stderr_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[
+                -2000:
+            ]
             if stderr_tail:
                 print(f"  [claude] stderr tail:\n{stderr_tail}", flush=True)
     else:
@@ -556,7 +601,10 @@ def _read_line_with_timeout(stream: Any, timeout: float) -> str | None:
 # shared result builder
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_result(step_dir: Path | None, ascend_path: str, output_text: str) -> AIResult:
+
+def _build_result(
+    step_dir: Path | None, ascend_path: str, output_text: str
+) -> AIResult:
     """Build AIResult from AI output: extract summary, detect modified files."""
     summary = ""
     if step_dir:

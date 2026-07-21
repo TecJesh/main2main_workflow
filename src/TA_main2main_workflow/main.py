@@ -13,22 +13,40 @@ log = get_logger(__name__)
 
 
 def kickoff():
-    parser = argparse.ArgumentParser(description="Triton-Ascend Main2Main Upstream Sync")
-    parser.add_argument("--triton-ascend-path", default=None, help="Path to triton-ascend repo")
-    parser.add_argument("--triton-path", default=None, help="Path to local triton repo (offline mode)")
-    parser.add_argument("--target-commit", default=None, help="Upstream commit SHA to merge")
+    parser = argparse.ArgumentParser(
+        description="Triton-Ascend Main2Main Upstream Sync"
+    )
+    parser.add_argument(
+        "--triton-ascend-path", default=None, help="Path to triton-ascend repo"
+    )
+    parser.add_argument(
+        "--triton-path", default=None, help="Path to local triton repo (offline mode)"
+    )
+    parser.add_argument(
+        "--target-commit", default=None, help="Upstream commit SHA to merge"
+    )
     parser.add_argument("--llvm-prefix", default=None, help="LLVM install prefix path")
-    parser.add_argument("--build-procs", type=int, default=None, help="Parallel build workers")
-    parser.add_argument("--test-procs", type=int, default=None, help="Parallel pytest workers")
+    parser.add_argument(
+        "--build-procs", type=int, default=None, help="Parallel build workers"
+    )
+    parser.add_argument(
+        "--test-procs", type=int, default=None, help="Parallel pytest workers"
+    )
     args = parser.parse_args()
 
     config = TAConfig.from_env()
-    if args.triton_ascend_path: config.triton_ascend_path = args.triton_ascend_path
-    if args.triton_path: config.triton_path = args.triton_path
-    if args.target_commit: config.target_commit = args.target_commit
-    if args.llvm_prefix: config.llvm_install_prefix = args.llvm_prefix
-    if args.build_procs is not None: config.build_procs = args.build_procs
-    if args.test_procs is not None: config.test_procs = args.test_procs
+    if args.triton_ascend_path:
+        config.triton_ascend_path = args.triton_ascend_path
+    if args.triton_path:
+        config.triton_path = args.triton_path
+    if args.target_commit:
+        config.target_commit = args.target_commit
+    if args.llvm_prefix:
+        config.llvm_install_prefix = args.llvm_prefix
+    if args.build_procs is not None:
+        config.build_procs = args.build_procs
+    if args.test_procs is not None:
+        config.test_procs = args.test_procs
 
     _print_banner(config)
 

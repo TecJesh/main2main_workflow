@@ -94,10 +94,8 @@ def prepare(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 
     return ctx.copy_with(
         triton_ascend_path=str(ascend_path),
-        triton_path=str(ascend_path),  # same repo, upstream via remote
         target_commit=target_commit,
         ascend_head=ascend_head,
-        original_branch=base_branch,
         origin_remote=ORIGIN_REMOTE,
         upstream_remote=UPSTREAM_REMOTE,
     )
@@ -106,6 +104,7 @@ def prepare(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 # ═══════════════════════════════════════════════════════════════════════════
 # Internal helpers
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def _ensure_repo(config: TAConfig, workspace: Path) -> Path:
     """Return path to triton-ascend repo, cloning if necessary."""

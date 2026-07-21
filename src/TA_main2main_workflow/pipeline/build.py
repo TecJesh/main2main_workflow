@@ -13,8 +13,6 @@ from TA_main2main_workflow.pipeline.fix import ai_fix
 
 log = get_logger(__name__)
 
-LLVM_BUILD_LOG = "llvm-build.log"
-
 
 def build(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     """Build phase: LLVM → triton-ascend, with unified retry+fix loop.
@@ -57,6 +55,7 @@ def build(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 # LLVM
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def _llvm_setup(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     """Clone LLVM, checkout hash, apply patch. Idempotent — only runs if hash changed."""
     ascend_path = Path(ctx.triton_ascend_path)
@@ -87,8 +86,10 @@ def _llvm_setup(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
             log.info(f"Applying patch: {patch_files[0].name}")
             run_git(llvm_project, "apply", str(patch_files[0]))
         else:
-            log.info(f"LLVM hash changed ({required_hash[:12]}), patch {patch_files[0].name} "
-                     f"is for old version — will let AI generate new patch")
+            log.info(
+                f"LLVM hash changed ({required_hash[:12]}), patch {patch_files[0].name} "
+                f"is for old version — will let AI generate new patch"
+            )
     return ctx
 
 
@@ -100,7 +101,9 @@ def _build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
     llvm_project = WORKSPACE_DIR / "llvm-project"
     llvm_install = WORKSPACE_DIR / "llvm-install"
     ascend_path = Path(ctx.triton_ascend_path)
-    required_hash = (ascend_path / "cmake" / "llvm-hash.txt").read_text(encoding="utf-8").strip()
+    required_hash = (
+        (ascend_path / "cmake" / "llvm-hash.txt").read_text(encoding="utf-8").strip()
+    )
 
     step_id = ctx.steps[ctx.current_step]["id"] if ctx.steps else "step-0"
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
@@ -115,33 +118,53 @@ def _build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
     try:
         with open(cmake_log, "w") as o, open(cmake_err, "w") as e:
             subprocess.run(
-                ["cmake", str(llvm_project / "llvm"), "-G", "Ninja",
-                 "-DCMAKE_BUILD_TYPE=Release", "-DLLVM_ENABLE_ASSERTIONS=ON",
-                 "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
-                 "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU",
-                 f"-DCMAKE_INSTALL_PREFIX={llvm_install}",
-                 "-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++"],
-                cwd=build_dir, check=True, stdout=o, stderr=e)
+                [
+                    "cmake",
+                    str(llvm_project / "llvm"),
+                    "-G",
+                    "Ninja",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DLLVM_ENABLE_ASSERTIONS=ON",
+                    "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
+                    "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU",
+                    f"-DCMAKE_INSTALL_PREFIX={llvm_install}",
+                    "-DCMAKE_C_COMPILER=clang",
+                    "-DCMAKE_CXX_COMPILER=clang++",
+                ],
+                cwd=build_dir,
+                check=True,
+                stdout=o,
+                stderr=e,
+            )
     except subprocess.CalledProcessError:
         log.error("LLVM cmake FAILED")
-        return ctx.copy_with(build_passed=False,
-                             fix_errors=[str(cmake_log), str(cmake_err)])
+        return ctx.copy_with(
+            build_passed=False, fix_errors=[str(cmake_log), str(cmake_err)]
+        )
 
     log.info(f"ninja -j{num_procs} install (this may take a while)...")
     ninja_log = step_dir / "llvm-ninja.log"
     ninja_err = step_dir / "llvm-ninja.err"
     try:
         with open(ninja_log, "w") as o, open(ninja_err, "w") as e:
-            subprocess.run(["ninja", "-j", str(num_procs), "install"], cwd=build_dir,
-                           check=True, stdout=o, stderr=e)
+            subprocess.run(
+                ["ninja", "-j", str(num_procs), "install"],
+                cwd=build_dir,
+                check=True,
+                stdout=o,
+                stderr=e,
+            )
     except subprocess.CalledProcessError:
         log.error("LLVM ninja FAILED")
-        return ctx.copy_with(build_passed=False,
-                             fix_errors=[str(ninja_log), str(ninja_err)])
+        return ctx.copy_with(
+            build_passed=False, fix_errors=[str(ninja_log), str(ninja_err)]
+        )
 
     fc = build_dir / "bin" / "FileCheck"
     if fc.exists():
-        import shutil; shutil.copy2(fc, llvm_install / "bin" / "FileCheck")
+        import shutil
+
+        shutil.copy2(fc, llvm_install / "bin" / "FileCheck")
 
     # Regenerate patch if AI fix modified the source
     if ctx.retry_count > 0:
@@ -163,12 +186,19 @@ def _build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
 # Triton-Ascend
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_triton(ctx: WorkflowContext, config: TAConfig, clean: bool = False,
-                  python_exe: str = "python3") -> WorkflowContext:
+
+def _build_triton(
+    ctx: WorkflowContext,
+    config: TAConfig,
+    clean: bool = False,
+    python_exe: str = "python3",
+) -> WorkflowContext:
     """Build triton-ascend. Pure build — no retry logic."""
     ascend_path = Path(ctx.triton_ascend_path)
     llvm_install = WORKSPACE_DIR / "llvm-install"
-    llvm_prefix = config.llvm_install_prefix or (str(llvm_install) if llvm_install.exists() else "")
+    llvm_prefix = config.llvm_install_prefix or (
+        str(llvm_install) if llvm_install.exists() else ""
+    )
 
     if clean:
         build_dir_path = ascend_path / "build"
@@ -196,18 +226,29 @@ def _build_triton(ctx: WorkflowContext, config: TAConfig, clean: bool = False,
     log.section("Build Triton-Ascend")
     log.info(f"Running: {python_exe} setup.py install")
     with open(build_log, "w") as o, open(build_err, "w") as e:
-        proc = subprocess.run([python_exe, "setup.py", "install"], cwd=ascend_path,
-                              env={**os.environ, **build_env}, stdout=o, stderr=e)
+        proc = subprocess.run(
+            [python_exe, "setup.py", "install"],
+            cwd=ascend_path,
+            env={**os.environ, **build_env},
+            stdout=o,
+            stderr=e,
+        )
     passed = proc.returncode == 0
 
-    result = {"all_passed": passed, "steps": [{"step": "setup_py_install",
-                "passed": passed, "exit_code": proc.returncode}]}
+    result = {
+        "all_passed": passed,
+        "steps": [
+            {"step": "setup_py_install", "passed": passed, "exit_code": proc.returncode}
+        ],
+    }
     (step_dir / BUILD_RESULT_FILE).write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
     if not passed:
         log.error("Build FAILED")
-        return ctx.copy_with(build_passed=False,
-                             fix_errors=[str(build_log), str(build_err)])
+        return ctx.copy_with(
+            build_passed=False, fix_errors=[str(build_log), str(build_err)]
+        )
     log.status(True, "Build passed")
     return ctx.copy_with(build_passed=True)

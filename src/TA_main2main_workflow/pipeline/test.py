@@ -1,4 +1,5 @@
 """Pipeline step: Run pytest unit tests on Ascend NPU with retry/fix loop."""
+
 from __future__ import annotations
 import json, os, shutil, subprocess, time, xml.etree.ElementTree as ET
 from pathlib import Path
@@ -31,7 +32,9 @@ def test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     return ctx.copy_with(test_passed=False)
 
 
-def _run_pytest(ctx: WorkflowContext, config: TAConfig, python_exe: str = "") -> WorkflowContext:
+def _run_pytest(
+    ctx: WorkflowContext, config: TAConfig, python_exe: str = ""
+) -> WorkflowContext:
     """Execute pytest and return updated ctx with test_passed + fix_errors."""
     ascend_path = Path(ctx.triton_ascend_path)
     test_log_dir = WORKSPACE_DIR / "test-logs"
@@ -46,7 +49,11 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig, python_exe: str = "") ->
 
     junit_xml = test_log_dir / "pytest-junit.xml"
     pytest_bin = shutil.which("pytest")
-    cmd = [pytest_bin, str(test_dir_path)] if pytest_bin else [python_exe, "-m", "pytest", str(test_dir_path)]
+    cmd = (
+        [pytest_bin, str(test_dir_path)]
+        if pytest_bin
+        else [python_exe, "-m", "pytest", str(test_dir_path)]
+    )
     cmd += ["-n", str(config.test_procs), f"--junitxml={junit_xml}"]
 
     log.section("Run Tests")
@@ -69,17 +76,30 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig, python_exe: str = "") ->
             root = tree.getroot()
             suites = [root] if root.tag != "testsuites" else root.findall("testsuite")
             for s in suites:
-                tp += int(s.get("tests", 0)); pf += int(s.get("failures", 0)); pe += int(s.get("errors", 0))
-        except Exception: pass
+                tp += int(s.get("tests", 0))
+                pf += int(s.get("failures", 0))
+                pe += int(s.get("errors", 0))
+        except Exception:
+            pass
 
-    passed = (pf == 0 and pe == 0)
-    summary = {"exit_code": 0 if passed else 1, "passed": passed, "test_log": str(junit_xml),
-               "test_dir": str(test_dir_path), "passed_count": tp, "failed_count": pf, "error_count": pe}
+    passed = pf == 0 and pe == 0
+    summary = {
+        "exit_code": 0 if passed else 1,
+        "passed": passed,
+        "test_log": str(junit_xml),
+        "test_dir": str(test_dir_path),
+        "passed_count": tp,
+        "failed_count": pf,
+        "error_count": pe,
+    }
     (WORKSPACE_DIR / TEST_RESULT_FILE).write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
     if not passed:
         log.error(f"Tests FAILED ({pf} failed, {pe} errors)")
-        return ctx.copy_with(test_passed=False, fix_errors=[str(WORKSPACE_DIR / TEST_RESULT_FILE)])
+        return ctx.copy_with(
+            test_passed=False, fix_errors=[str(WORKSPACE_DIR / TEST_RESULT_FILE)]
+        )
     log.status(True, f"All tests passed ({tp} passed)")
     return ctx.copy_with(test_passed=True)

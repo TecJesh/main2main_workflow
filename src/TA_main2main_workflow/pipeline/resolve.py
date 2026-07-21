@@ -1,4 +1,5 @@
 """Pipeline step 5: AI resolve merge conflicts."""
+
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from TA_main2main_workflow.utils import STEPS_DIR, WORKSPACE_DIR
 log = get_logger(__name__)
 _REF = str(Path(__file__).parent.parent / "reference")
 
+
 def resolve_conflicts(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     if config.skip_ai_analysis:
         log.warning("SKIP_AI_ANALYSIS=true — cannot resolve conflicts")
@@ -26,20 +28,46 @@ def resolve_conflicts(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
     log.header("AI Conflict Resolution")
     for attempt in range(1, config.max_retries + 1):
         log.step(attempt, config.max_retries, "AI conflict resolution")
-        cf = [f for f in run_git(ascend_path, "diff", "--name-only", "--diff-filter=U").strip().splitlines() if f]
+        cf = [
+            f
+            for f in run_git(ascend_path, "diff", "--name-only", "--diff-filter=U")
+            .strip()
+            .splitlines()
+            if f
+        ]
         if not cf:
             log.status(True, "Already resolved!")
             break
         try:
-            run_opencode_adapter({"step_id": f"{step_id}-conflict-{attempt}", "step_dir": str(step_dir), "conflict_dir": str(step_dir), "ascend_path": str(ascend_path), "triton_path": ctx.triton_ascend_path, "reference_dir": _REF, "mode": "conflict", "error_logs": json.dumps(cf, ensure_ascii=False), "target_commit": ctx.target_commit, "step_index": f"{ctx.current_step+1}/{ctx.total_steps}"})
+            run_opencode_adapter(
+                {
+                    "step_id": f"{step_id}-conflict-{attempt}",
+                    "step_dir": str(step_dir),
+                    "conflict_dir": str(step_dir),
+                    "ascend_path": str(ascend_path),
+                    "triton_path": ctx.triton_ascend_path,
+                    "reference_dir": _REF,
+                    "mode": "conflict",
+                    "error_logs": json.dumps(cf, ensure_ascii=False),
+                    "target_commit": ctx.target_commit,
+                    "step_index": f"{ctx.current_step + 1}/{ctx.total_steps}",
+                }
+            )
         except Exception as e:
             log.error(f"AI call failed: {e}")
-            if attempt < config.max_retries: continue
+            if attempt < config.max_retries:
+                continue
             break
         if not run_git(ascend_path, "diff", "--name-only", "--diff-filter=U").strip():
             log.status(True, f"Resolved (attempt {attempt})")
             break
-        cf_remain = [f for f in run_git(ascend_path, "diff", "--name-only", "--diff-filter=U").strip().splitlines() if f]
+        cf_remain = [
+            f
+            for f in run_git(ascend_path, "diff", "--name-only", "--diff-filter=U")
+            .strip()
+            .splitlines()
+            if f
+        ]
         log.status(False, f"{len(cf_remain)} conflict(s) remain")
     else:
         log.error(f"Failed after {config.max_retries} attempts")
@@ -53,4 +81,4 @@ def resolve_conflicts(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
     except Exception:
         pass
     run_pre_ci_check(ascend_path, step_id="conflict-resolution")
-    return ctx.copy_with(merge_has_conflicts=False, conflict_files_resolved=ctx.conflict_files_resolved + len(ctx.conflict_files))
+    return ctx.copy_with(merge_has_conflicts=False)

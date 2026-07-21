@@ -29,6 +29,7 @@ from typing import Any
 # Custom logger class
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TALogger(logging.getLoggerClass()):
     """Logger with extra formatting methods for workflow output."""
 
@@ -84,7 +85,9 @@ class TALogger(logging.getLoggerClass()):
         self.info(f"  │ Time:     {ts}")
         self.info(f"  ╰──────────────────────────────────────────────────────")
 
-    def ai_result(self, ok: bool, modified_files: list[str] = (), summary: str = "") -> None:
+    def ai_result(
+        self, ok: bool, modified_files: list[str] = (), summary: str = ""
+    ) -> None:
         icon = "✔" if ok else "✘"
         self.info(f"\n  ╭─ AI Result ───────────────────────────────────────────")
         self.info(f"  │ Status: {icon} {'Success' if ok else 'Failed'}")
@@ -111,7 +114,7 @@ class TALogger(logging.getLoggerClass()):
         self.info(f"{'═' * 72}")
 
     def elapsed(self, seconds: float) -> None:
-        self.info(f"\n  ⏱  Total elapsed: {seconds:.1f}s ({seconds/60:.1f}m)")
+        self.info(f"\n  ⏱  Total elapsed: {seconds:.1f}s ({seconds / 60:.1f}m)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -126,9 +129,7 @@ def get_logger(name: str) -> TALogger:
     log = logging.getLogger(name)
     if not log.handlers:
         handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            logging.Formatter("%(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
         log.addHandler(handler)
         log.setLevel(logging.INFO)
         log.propagate = False

@@ -1,4 +1,5 @@
 """AscendNPU-IR submodule helpers."""
+
 from __future__ import annotations
 import os, subprocess
 from pathlib import Path
@@ -10,17 +11,22 @@ _ASCENDNPU_IR_SUBMODULE = "third_party/ascend/AscendNPU-IR"
 _ASCENDNPU_IR_REMOTE = "https://github.com/TecJesh/AscendNPU-IR.git"
 _ASCENDNPU_IR_REMOTE_NAME = "npuir-push"
 
+
 def _submodule_path(repo: Path) -> Path:
     return repo / _ASCENDNPU_IR_SUBMODULE
 
+
 def submodule_has_changes(repo: Path) -> bool:
     sm = _submodule_path(repo)
-    if not sm.exists(): return False
+    if not sm.exists():
+        return False
     return bool(run_git_no_check(sm, "status", "--porcelain").stdout.strip())
+
 
 def commit_submodule(repo: Path, commit_msg: str) -> bool:
     sm = _submodule_path(repo)
-    if not sm.exists(): return False
+    if not sm.exists():
+        return False
     if not submodule_has_changes(repo):
         log.info("[submodule] No changes")
         return False
@@ -28,16 +34,26 @@ def commit_submodule(repo: Path, commit_msg: str) -> bool:
     try:
         run_git(sm, "add", "-A")
         run_git(sm, "commit", "-s", "-m", commit_msg)
-        log.status(True, f"Committed AscendNPU-IR: {run_git(sm, 'rev-parse', 'HEAD').strip()[:12]}")
+        log.status(
+            True,
+            f"Committed AscendNPU-IR: {run_git(sm, 'rev-parse', 'HEAD').strip()[:12]}",
+        )
         return True
     except subprocess.CalledProcessError as e:
-        if "nothing to commit" in str(getattr(e, 'stderr', '')).lower():
+        if "nothing to commit" in str(getattr(e, "stderr", "")).lower():
             log.info("[submodule] Nothing to commit")
             return False
         log.warning(f"Could not commit submodule: {e}")
         return False
 
-def push_submodule(repo: Path, branch: str, remote: str = _ASCENDNPU_IR_REMOTE, remote_name: str = _ASCENDNPU_IR_REMOTE_NAME, force: bool = False) -> bool:
+
+def push_submodule(
+    repo: Path,
+    branch: str,
+    remote: str = _ASCENDNPU_IR_REMOTE,
+    remote_name: str = _ASCENDNPU_IR_REMOTE_NAME,
+    force: bool = False,
+) -> bool:
     sm = _submodule_path(repo)
     if not sm.exists():
         log.warning("[submodule] Not found")
@@ -52,11 +68,28 @@ def push_submodule(repo: Path, branch: str, remote: str = _ASCENDNPU_IR_REMOTE, 
         try:
             url = run_git(sm, "remote", "get-url", remote_name).strip()
             if url.startswith("https://") and "x-access-token" not in url:
-                clean = url.replace("https://", "", 1).split("@", 1)[-1] if "@" in url else url.replace("https://", "", 1)
-                run_git(sm, "remote", "set-url", remote_name, f"https://x-access-token:{gh_token}@{clean}")
-        except Exception: pass
+                clean = (
+                    url.replace("https://", "", 1).split("@", 1)[-1]
+                    if "@" in url
+                    else url.replace("https://", "", 1)
+                )
+                run_git(
+                    sm,
+                    "remote",
+                    "set-url",
+                    remote_name,
+                    f"https://x-access-token:{gh_token}@{clean}",
+                )
+        except Exception:
+            pass
     try:
-        run_git(sm, "push", "--force-with-lease" if not force else "--force", remote_name, branch)
+        run_git(
+            sm,
+            "push",
+            "--force-with-lease" if not force else "--force",
+            remote_name,
+            branch,
+        )
         log.status(True, f"Pushed AscendNPU-IR branch '{branch}'")
         return True
     except Exception as e:

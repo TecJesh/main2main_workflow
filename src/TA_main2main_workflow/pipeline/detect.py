@@ -17,7 +17,8 @@ from pathlib import Path
 from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils import (
-    DETECT_FILE, WORKSPACE_DIR,
+    DETECT_FILE,
+    WORKSPACE_DIR,
 )
 from TA_main2main_workflow.utils.git import run_git
 from TA_main2main_workflow.utils.logging import get_logger
@@ -113,14 +114,22 @@ def _detect_commits(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 # Internal helpers (formerly in scripts/detect_commits.py)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def _list_upstream_commits(repo: Path, merge_base: str, target: str) -> list[dict]:
-    output = run_git(repo, "log", "--reverse", "--format=%H%x1f%s", f"{merge_base}..{target}")
+    output = run_git(
+        repo, "log", "--reverse", "--format=%H%x1f%s", f"{merge_base}..{target}"
+    )
     commits: list[dict] = []
     for line in output.strip().splitlines():
         if not line.strip():
             continue
         parts = line.split("\x1f", 1)
-        commits.append({"sha": parts[0].strip(), "subject": parts[1].strip() if len(parts) > 1 else ""})
+        commits.append(
+            {
+                "sha": parts[0].strip(),
+                "subject": parts[1].strip() if len(parts) > 1 else "",
+            }
+        )
     return commits
 
 
@@ -145,5 +154,3 @@ def _count_changed_lines(repo: Path, merge_base: str, target: str) -> int:
 def _changed_files(repo: Path, merge_base: str, target: str) -> list[str]:
     output = run_git(repo, "diff", "--name-only", merge_base, target)
     return sorted(f for f in output.strip().splitlines() if f)
-
-
