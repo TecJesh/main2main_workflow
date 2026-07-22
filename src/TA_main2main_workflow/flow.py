@@ -1866,6 +1866,67 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 return True
         return False
 
+    def _detect_oom_in_tests(self) -> bool:
+        """Check whether test failures include NPU/GPU OOM errors.
+
+        OOM errors are transient resource exhaustion — they should trigger
+        a full test-suite rerun with reduced concurrency instead of an AI
+        code fix.
+        """
+        test_log_dir = WORKSPACE_DIR / "test-logs"
+        oom_markers = [
+            "out of memory",
+        ]
+        # Scan .log and .xml files (pytest JUnit XML captures test failure messages)
+        if test_log_dir.exists():
+            try:
+                for log_file in test_log_dir.rglob("*"):
+                    if log_file.suffix not in (".log", ".xml"):
+                        continue
+                    content = log_file.read_text(encoding="utf-8", errors="replace")
+                    for marker in oom_markers:
+                        if marker.lower() in content.lower():
+                            return True
+            except Exception:
+                pass
+        # Also check test result JSON
+        test_result = WORKSPACE_DIR / TEST_RESULT_FILE
+        if test_result.exists():
+            try:
+                data = json.loads(test_result.read_text(encoding="utf-8"))
+                error_msg = json.dumps(data)  # search the whole JSON
+                for marker in oom_markers:
+                    if marker.lower() in error_msg.lower():
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def _rerun_tests_reduced_concurrency(self, ascend_path: Path, max_reruns: int = 5) -> bool | None:
+        """Rerun tests with halved concurrency on OOM, restoring it after.
+
+        Returns True if tests pass, None if SKIP_E2E_TEST, False if still failing.
+        """
+        original_procs = self.state.num_procs
+        reduced = max(1, original_procs // 2)
+        self.state.num_procs = reduced
+        print_warn(
+            f"Reducing pytest concurrency: {original_procs} → {reduced} "
+            f"(to avoid OOM)")
+        try:
+            for rerun in range(1, max_reruns + 1):
+                print_info(f"OOM rerun {rerun}/{max_reruns} (procs={reduced})")
+                result = self._do_test(ascend_path)
+                if result is None or result:
+                    return result
+                if not self._detect_oom_in_tests():
+                    print_info("OOM resolved — remaining failures are not memory-related")
+                    return False
+            return False
+        finally:
+            self.state.num_procs = original_procs
+            print_info(f"Restored pytest concurrency to {original_procs}")
+
     def _do_ai_fix(self, ascend_path: Path, step_dir: Path, attempt: int,
                    ascend_npu_ir_fix: bool = False) -> bool:
         """AI fix bug: invoke opencode/claude to fix build/test failures.
@@ -3134,6 +3195,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """Test + AI fix loop with embedded IR patch retry.
 
         Runs tests, classifies failures (IR vs code), and fixes them:
+        - OOM errors → automatic full-suite rerun (up to 5), no AI fix
         - Code issues → AI fix → rebuild → retest (up to max_retries)
         - IR issues → regenerate patches → rebuild LLVM → build TA → retest
           (up to MAX_IR_RETRIES within this test loop)
@@ -3141,6 +3203,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         Returns True when all tests pass, False if IR retries exhausted.
         """
         _MAX_IR_RETRIES = 3
+        _MAX_OOM_RERUNS = 5
         step_id = step["id"]
         step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
         step_dir.mkdir(parents=True, exist_ok=True)
@@ -3157,6 +3220,19 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             if test_result:
                 print_status(True, f"All tests pass for {step_id}")
                 return True
+
+            # ── OOM detection: rerun with reduced concurrency, skip AI ──
+            if self._detect_oom_in_tests():
+                print_warn("NPU/CUDA OOM detected — rerunning with reduced concurrency")
+                oom_result = self._rerun_tests_reduced_concurrency(
+                    ascend_path, max_reruns=_MAX_OOM_RERUNS)
+                if oom_result is None or oom_result:
+                    return True if oom_result else None  # SKIP or pass
+                if not self._detect_oom_in_tests():
+                    print_info("OOM resolved — classifying remaining failures")
+                else:
+                    print_error(f"OOM persists after {_MAX_OOM_RERUNS} reruns")
+                    return False
 
             # ── Classify failures: IR vs code ──
             print_warn(f"Tests failed — classifying failures (IR vs code)...")
@@ -3528,6 +3604,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     def _do_test_and_fix_loop(self) -> bool:
         """Run tests + AI-fix loop for the current step.
 
+        OOM errors trigger automatic full-suite reruns (up to 5) without
+        consuming AI fix attempts.  Only real test failures go to AI fix.
+
         Returns True if all tests pass, False on exhaustion.
         """
         ascend_path = Path(self.state.triton_ascend_path)
@@ -3537,6 +3616,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
         step_dir.mkdir(parents=True, exist_ok=True)
 
+        _MAX_OOM_RERUNS = 5
         test_passed = False
 
         for attempt in range(self.state.max_retries + 1):
@@ -3545,6 +3625,27 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
             # AI fix test failures (skip on first round)
             if is_fix_attempt:
+                # ── OOM detection: rerun with reduced concurrency, skip AI ──
+                if self._detect_oom_in_tests():
+                    print_warn("NPU OOM detected — rerunning with reduced concurrency")
+                    oom_result = self._rerun_tests_reduced_concurrency(
+                        ascend_path, max_reruns=_MAX_OOM_RERUNS)
+                    if oom_result is None:
+                        test_passed = True
+                        break
+                    if oom_result:
+                        test_passed = True
+                        break
+                    if not self._detect_oom_in_tests():
+                        print_info("OOM resolved — remaining failures need AI fix")
+                    else:
+                        print_error(
+                            f"OOM persists after {_MAX_OOM_RERUNS} reruns — "
+                            f"resource issue, cannot continue")
+                        self.state.summary_rows.append(
+                            ("Tests", "FAIL", f"OOM after {_MAX_OOM_RERUNS} reruns"))
+                        return False
+
                 print_header(f"Fix Attempt {attempt}/{self.state.max_retries} (test)")
                 self.state.fix_errors = self._collect_test_error_logs()
                 if self.state.fix_errors:
