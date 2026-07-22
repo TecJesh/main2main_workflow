@@ -589,7 +589,7 @@ def run_tests(
         print(f"  junitxml: {junit_xml}")
         print(f"  (stdout inherits terminal — no pipe, no tee, no capture)")
 
-        # Run pytest with a 1000s timeout.
+        # Run pytest with a 3000s timeout.
         _start = time.time()
         _timed_out = False
         try:
