@@ -100,6 +100,35 @@ or references.
 
 ---
 
+## MLIR Op Rename: ToBufferOp ↔ ToMemrefOp
+
+**Error:** `error: 'ToBufferOp' is not a member of 'mlir::bufferization'`
+or `error: unknown type name 'ToBufferOp'`
+
+**Cause:** LLVM renamed `bufferization::ToBufferOp` back to
+`bufferization::ToMemrefOp` (the direction depends on the LLVM version).
+
+**Fix — when compiler cannot find ToBufferOp (→ use ToMemrefOp):**
+```bash
+# Find all references
+grep -rn "ToBufferOp" third_party/ascend/ lib/Target/Ascend/ \
+  --include="*.cpp" --include="*.h"
+```
+Replace all `bufferization::ToBufferOp` with `bufferization::ToMemrefOp`.
+
+**Fix — when compiler cannot find ToMemrefOp (→ use ToBufferOp):**
+Replace all `bufferization::ToMemrefOp` with `bufferization::ToBufferOp`.
+
+Also check for `using` aliases and `isa<>` / `dyn_cast<>` templates:
+```cpp
+// Old
+isa<bufferization::ToBufferOp>(op)
+// New
+isa<bufferization::ToMemrefOp>(op)
+```
+
+---
+
 ## Backend Registration Change
 
 **Error:** Ascend backend not found, device initialization failure, or

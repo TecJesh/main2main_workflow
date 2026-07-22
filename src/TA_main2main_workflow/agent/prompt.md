@@ -172,6 +172,23 @@ The active mode is: {mode}
     - third_party/nvidia/ changes → Ascend third_party/ascend/ may need matching updates
     - CMakeLists.txt changes → Ascend CMake configuration may need adjusting
 
+  ── TEST-FAILURE-ONLY: LLVM/MLIR Op name swap in generated IR ──────────
+
+  ⚠️  APPLY ONLY WHEN FIXING TEST FAILURES (pytest / unit-test errors).
+  Do NOT apply this during compile-error fixing — build errors caused
+  by missing ToBufferOp/ToMemrefOp should be fixed by code adaptation
+  (see {reference_dir}/02-llvm-version-adaptation-and-compile-fixes.md).
+
+  bufferization::ToMemrefOp ↔ bufferization::ToBufferOp:
+    These two names have swapped across LLVM versions.  If test logs
+    show the compiler cannot recognize `ToBufferOp` in generated IR,
+    the target LLVM uses `ToMemrefOp`.  Fix: replace ALL occurrences
+    of the unrecognized Op name with the recognized one in the Ascend
+    backend (third_party/ascend/ and lib/Target/Ascend/).
+
+    grep -rn "ToBufferOp\|ToMemrefOp" {ascend_path}/third_party/ascend/ \
+      {ascend_path}/lib/Target/Ascend/ --include="*.cpp" --include="*.h"
+
 ━━━ REPOSITORIES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   triton-ascend: {ascend_path}
@@ -582,7 +599,46 @@ The active mode is: {mode}
          one atomic change
        - Cover every OP in changes_report — do NOT leave any out
 
-  Completeness requirement: the generated patch MUST be as complete as
+  ═══ KNOWN IR PATCH PATTERNS ═══════════════════════════════════════════
+
+  Apply these specific fixes when the corresponding OP appears in
+  changes_report.json with needs_patch: true.
+
+  ── empty-properties / assume-op {} rejection ─────────────────────────
+
+  Symptom: the old NPU-IR compiler rejects IR containing `<OP> <{ }>`
+  or `<OP> {}` (empty property dict) — e.g. `llvm.assume {}` or
+  similar ops whose TableGen definition gained `useCustomPropertiesEncoding`
+  or whose printer now emits an inline property dict.
+
+  Fix: in the affected OP's custom printer (print() method in the
+  corresponding .cpp file under mlir/lib/Dialect/), replace the
+  printGenericOp block that emits inline attributes:
+
+    // BEFORE (new LLVM — emits empty dict that old parser rejects):
+    void <OpName>::print(OpAsmPrinter &p) {{
+      p.printGenericOp(*this);    // ← emits attributes inline
+    }}
+
+    // AFTER (backward-compatible — filters empty properties):
+    void <OpName>::print(OpAsmPrinter &p) {{
+      SmallVector<NamedAttribute, 4> filtered;
+      for (NamedAttribute attr : (*this)->getAttrs()) {{
+        if (auto prop = dyn_cast<::mlir::Properties>(attr.getValue())) {{
+          if (prop.isEmpty()) continue;  // skip empty properties
+        }}
+        filtered.push_back(attr);
+      }}
+      p << " ";
+      p.printAttribute(DictionaryAttr::get(getContext(), filtered));
+    }}
+
+  If the OP uses `printGenericOp` directly (no custom printer), you
+  must ADD a custom printer that filters out empty properties, AND
+  set `let hasCustomAssemblyFormat = 1;` / remove `let assemblyFormat`
+  in the .td file.
+
+  ─────────────────────────────────────────────────────────────────────
   possible. Missing even one OP will cause the outer loop to retry
   (costly: LLVM rebuild takes ~2 hours). Review changes_report
   thoroughly before writing the patch — every `needs_patch: true` OP
