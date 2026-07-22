@@ -604,12 +604,14 @@ The active mode is: {mode}
   Apply these specific fixes when the corresponding OP appears in
   changes_report.json with needs_patch: true.
 
-  ── empty-properties / assume-op {} rejection ─────────────────────────
+  ── empty-properties / assume-op rejection ─────────────────────────────
 
-  Symptom: the old NPU-IR compiler rejects IR containing `<OP> <{ }>`
-  or `<OP> {}` (empty property dict) — e.g. `llvm.assume {}` or
-  similar ops whose TableGen definition gained `useCustomPropertiesEncoding`
-  or whose printer now emits an inline property dict.
+  Symptom: the old NPU-IR compiler rejects IR containing an OP followed
+  by an empty inline property dict (e.g. the new LLVM prints the OP
+  with a trailing empty dict while the old parser only expects the OP
+  name without properties).  This commonly affects ops whose TableGen
+  definition gained `useCustomPropertiesEncoding` or whose printer now
+  emits an inline property dict.
 
   Fix: in the affected OP's custom printer (print() method in the
   corresponding .cpp file under mlir/lib/Dialect/), replace the
@@ -637,6 +639,19 @@ The active mode is: {mode}
   must ADD a custom printer that filters out empty properties, AND
   set `let hasCustomAssemblyFormat = 1;` / remove `let assemblyFormat`
   in the .td file.
+
+  ── assume-op specific fix ─────────────────────────────────────────────
+
+  This fix applies ONLY to `llvm.assume` / `LLVM::AssumeOp`.  Do NOT
+  apply it to any other OP — other ops have their own handling.
+
+  If `LLVM::AssumeOp`'s custom printer has these three lines:
+    os << " <";
+    Impl::printAttribute(prop);
+    os << '>';
+  Simply comment them out (no replacement needed).  This suppresses
+  the inline attribute printing that produces the empty dict the old
+  parser cannot handle.
 
   ─────────────────────────────────────────────────────────────────────
   possible. Missing even one OP will cause the outer loop to retry
