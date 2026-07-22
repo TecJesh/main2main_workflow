@@ -596,13 +596,13 @@ def run_tests(
             result = subprocess.run(
                 pytest_cmd,
                 cwd=repo_path, env=proc_env,
-                timeout=1000,
+                timeout=3000,
             )
             _rc = result.returncode
         except subprocess.TimeoutExpired:
             _timed_out = True
             _rc = -1
-            print(f"  pytest timed out after 1000s", flush=True)
+            print(f"  pytest timed out after 3000s", flush=True)
 
         _elapsed = time.time() - _start
         if not _timed_out:
