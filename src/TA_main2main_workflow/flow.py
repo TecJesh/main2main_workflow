@@ -689,24 +689,25 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                     return UpgradeFailed
 
             # ── Step C: IR patch if LLVM hash changed in this step ──
+            # Covers LLVM rebuild + TA build + test+fix (with IR retry embedded)
             if reason == "llvm_version":
                 print_section(f"LLVM Version Change in {step_id} — IR Patch Pipeline")
                 if not self._do_per_step_ir_patch(step):
                     self.state.final_status = UpgradeFailed
                     return UpgradeFailed
+            else:
+                # ── Step D: Build + AI fix compile errors ──
+                print_section(f"Build & Fix — {step_id}")
+                if not self._do_build_and_fix_loop():
+                    self._backup_code_state(f"failed-build-{step_id}")
+                    self.state.final_status = UpgradeFailed
+                    return UpgradeFailed
 
-            # ── Step D: Build + AI fix compile errors ──
-            print_section(f"Build & Fix — {step_id}")
-            if not self._do_build_and_fix_loop():
-                self._backup_code_state(f"failed-build-{step_id}")
-                self.state.final_status = UpgradeFailed
-                return UpgradeFailed
-
-            # ── Step E: Test + AI fix test failures ──
-            if not self._do_test_and_fix_loop():
-                self._backup_code_state(f"failed-test-{step_id}")
-                self.state.final_status = UpgradeFailed
-                return UpgradeFailed
+                # ── Step E: Test + AI fix test failures ──
+                if not self._do_test_and_fix_loop():
+                    self._backup_code_state(f"failed-test-{step_id}")
+                    self.state.final_status = UpgradeFailed
+                    return UpgradeFailed
 
             # ── Step F: Commit step progress ──
             self._do_commit_step(step)
@@ -2935,42 +2936,126 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _do_per_step_ir_patch(self, step: dict) -> bool:
-        """Per-step IR compatibility patch generation + LLVM rebuild.
+        """Per-step LLVM update pipeline: compile-error fix → IR patch → test.
 
         Called from _run_single_step_mode() when a step's merge included an
-        LLVM hash change.  Reuses the shared IR analysis / patch-generation
-        methods but adds a patch→rebuild retry loop specific to the
-        single-step context.
+        LLVM hash change.
 
         Pipeline:
-          1. Verify LLVM hash changed
-          2. Create llvm_change_analysis/<step_id>/ workspace
-          3. IR analysis → patch → apply → rebuild LLVM (max 3 iterations)
-          4. On patch failure: stash/drop, loop back for AI to fix
+          1. Build new LLVM (clean, no patches) + build TA + fix compile errors
+             — resolve all LLVM version-related build issues first.
+          2. IR OP analysis → IR change analysis → generate patches
+          3. Apply patches + rebuild LLVM + build TA
+          4. Test + AI fix loop:
+             - Code issues → AI fix → rebuild TA → retest
+             - IR issues → regenerate patches → rebuild LLVM → build TA → retest
         """
         step_id = step["id"]
+        ascend_path = Path(self.state.triton_ascend_path)
 
         # ── Guard: check LLVM hash actually changed ──
         if not self._llvm_hash_did_change():
             print_info(f"[{step_id}] LLVM hash unchanged — skipping IR patch")
             return True
 
+        # Read target LLVM hash
+        llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
+        target_llvm_hash = ""
+        if llvm_hash_file.exists():
+            target_llvm_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+
         # ── Create per-step analysis workspace ──
         analysis_dir = WORKSPACE_DIR / LLVM_CHANGE_ANALYSIS_DIR / step_id
         analysis_dir.mkdir(parents=True, exist_ok=True)
         print_key_value("IR analysis dir", str(analysis_dir))
 
-        # ── IR analysis → patch → rebuild loop ──
+        from TA_main2main_workflow.scripts.build_test import build_llvm
+        llvm_install = Path(os.path.expanduser(
+            os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")))
+
+        # ═══════════════════════════════════════════════════════════════
+        # Phase 1: Build new LLVM (clean, no patches) + fix TA compile errors
+        # ═══════════════════════════════════════════════════════════════
+        print_header(f"Phase 1: Build new LLVM + Fix TA Compile Errors — {step_id}")
+        print_key_value("Baseline LLVM", _ASCEND_BASELINE_LLVM_HASH[:12])
+        print_key_value("Target LLVM", target_llvm_hash[:12])
+
+        # 1a. Clean llvm-project and checkout target commit
+        if not self._ensure_llvm_workspace_clean(reason="pre-ir-build"):
+            print_error("Cannot clean llvm-project workspace")
+            return False
+        try:
+            subprocess.run(
+                ["git", "checkout", target_llvm_hash],
+                cwd=str(_llvm_project_path()),
+                capture_output=True, text=True, timeout=120,
+            )
+        except Exception as e:
+            print_error(f"Failed to checkout target LLVM: {e}")
+            return False
+
+        # 1b. Build LLVM (no IR patches)
+        print_info("Building LLVM at target commit (no IR patches)...")
+        try:
+            llvm_prefix = build_llvm(
+                _llvm_project_path(), llvm_install,
+                required_hash=target_llvm_hash,
+            )
+            if llvm_prefix and not self.state.llvm_prefix:
+                self.state.llvm_prefix = llvm_prefix
+            print_status(True, "Baseline LLVM build complete (no IR patches)")
+        except Exception as e:
+            print_error(f"Baseline LLVM build failed: {e}")
+            return False
+
+        # 1c. Build TA and fix compile errors (no IR patches yet)
+        print_info("Building Triton-Ascend with new LLVM (no IR patches)...")
+        build_ok = self._do_build(ascend_path, clean=True)
+        if not build_ok:
+            if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
+                return False
+            print_warn("Build failed with new LLVM — entering compile-error fix loop")
+            for fix_attempt in range(1, self.state.max_retries + 1):
+                self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
+                self.state.build_fix_count += 1
+                is_npu_ir = self._detect_ascend_npu_ir_errors()
+                print_warn(
+                    f"Compile error fix attempt {fix_attempt}/{self.state.max_retries}"
+                    f"{' (AscendNPU-IR)' if is_npu_ir else ''}")
+                self._do_ai_fix(ascend_path, WORKSPACE_DIR, fix_attempt,
+                                ascend_npu_ir_fix=is_npu_ir)
+                if self._do_build(ascend_path, clean=False):
+                    build_ok = True
+                    break
+            if not build_ok:
+                print_error(
+                    f"TA build still failing after {self.state.max_retries} fixes "
+                    f"— cannot proceed to IR patch generation")
+                self.state.summary_rows.append(
+                    ("Phase 1", "FATAL", "compile errors not resolved"))
+                return False
+
+        print_status(True, "TA builds successfully with new LLVM — compile errors resolved")
+        self.state.summary_rows.append(
+            ("Phase 1", "PASS", "TA builds (no IR patches)"))
+
+        # ═══════════════════════════════════════════════════════════════
+        # Phase 2: IR patch generation → apply → rebuild → test + fix loop
+        # ═══════════════════════════════════════════════════════════════
+        print_header(f"Phase 2: IR Patch Generation & Test — {step_id}")
+        self._print_workspace_info("Phase 2: IR Patch Loop")
+        print_key_value("Max IR iterations", str(self.state.ir_max_iterations))
+
         for iteration in range(self.state.ir_max_iterations):
             self.state.ir_patch_iteration = iteration
             print_header(
-                f"Per-Step IR Patch — {step_id} "
+                f"IR Patch Loop — {step_id} "
                 f"(iter {iteration + 1}/{self.state.ir_max_iterations})"
             )
 
-            # [3.1 + 3.2] Analysis (first iteration only for OP scan)
+            # [2.1 + 2.2] OP analysis (first iteration only)
             if iteration == 0:
-                print_info("First iteration — running full OP analysis pipeline")
+                print_info("Running full OP analysis pipeline...")
                 if not self._do_ir_op_analysis():
                     return False
                 if not self._do_ir_change_analysis():
@@ -2980,42 +3065,147 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 if not self._do_ir_change_analysis():
                     return False
 
-            # [3.3] Generate patches
+            # [2.3] Generate patches
             if not self._do_ir_generate_patches():
                 return False
 
-            # [3.4 + 3.5] Apply patches + rebuild LLVM (with retry for patch failures)
+            # [2.4 + 2.5] Apply patches + rebuild LLVM (retry on patch failure)
             rebuild_ok = False
             for patch_attempt in range(IR_MAX_ITERATIONS):
                 print_info(
-                    f"Patch apply attempt {patch_attempt + 1}/{IR_MAX_ITERATIONS}"
-                )
+                    f"Patch apply attempt {patch_attempt + 1}/{IR_MAX_ITERATIONS}")
                 if self._do_ir_apply_patches_and_rebuild():
                     rebuild_ok = True
                     break
-                # Patch failed — stash/drop, let AI regenerate
                 print_warn(
                     f"LLVM rebuild failed (patch attempt {patch_attempt + 1}) — "
-                    f"will stash changes and retry patch generation"
-                )
+                    f"retrying patch generation")
                 self._stash_and_drop_llvm_patch()
                 if not self._do_ir_generate_patches():
                     break
 
-            if rebuild_ok:
-                print_status(True, f"IR patch + LLVM rebuild OK for {step_id}")
+            if not rebuild_ok:
+                print_warn(f"LLVM rebuild failed in iteration {iteration + 1}")
+                continue
+
+            print_status(True, f"IR patch + LLVM rebuild OK for {step_id}")
+
+            # Build TA with patched LLVM
+            print_info("Building Triton-Ascend with patched LLVM...")
+            build_ok = self._do_build(ascend_path, clean=(iteration == 0))
+            if not build_ok:
+                for fix_attempt in range(1, self.state.max_retries + 1):
+                    self.state.fix_errors = [str(WORKSPACE_DIR / BUILD_RESULT_FILE)]
+                    self.state.build_fix_count += 1
+                    is_npu_ir = self._detect_ascend_npu_ir_errors()
+                    print_warn(
+                        f"Build failed after IR patch — AI fix "
+                        f"{fix_attempt}/{self.state.max_retries}"
+                        f"{' (AscendNPU-IR)' if is_npu_ir else ''}")
+                    self._do_ai_fix(ascend_path, WORKSPACE_DIR, fix_attempt,
+                                    ascend_npu_ir_fix=is_npu_ir)
+                    if self._do_build(ascend_path, clean=False):
+                        build_ok = True
+                        break
+                if not build_ok:
+                    print_error(f"Build still failing after {self.state.max_retries} fixes")
+                    continue
+
+            # Test + fix loop (with IR retry embedded)
+            test_ok = self._do_test_and_fix_with_ir_retry(
+                step, ascend_path, iteration)
+            if test_ok:
                 self.state.ir_loop_details.append({
                     "step_id": step_id,
                     "iteration": iteration + 1,
-                    "result": "PASS",
+                    "result": "ALL_PASS",
                 })
                 return True
 
-            print_warn(f"IR patch iteration {iteration + 1} exhausted "
-                       f"— retrying outer loop")
+            print_warn(f"IR patch iteration {iteration + 1} — "
+                       f"IR issues remain, retrying outer loop")
 
         print_error(f"IR patch loop exhausted {self.state.ir_max_iterations} "
                     f"iterations for {step_id}")
+        return False
+
+    def _do_test_and_fix_with_ir_retry(
+            self, step: dict, ascend_path: Path, ir_iteration: int) -> bool:
+        """Test + AI fix loop with embedded IR patch retry.
+
+        Runs tests, classifies failures (IR vs code), and fixes them:
+        - Code issues → AI fix → rebuild → retest (up to max_retries)
+        - IR issues → regenerate patches → rebuild LLVM → build TA → retest
+          (up to MAX_IR_RETRIES within this test loop)
+
+        Returns True when all tests pass, False if IR retries exhausted.
+        """
+        _MAX_IR_RETRIES = 3
+        step_id = step["id"]
+        step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
+        step_dir.mkdir(parents=True, exist_ok=True)
+
+        ir_retries = 0
+        code_fix_attempt = 0
+
+        while ir_retries <= _MAX_IR_RETRIES and code_fix_attempt <= self.state.max_retries:
+            # ── Run tests ──
+            test_result = self._do_test(ascend_path)
+            if test_result is None:
+                # SKIP_E2E_TEST — treat as pass
+                return True
+            if test_result:
+                print_status(True, f"All tests pass for {step_id}")
+                return True
+
+            # ── Classify failures: IR vs code ──
+            print_warn(f"Tests failed — classifying failures (IR vs code)...")
+            has_ir_issues = self._do_ir_diagnose_failures()
+            if has_ir_issues:
+                ir_retries += 1
+                print_warn(
+                    f"IR compatibility issues detected "
+                    f"(IR retry {ir_retries}/{_MAX_IR_RETRIES}) — "
+                    f"regenerating IR patches...")
+                # Regenerate patches + apply + rebuild LLVM
+                if not self._do_ir_generate_patches():
+                    print_error("IR patch regeneration failed")
+                    return False
+                # Clean llvm workspace, apply patches, rebuild
+                for patch_attempt in range(IR_MAX_ITERATIONS):
+                    if self._do_ir_apply_patches_and_rebuild():
+                        break
+                    self._stash_and_drop_llvm_patch()
+                    if not self._do_ir_generate_patches():
+                        break
+                else:
+                    print_error("LLVM rebuild failed after IR retry")
+                    continue
+                # Rebuild TA
+                if not self._do_build(ascend_path, clean=False):
+                    print_warn("TA build failed after IR retry — "
+                               "will fix in next iteration")
+                continue
+
+            # ── Code issues → AI fix ──
+            code_fix_attempt += 1
+            print_warn(
+                f"Code issues detected — AI fix attempt "
+                f"{code_fix_attempt}/{self.state.max_retries}")
+            self.state.fix_errors = self._collect_test_error_logs()
+            if self.state.fix_errors:
+                self._do_ai_fix(ascend_path, step_dir, code_fix_attempt)
+                self.state.test_fix_count += 1
+                if not self._do_build(ascend_path, clean=False):
+                    print_warn("Build failed after code fix")
+            else:
+                print_warn("No test error logs found — cannot fix")
+                break
+
+        if ir_retries > _MAX_IR_RETRIES:
+            print_error(f"IR retries exhausted ({_MAX_IR_RETRIES}) — IR issues unresolved")
+        else:
+            print_error(f"Code fix attempts exhausted ({self.state.max_retries})")
         return False
 
     def _build_baseline_llvm(self) -> bool:
