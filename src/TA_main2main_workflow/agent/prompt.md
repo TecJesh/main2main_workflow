@@ -150,14 +150,21 @@ The active mode is: {mode}
          NPUIR updates) →
          {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
     4. Apply minimal fixes:
-       - Update imports when upstream moves modules
-       - Update function signatures when upstream changes APIs
-       - Update CMakeLists.txt when build configuration changes
-       - Fix pytest assertions when expected behavior changes
-    5. Do NOT modify upstream triton code in python/triton/ unless it contains
-       Ascend-specific changes (marked with triton_ascend imports or ascend checks)
-    6. Write fix summary to {step_dir}/step_summary.md
-    7. Write a ONE-LINE commit message to {step_dir}/commit_message.txt
+       - For BUILD / COMPILE errors: ONLY modify code under
+         {ascend_path}/third_party/ascend/.  All other paths are read-only.
+         If an upstream API change broke the build, adapt the Ascend backend
+         code that depends on it.
+       - For TEST / PYTEST failures: FIRST try to fix in
+         {ascend_path}/third_party/ascend/ or {ascend_path}/python/triton_ascend/.
+         Most test failures can be resolved by adapting the Ascend backend
+         without touching upstream code.  If — and only if — root cause
+         analysis shows the issue is inherently in upstream code with no
+         Ascend-side workaround, then apply a minimal targeted fix at the
+         specific point in the upstream file.
+    5. Update imports and signatures when upstream changes APIs — adapt
+       the Ascend call sites, not the upstream declarations.
+    7. Write fix summary to {step_dir}/step_summary.md
+    8. Write a ONE-LINE commit message to {step_dir}/commit_message.txt
        - Format: "<type>: <brief description>"
        - Types: fix, build, test, cmake, compat
        - Example: "fix: update AscendDotOp::build() signature for LLVM 22"
