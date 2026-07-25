@@ -1589,8 +1589,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         step_dir.mkdir(parents=True, exist_ok=True)
 
         build_passed = False
+        attempt = 0
 
-        for attempt in range(self.state.max_retries + 1):
+        while attempt <= self.state.max_retries:
             is_fix_attempt = attempt > 0
             self.state.retry_count = attempt
 
@@ -1604,6 +1605,27 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 if hasattr(self, '_last_ai_result') and self._last_ai_result:
                     modified_files = self._last_ai_result.get("modified_files", [])
                     ai_summary = self._last_ai_result.get("step_summary", "")
+                # ── Validate fix: only third_party/ascend/ files allowed ──
+                fix_valid, fix_reason = self._validate_fix(modified_files, ascend_path)
+                if not fix_valid:
+                    print_error(f"Fix rejected: {fix_reason}")
+                    print_warn(
+                        f"Fix modified files outside third_party/ascend/ — "
+                        f"changes reverted, this attempt will NOT count, "
+                        f"retrying fix with rejection feedback...")
+                    # Write rejection feedback so AI sees it next round
+                    rejection_file = step_dir / "fix_rejection.txt"
+                    rejection_file.write_text(
+                        f"PREVIOUS FIX WAS REJECTED: {fix_reason}\n"
+                        f"Only files under {ascend_path}/third_party/ascend/ "
+                        f"may be modified for compile-error fixes.\n",
+                        encoding="utf-8")
+                    self.state.fix_errors.append(str(rejection_file))
+                    if hasattr(self, '_last_ai_result'):
+                        self._last_ai_result["modified_files"] = []
+                        self._last_ai_result["step_summary"] = (
+                            f"REJECTED: {fix_reason}")
+                    continue  # don't count this attempt, retry
                 # Read error log snippet for context
                 error_snippet = ""
                 for err_path in self.state.fix_errors:
@@ -1634,6 +1656,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 print_warn(f"Build failed (attempt {attempt + 1}/{self.state.max_retries + 1}) — "
                            f"will retry after AI fix")
                 print_info(f"Build log: {WORKSPACE_DIR / BUILD_LOG_FILE}")
+                attempt += 1
                 continue
 
             # Build passed — tests are deferred to after all merges complete
@@ -1926,6 +1949,56 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         finally:
             self.state.num_procs = original_procs
             print_info(f"Restored pytest concurrency to {original_procs}")
+
+    def _validate_fix(self, modified_files: list[str], ascend_path: Path) -> tuple[bool, str]:
+        """Validate that an AI fix only touches allowed files.
+
+        Checks:
+          1. All modified files are under third_party/ascend/ (hard rule)
+
+        When validation fails, the illegal changes are reverted via
+        git checkout so the next fix attempt starts from a clean state.
+
+        Returns (passed: bool, reason: str).
+        """
+        if not modified_files:
+            return False, "No files were modified"
+
+        illegal_files: list[str] = []
+        ascend_root = str(ascend_path / "third_party" / "ascend")
+        for f in modified_files:
+            f_abs = str(Path(f).resolve()) if not Path(f).is_absolute() else f
+            if ascend_root not in f_abs:
+                illegal_files.append(f)
+
+        if illegal_files:
+            # ── Revert ALL working-tree changes since the fix is invalid ──
+            print_warn(f"Reverting invalid fix changes in {ascend_path}...")
+            try:
+                subprocess.run(
+                    ["git", "checkout", "--", "."],
+                    cwd=str(ascend_path),
+                    capture_output=True, text=True, timeout=30,
+                )
+                subprocess.run(
+                    ["git", "clean", "-fd"],
+                    cwd=str(ascend_path),
+                    capture_output=True, text=True, timeout=30,
+                )
+                print_status(True, "Reverted — working tree is clean")
+            except Exception as e:
+                print_error(f"Failed to revert changes: {e}")
+            return False, (
+                f"Fix modified files OUTSIDE third_party/ascend/: "
+                + ", ".join(illegal_files)
+                + ". Changes have been reverted. "
+                + "Next fix MUST only modify files under "
+                + f"{ascend_path}/third_party/ascend/")
+
+        print_status(True,
+            f"Fix validation: {len(modified_files)} file(s) all within "
+            f"third_party/ascend/")
+        return True, "All modified files are within third_party/ascend/"
 
     def _do_ai_fix(self, ascend_path: Path, step_dir: Path, attempt: int,
                    ascend_npu_ir_fix: bool = False) -> bool:
@@ -3605,7 +3678,8 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
         """Run tests + AI-fix loop for the current step.
 
         OOM errors trigger automatic full-suite reruns (up to 5) without
-        consuming AI fix attempts.  Only real test failures go to AI fix.
+        consuming AI fix attempts.  Fix validation rejections also don't
+        consume attempts — changes are reverted and AI retries.
 
         Returns True if all tests pass, False on exhaustion.
         """
@@ -3618,8 +3692,9 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
         _MAX_OOM_RERUNS = 5
         test_passed = False
+        attempt = 0
 
-        for attempt in range(self.state.max_retries + 1):
+        while attempt <= self.state.max_retries:
             is_fix_attempt = attempt > 0
             self.state.retry_count = attempt
 
@@ -3650,12 +3725,35 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
                 self.state.fix_errors = self._collect_test_error_logs()
                 if self.state.fix_errors:
                     ai_ok = self._do_ai_fix(ascend_path, step_dir, attempt)
-                    # Record fix attempt
+                    # Collect fix detail
                     modified_files: list[str] = []
                     ai_summary = ""
                     if hasattr(self, '_last_ai_result') and self._last_ai_result:
                         modified_files = self._last_ai_result.get("modified_files", [])
                         ai_summary = self._last_ai_result.get("step_summary", "")
+                    # ── Validate fix: only third_party/ascend/ files allowed ──
+                    fix_valid, fix_reason = self._validate_fix(modified_files, ascend_path)
+                    if not fix_valid:
+                        print_error(f"Fix rejected: {fix_reason}")
+                        print_warn(
+                            f"Fix modified files outside third_party/ascend/ — "
+                            f"changes reverted, this attempt will NOT count, "
+                            f"retrying fix with rejection feedback...")
+                        # Write rejection feedback so AI sees it next round
+                        rejection_file = step_dir / "fix_rejection.txt"
+                        rejection_file.write_text(
+                            f"PREVIOUS FIX WAS REJECTED: {fix_reason}\n"
+                            f"For test fixes, prefer files under "
+                            f"{ascend_path}/third_party/ascend/. "
+                            f"Upstream files may only be modified when root "
+                            f"cause analysis confirms no Ascend-side workaround.\n",
+                            encoding="utf-8")
+                        self.state.fix_errors.append(str(rejection_file))
+                        if hasattr(self, '_last_ai_result'):
+                            self._last_ai_result["modified_files"] = []
+                            self._last_ai_result["step_summary"] = (
+                                f"REJECTED: {fix_reason}")
+                        continue  # don't count this attempt, retry
                     error_snippet = ""
                     for err_path in self.state.fix_errors:
                         try:
@@ -3683,6 +3781,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
             if is_fix_attempt:
                 if not self._do_build(ascend_path, clean=False):
                     print_warn(f"Build failed after test fix (attempt {attempt})")
+                    attempt += 1
                     continue
 
             # Run tests
@@ -3697,6 +3796,7 @@ class TA_Main2MainFlow(Flow[TA_Main2MainState]):
 
             print_warn(f"Tests failed (attempt {attempt + 1}/"
                        f"{self.state.max_retries + 1})")
+            attempt += 1
 
             if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
                 print_warn("SKIP_AI_ANALYSIS=true — stopping test fix loop")

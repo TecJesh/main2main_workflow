@@ -163,6 +163,14 @@ The active mode is: {mode}
          specific point in the upstream file.
     5. Update imports and signatures when upstream changes APIs — adapt
        the Ascend call sites, not the upstream declarations.
+    6. SELF-REVIEW before returning:
+       - List every file you modified.
+       - For each file, verify it is under {ascend_path}/third_party/ascend/
+         (or under {ascend_path}/python/triton_ascend/ for test fixes only).
+       - If ANY modified file is outside these paths, REVERT that change
+         BEFORE returning — the fix will be rejected by the workflow.
+       - Confirm the fix directly addresses the root cause, not just
+         silences the error.
     7. Write fix summary to {step_dir}/step_summary.md
     8. Write a ONE-LINE commit message to {step_dir}/commit_message.txt
        - Format: "<type>: <brief description>"
