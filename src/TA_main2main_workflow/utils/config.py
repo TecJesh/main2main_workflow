@@ -60,7 +60,7 @@ class TAConfig:
     skip_ir_patch: bool = False
 
     # ── Git / Branch ──────────────────────────────────────────────────────
-    base_branch: str = "upstream_sync"
+    base_branch: str = "main"
     progressive_merge: bool = True
     single_step_mode: bool = True
 
@@ -114,7 +114,7 @@ class TAConfig:
             skip_e2e_test=_env_bool("SKIP_E2E_TEST", False),
             skip_llvm_rebuild=_env_bool("SKIP_LLVM_REBUILD", False),
             skip_ir_patch=_env_bool("SKIP_IR_PATCH", False),
-            base_branch=os.getenv("TA_BASE_BRANCH", "upstream_sync"),
+            base_branch=os.getenv("TA_BASE_BRANCH", "main"),
             progressive_merge=_env_bool("TA_PROGRESSIVE_MERGE", True),
             single_step_mode=_env_bool("ENV_SINGLE_STEP_MODE", True),
             push_to_github=_env_bool("PUSH_TO_GITHUB", False),

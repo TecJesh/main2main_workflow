@@ -1,4 +1,4 @@
-"""Pipeline step: Prepare workspace — clone repos, configure remotes, fetch."""
+"""Pipeline step: Prepare workspace — configure remotes, fetch, set up refs."""
 
 from __future__ import annotations
 import os
@@ -7,33 +7,75 @@ from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check
-from TA_main2main_workflow.utils import WORKSPACE_DIR
+from TA_main2main_workflow.utils import WORKSPACE_DIR, ENV_BASE_BRANCH, get_base_branch_ref
 
 log = get_logger(__name__)
 
 
 def prepare(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
-    """Set up workspace: clone, remotes, fetch, checkout."""
+    """Set up workspace: remotes, fetch, resolve ascend_head.
+
+    Does NOT force origin to point to any specific URL — the user may have
+    origin configured as their private fork (e.g. TecJesh/triton-ascend).
+    ascend_head is resolved from origin/{TA_BASE_BRANCH} so that previously
+    merged commits on the fork are reflected in the merge-base calculation.
+    """
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     ascend_path = _ensure_repo(config)
-    _fix_origin(ascend_path, config.triton_ascend_url)
     _ensure_remote(ascend_path, "triton-upstream", config.triton_upstream_url)
 
+    # ── Record original branch before any checkout ──
+    try:
+        original_branch = run_git(ascend_path, "branch", "--show-current").strip()
+        if not original_branch:
+            original_branch = run_git(ascend_path, "rev-parse", "HEAD").strip()
+    except Exception:
+        original_branch = ""
+
+    # ── Abort any stale merge from a previous crashed run ──
+    merge_head = ascend_path / ".git" / "MERGE_HEAD"
+    if merge_head.exists():
+        log.warning("Found stale MERGE_HEAD from previous run, aborting it")
+        try:
+            run_git(ascend_path, "merge", "--abort")
+            log.info("Stale merge aborted successfully")
+        except Exception:
+            log.warning("merge --abort failed, trying reset --hard")
+            try:
+                run_git(ascend_path, "reset", "--hard", "HEAD")
+            except Exception:
+                pass
+        for stale in [".git/MERGE_MODE", ".git/MERGE_MSG", ".git/CHERRY_PICK_HEAD"]:
+            p = ascend_path / stale
+            if p.exists():
+                p.unlink()
+
+    # ── Fetch origin (user's fork or upstream) ──
     log.info("Fetching origin ...")
     run_git(ascend_path, "fetch", "origin")
+
+    # ── Fetch triton-upstream ──
     log.info("Fetching triton-upstream ...")
     run_git(ascend_path, "fetch", "triton-upstream")
 
-    base_branch = config.base_branch
-    base_ref = f"origin/{base_branch}"
-    run_git(ascend_path, "checkout", "-B", base_branch, base_ref)
-
+    # ── Resolve ascend_head from the configured base branch ──
+    # Uses origin/{TA_BASE_BRANCH} so that when origin is a private fork
+    # (e.g. TecJesh/triton-ascend), previously merged commits are reflected
+    # in the merge-base calculation.  Falls back to checkout HEAD gracefully.
+    base_branch = os.getenv(ENV_BASE_BRANCH, "main")
+    base_ref = get_base_branch_ref()
+    try:
+        run_git(ascend_path, "fetch", "origin", base_branch)
+    except Exception:
+        log.warning(f"Could not fetch {base_ref}, using checkout HEAD as base")
     try:
         ascend_head = run_git(ascend_path, "rev-parse", base_ref).strip()
     except Exception:
-        raise RuntimeError(f"Cannot resolve '{base_ref}'.")
+        ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
+        log.warning(f"{base_ref} not available, using checkout HEAD")
 
+    # ── Resolve target commit ──
     target_commit = config.target_commit
     if not target_commit:
         upstream_ref = "triton-upstream/main"
@@ -44,15 +86,16 @@ def prepare(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 
     log.section("Workspace ready")
     log.key_value("triton-ascend", str(ascend_path))
-    log.key_value("base branch", base_branch)
+    log.key_value("base ref", base_ref)
     log.key_value("ascend HEAD", ascend_head[:12])
     log.key_value("target commit", target_commit[:12])
+    log.key_value("original branch", original_branch)
 
     return ctx.copy_with(
         triton_ascend_path=str(ascend_path),
         target_commit=target_commit,
         ascend_head=ascend_head,
-        original_branch=base_branch,
+        original_branch=original_branch,
     )
 
 
@@ -76,21 +119,3 @@ def _ensure_remote(repo: Path, name: str, url: str) -> None:
     result = run_git_no_check(repo, "remote")
     if name not in result.stdout:
         run_git(repo, "remote", "add", name, url)
-
-
-def _fix_origin(repo: Path, expected_url: str) -> None:
-    current = _get_remote_url(repo, "origin")
-    if current is None:
-        run_git(repo, "remote", "add", "origin", expected_url)
-        return
-    if current.rstrip("/") == expected_url.rstrip("/"):
-        return
-    log.warning(f"origin URL mismatch -- updating to {expected_url}")
-    run_git(repo, "remote", "set-url", "origin", expected_url)
-
-
-def _get_remote_url(repo: Path, name: str) -> str | None:
-    result = run_git_no_check(repo, "remote", "get-url", name)
-    if result.returncode == 0:
-        return result.stdout.strip()
-    return None

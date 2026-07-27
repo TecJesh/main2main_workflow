@@ -42,7 +42,7 @@ IR_DIAGNOSIS_FILE = "ir_diagnosis.json"
 
 
 def get_base_branch_ref(remote: str = "origin") -> str:
-    branch = os.getenv(ENV_BASE_BRANCH, "upstream_sync")
+    branch = os.getenv(ENV_BASE_BRANCH, "main")
     return f"{remote}/{branch}"
 
 

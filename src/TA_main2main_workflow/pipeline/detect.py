@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 import json
+import os
 from pathlib import Path
 from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.git import run_git
 from TA_main2main_workflow.utils.logging import get_logger
-from TA_main2main_workflow.utils import DETECT_FILE, WORKSPACE_DIR
+from TA_main2main_workflow.utils import (
+    DETECT_FILE, WORKSPACE_DIR, ENV_BASE_BRANCH, get_base_branch_ref,
+)
 
 log = get_logger(__name__)
 
@@ -32,8 +35,23 @@ def run_detect(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 
 def _detect_commits(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     ascend_path = Path(ctx.triton_ascend_path)
-    ascend_head = ctx.ascend_head
     target = ctx.target_commit
+
+    # ── Fetch latest from the configured base branch (private fork) ──
+    base_branch = os.getenv(ENV_BASE_BRANCH, "main")
+    base_ref = get_base_branch_ref()
+    try:
+        run_git(ascend_path, "fetch", "origin", base_branch)
+        log.info(f"Fetched {base_ref} (private fork)")
+    except Exception:
+        log.warning(f"Could not fetch {base_ref}, using local refs")
+
+    # ── Resolve ascend_head from the base ref (may have been updated by fetch) ──
+    try:
+        ascend_head = run_git(ascend_path, "rev-parse", base_ref).strip()
+    except Exception:
+        ascend_head = ctx.ascend_head
+        log.warning(f"{base_ref} not available, using ascend_head from prepare")
 
     try:
         merge_base = run_git(ascend_path, "merge-base", ascend_head, target).strip()
