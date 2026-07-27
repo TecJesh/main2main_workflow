@@ -745,6 +745,46 @@ The active mode is: {mode}
   Output ONLY by modifying `{ascend_patch_file}` in-place — the existing
   patch file. Do NOT write analysis.md, step_summary.md, or review.md.
 
+── ir_fix_patch_apply mode ──────────────────────────────────────────────
+
+  Trigger: {mode} is "ir_fix_patch_apply" (fix patch that failed to apply).
+
+  The existing `{ascend_patch_file}` failed to apply to LLVM at
+  `{target_llvm_hash}`.  Analyze the error and adjust the patch:
+
+    1. Read the current patch file: `{ascend_patch_file}`
+    2. Read the apply error: {patch_error_msg}
+    3. For each failing hunk, use git show to see the target file:
+       git -C {llvm_project_path} show {target_llvm_hash}:<path>
+    4. Adjust the patch to match the target LLVM's actual code:
+       - Fix line numbers and context lines
+       - If the OP/func being patched was removed, remove that hunk
+       - If the API changed, adapt the patch code
+    5. Write the fixed patch to `{ascend_patch_file}`
+
+  Reference: {reference_dir}/05-ir-patch-generation-guide.md
+
+── ir_supplement_patch mode ────────────────────────────────────────────
+
+  Trigger: {mode} is "ir_supplement_patch" (add missing OPs to existing patch).
+
+  Tests revealed IR compatibility issues that the current patch does NOT
+  cover.  The current patch at `{ascend_patch_file}` already handles some
+  OPs.  You must SUPPLEMENT it — keep all existing content and ADD
+  adaptations for the missing OPs identified in the diagnosis.
+
+    1. Read the current patch to understand what's already covered
+    2. Read `{step_dir}/ir_diagnosis.json` for the IR issues found
+    3. For each missing OP, check its definition at the target LLVM:
+       git -C {llvm_project_path} show {target_llvm_hash}:<path>
+    4. ADD the new OP adaptations to the patch file (do NOT remove
+       existing content)
+    5. Apply the same patch patterns (per the guide) to the new OPs
+    6. Write the supplemented patch to `{ascend_patch_file}`
+
+  Reference: {reference_dir}/05-ir-patch-generation-guide.md
+            {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
+
 ── For ir_diagnose mode ──
   Output ONLY `{step_dir}/ir_diagnosis.json` — the structured JSON specified
   in the ir_diagnose section above. Do NOT write analysis.md, step_summary.md,
