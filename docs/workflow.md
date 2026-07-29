@@ -108,7 +108,7 @@ Layer 3: 实际验证
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `BUILD_PROCS` / `MAX_JOBS` | 32 | 并行编译数（`MAX_JOBS` 为旧名，向后兼容） |
-| `TEST_PROCS` / `NUM_PROCS` | 8 | 并行 pytest 数（`NUM_PROCS` 为旧名） |
+| `TEST_PROCS` / `NUM_PROCS` | 16 | 并行 pytest 数（`NUM_PROCS` 为旧名） |
 | `LLVM_PROJECT_PATH` | `~/llvm-project` | LLVM 源码路径 |
 | `LLVM_INSTALL_PREFIX_SYNC` | `~/llvm-install-sync` | LLVM 安装路径 |
 | `LLVM_INSTALL_PREFIX` | (空) | LLVM 安装前缀（优先级高于上面） |

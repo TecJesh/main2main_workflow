@@ -140,6 +140,11 @@ def per_step_ir_patch(ctx: WorkflowContext, config: TAConfig,
     """
     ascend_path = Path(ctx.triton_ascend_path)
     step_id = step["id"]
+
+    if config.skip_ir_patch:
+        log.header(f"IR Patch Pipeline — {step_id} — SKIPPED (SKIP_IR_PATCH=true)")
+        return ctx.copy_with(build_passed=True, test_passed=True)
+
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
     step_dir.mkdir(parents=True, exist_ok=True)
 

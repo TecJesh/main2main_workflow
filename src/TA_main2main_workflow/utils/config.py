@@ -42,7 +42,7 @@ class TAConfig:
     llvm_install_prefix: str = ""
     llvm_repo_url: str = "https://github.com/llvm/llvm-project.git"
     build_procs: int = 32
-    test_procs: int = 8
+    test_procs: int = 16
 
     # ── Skip flags ────────────────────────────────────────────────────────
     resume: bool = False  # skip steps whose output already exists
@@ -51,6 +51,7 @@ class TAConfig:
     skip_e2e_test: bool = False
     skip_llvm_rebuild: bool = False  # skip LLVM rebuild when version changes (IR patch)
     skip_baseline_llvm: bool = False  # skip initial baseline LLVM build at workflow start
+    skip_ir_patch: bool = False  # skip entire IR patch phase (SKIP_IR_PATCH)
 
     # ── Git / Branch ──────────────────────────────────────────────────────
     base_branch: str = "upstream_sync"
@@ -62,8 +63,8 @@ class TAConfig:
     github_repo: str = "triton-lang/triton-ascend"
 
     # ── LLVM workspace ────────────────────────────────────────────────────
-    llvm_project_path: str = ""
-    llvm_install_prefix_sync: str = ""
+    llvm_project_path: str = "~/llvm-project"
+    llvm_install_prefix_sync: str = "~/llvm-install-sync"
 
     # ── Conda / Python ────────────────────────────────────────────────────
     conda_env: str = "ta-upgrade"
@@ -104,20 +105,21 @@ class TAConfig:
                 "LLVM_REPO_URL", "https://github.com/llvm/llvm-project.git"
             ),
             build_procs=_env_int_fallback("BUILD_PROCS", "MAX_JOBS", 32),
-            test_procs=_env_int_fallback("TEST_PROCS", "NUM_PROCS", 8),
+            test_procs=_env_int_fallback("TEST_PROCS", "NUM_PROCS", 16),
             resume=_env_bool("TA_RESUME", False),
             skip_ai_analysis=_env_bool("SKIP_AI_ANALYSIS", False),
             skip_build=_env_bool("SKIP_BUILD", False),
             skip_e2e_test=_env_bool("SKIP_E2E_TEST", False),
             skip_llvm_rebuild=_env_bool("SKIP_LLVM_REBUILD", False),
             skip_baseline_llvm=_env_bool("SKIP_BASELINE_LLVM", False),
+            skip_ir_patch=_env_bool("SKIP_IR_PATCH", False),
             base_branch=os.getenv("TA_BASE_BRANCH", "upstream_sync"),
             work_branch_base=os.getenv("TA_WORK_BRANCH_BASE", "upstream-ascend"),
             progressive_merge=_env_bool("TA_PROGRESSIVE_MERGE", True),
             push_to_github=_env_bool("PUSH_TO_GITHUB", False),
             github_repo=os.getenv("GITHUB_REPO", "triton-lang/triton-ascend"),
-            llvm_project_path=os.getenv("LLVM_PROJECT_PATH", ""),
-            llvm_install_prefix_sync=os.getenv("LLVM_INSTALL_PREFIX_SYNC", ""),
+            llvm_project_path=os.getenv("LLVM_PROJECT_PATH", "~/llvm-project"),
+            llvm_install_prefix_sync=os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync"),
             conda_env=os.getenv("CONDA_ENV", "ta-upgrade"),
             test_dir=os.getenv("TA_TEST_DIR", "third_party/ascend/unittest/pytest_ut"),
             test_dirs=_resolve_test_dirs(),
