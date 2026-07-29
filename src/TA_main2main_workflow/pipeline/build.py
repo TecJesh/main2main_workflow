@@ -223,6 +223,7 @@ def build_triton(
 
     build_env = {
         "LLVM_SYSPATH": llvm_prefix,
+        "LLVM_INSTALL_PREFIX": llvm_prefix,
         "TRITON_BUILD_WITH_CCACHE": "true",
         "TRITON_BUILD_WITH_CLANG_LLD": "true",
         "TRITON_BUILD_PROTON": "OFF",
@@ -232,6 +233,8 @@ def build_triton(
         "MAX_JOBS": str(config.build_procs),
         "CMAKE_BUILD_PARALLEL_LEVEL": str(config.build_procs),
     }
+
+    log.key_value("LLVM prefix", llvm_prefix if llvm_prefix else "(empty)")
 
     step_id = ctx.steps[ctx.current_step]["id"] if ctx.steps else "step-0"
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
