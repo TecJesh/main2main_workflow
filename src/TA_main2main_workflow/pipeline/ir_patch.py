@@ -312,6 +312,11 @@ def _do_test_and_fix_with_ir_retry(
                 log.status(True, "SKIP_LLVM_REBUILD set — skipping LLVM rebuild after supplement")
             else:
                 try:
+                    # Re-apply updated patch to clean workspace before building
+                    _clean_checkout_apply_patch(
+                        llvm_project, ascend_path, target_llvm_hash,
+                        reason=f"IR supplement iter {ir_iter + 1}",
+                    )
                     _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
                 except Exception as e:
                     log.error(f"LLVM rebuild after supplement failed: {e}")
@@ -349,13 +354,7 @@ def _per_step_ir_patch_fallback(
 
     log.header(f"IR Patch Fallback — Full OP Analysis — {step_id}")
 
-    # 1. Clean and checkout
-    _ensure_llvm_workspace_clean(llvm_project, "fallback IR pipeline")
-    _ensure_commit_available(llvm_project, target_llvm_hash)
-    run_git(llvm_project, "checkout", "-f", target_llvm_hash)
-    run_git(llvm_project, "clean", "-fd")
-
-    # 2. IR OP analysis (AI scans Ascend code for MLIR OP usage)
+    # 1. IR OP analysis (AI scans Ascend code for MLIR OP usage)
     log.section("IR OP Analysis")
     try:
         ops_report = _run_ir_op_analysis(ctx, config)
@@ -363,7 +362,7 @@ def _per_step_ir_patch_fallback(
     except Exception as e:
         log.warning(f"OP analysis failed: {e}")
 
-    # 3. IR change analysis (AI compares OP definitions between LLVM versions)
+    # 2. IR change analysis (AI compares OP definitions between LLVM versions)
     log.section("IR Change Analysis")
     try:
         changes_report = _run_ir_change_analysis(ctx, config, target_llvm_hash)
@@ -371,29 +370,33 @@ def _per_step_ir_patch_fallback(
     except Exception as e:
         log.warning(f"Change analysis failed: {e}")
 
-    # 4. Generate IR patches
+    # 3. Generate IR patches
     log.section("IR Patch Generation")
     try:
         _run_ir_generate_patches(ctx, config, step, target_llvm_hash)
     except Exception as e:
         log.warning(f"Patch generation failed: {e}")
 
-    # 5. Build LLVM
+    # 4. Apply generated patch to clean workspace, then build LLVM
     if config.skip_llvm_rebuild:
         log.status(True, "SKIP_LLVM_REBUILD set — skipping LLVM build in fallback")
     else:
         try:
+            _clean_checkout_apply_patch(
+                llvm_project, ascend_path, target_llvm_hash,
+                reason="fallback IR pipeline",
+            )
             _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
         except Exception as e:
             log.error(f"LLVM build failed: {e}")
             return ctx.copy_with(build_passed=False)
 
-    # 6. Build TA
+    # 5. Build TA
     ctx = _do_ta_build_with_fix(ctx, config, step)
     if not ctx.build_passed:
         return ctx
 
-    # 7. Test
+    # 6. Test
     ctx = run_tests(ctx, config)
     return ctx
 
@@ -735,6 +738,32 @@ def _ensure_commit_available(llvm_project: Path, commit_hash: str) -> None:
     raise RuntimeError(
         f"Failed to fetch LLVM commit {commit_hash[:12]} after {max_attempts} attempts"
     )
+
+
+def _clean_checkout_apply_patch(
+    llvm_project: Path, ascend_path: Path, target_llvm_hash: str, reason: str = "",
+) -> bool:
+    """Clean workspace, checkout target hash, apply the current Ascend patch.
+
+    Returns True if a patch file was found and applied, False if no patch
+    exists (clean LLVM, no Ascend modifications).
+    """
+    _ensure_llvm_workspace_clean(llvm_project, reason or "prepare for patch apply")
+    _ensure_commit_available(llvm_project, target_llvm_hash)
+    run_git(llvm_project, "checkout", "-f", target_llvm_hash)
+    run_git(llvm_project, "clean", "-fd")
+
+    patch_dir = ascend_path / "third_party/ascend/patch"
+    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    if not patch_files:
+        log.info("No Ascend patch found — building clean LLVM")
+        return False
+
+    patch_file = patch_files[0]
+    log.info(f"Applying patch: {patch_file.name}")
+    run_git(llvm_project, "apply", str(patch_file))
+    log.status(True, f"Patch applied: {patch_file.name}")
+    return True
 
 
 def _get_current_llvm_hash(ascend_path: Path) -> str:
