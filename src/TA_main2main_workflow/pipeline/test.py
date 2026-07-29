@@ -332,6 +332,9 @@ def rerun_tests_reduced_concurrency(
     """Rerun pytest with progressively halved concurrency.
 
     Returns a new WorkflowContext with test results, or None if all fail.
+
+    Stops early when OOM indicators disappear from test output — remaining
+    failures are real code issues, not memory-related (matches pre-refactor).
     """
     original_procs = config.test_procs
     for r in range(max_reruns):
@@ -345,6 +348,10 @@ def rerun_tests_reduced_concurrency(
         ctx = run_tests(ctx, config, test_procs=procs)
         if ctx.test_passed:
             log.status(True, f"Tests passed with {procs} workers")
+            return ctx
+        # Stop if OOM is gone — remaining failures are code issues
+        if not detect_oom_in_tests(ctx):
+            log.info("OOM resolved — remaining failures are not memory-related, stopping rerun")
             return ctx
 
     log.error(f"Tests still failing after {max_reruns} concurrency reductions")
