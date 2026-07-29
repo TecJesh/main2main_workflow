@@ -19,7 +19,7 @@ Environment variables:
   LLVM_INSTALL_PREFIX_SYNC — path to LLVM install (default: ~/llvm-install-sync)
   CONDA_ENV            — conda env name (default: ta-upgrade)
   BUILD_PROCS          — number of parallel build workers (default: 32)
-  TEST_PROCS           — number of parallel pytest workers (default: 8)
+  TEST_PROCS           — number of parallel pytest workers (default: 16)
   TA_LINE_BUDGET       — max source lines per merge step (default: 1000)
   TA_MAX_RETRIES       — max AI fix retries (default: 10)
   TA_BASE_BRANCH       — base branch name (default: upstream_sync)

@@ -214,7 +214,7 @@ def build_triton(
     llvm_prefix = config.llvm_install_prefix or (
         str(llvm_install) if llvm_install.exists() else ""
     )
-    python_exe = python_exe or config.python_exe or os.getenv("PYTHON", "python3")
+    python_exe = python_exe or config.python_exe or os.getenv("PYTHON", "python3.10")
 
     if clean:
         build_dir_path = ascend_path / "build"
