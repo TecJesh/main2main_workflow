@@ -544,6 +544,165 @@ def _ai_adjust_patch_for_failure(
     ))
 
 
+def _build_focused_change_report(
+    ctx: WorkflowContext, config: TAConfig, step: dict,
+    target_llvm_hash: str,
+) -> Path | None:
+    """Analyze OP definition diffs for affected OPs identified by ir_diagnose.
+
+    Uses ``git grep`` to find the .td files defining each affected OP,
+    then runs ``git diff baseline..target`` to collect the precise changes.
+
+    Writes the focused report to ``focused_changes.json`` in the IR
+    analysis directory so the supplement AI can read it.
+
+    Returns the path to the focused changes report, or None if no
+    affected OPs could be analyzed.
+    """
+    step_id = step["id"]
+    ir_dir = WORKSPACE_DIR / STEPS_DIR / step_id / IR_ANALYSIS_DIR
+    ir_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline_hash = _ASCEND_BASELINE_LLVM_HASH
+    llvm_project = config.llvm_project
+
+    # ── Read affected OPs from diagnosis ───────────────────────────
+    diagnosis = _read_diagnosis(step_id, ir_dir)
+    affected_ops: list[dict] = []
+    if isinstance(diagnosis, dict):
+        failures = diagnosis.get("failures", [])
+        for f in failures:
+            if f.get("classification") == "ir_compatibility":
+                op_name = f.get("affected_op", "").strip()
+                if op_name and op_name not in {o["name"] for o in affected_ops}:
+                    affected_ops.append({
+                        "name": op_name,
+                        "error_summary": f.get("error_summary", ""),
+                        "rationale": f.get("rationale", ""),
+                    })
+    if not affected_ops:
+        log.info("No ir_compatibility OPs in diagnosis — nothing to analyze")
+        return None
+
+    log.info(f"Analyzing changes for {len(affected_ops)} affected OP(s)...")
+
+    # ── For each affected OP, find .td definition and diff ──────────
+    analyzed: list[dict] = []
+    seen_td_files: set[str] = set()
+
+    for op in affected_ops:
+        op_name = op["name"]
+        td_relative = _find_td_file(llvm_project, target_llvm_hash, op_name)
+        if not td_relative:
+            log.info(f"  {op_name}: .td file not found — skipping")
+            continue
+
+        entry: dict = {
+            "op_name": op_name,
+            "td_file": td_relative,
+            "error_summary": op["error_summary"],
+            "rationale": op["rationale"],
+        }
+
+        # Only diff each .td file once (multiple OPs in same file)
+        if td_relative not in seen_td_files:
+            seen_td_files.add(td_relative)
+            diff = _diff_td_file(llvm_project, baseline_hash, target_llvm_hash, td_relative)
+            entry["td_diff"] = diff[:8000] if diff else "(no diff)"
+            if diff and len(diff) > 8000:
+                entry["td_diff_truncated"] = True
+        else:
+            entry["td_diff"] = "(see above — already included)"
+
+        analyzed.append(entry)
+        log.info(f"  {op_name}: {td_relative}")
+
+    if not analyzed:
+        return None
+
+    # ── Write focused report ───────────────────────────────────────
+    report = {
+        "source_llvm_hash": baseline_hash,
+        "target_llvm_hash": target_llvm_hash,
+        "diagnosis_source": "ir_diagnose",
+        "affected_ops": analyzed,
+        "summary": {
+            "total_affected_ops": len(analyzed),
+            "unique_td_files": len(seen_td_files),
+        },
+    }
+    report_path = ir_dir / "focused_changes.json"
+    report_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    log.status(True, f"Focused change analysis: {report_path}")
+    return report_path
+
+
+def _read_diagnosis(step_id: str, ir_dir: Path) -> dict:
+    """Read IR diagnosis JSON, trying both possible locations."""
+    for p in _diagnosis_candidates(step_id, ir_dir):
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+    return {}
+
+
+def _find_diagnosis_file(step_id: str, ir_dir: Path) -> Path | None:
+    """Find the IR diagnosis file, trying both possible locations."""
+    for p in _diagnosis_candidates(step_id, ir_dir):
+        if p.exists():
+            return p
+    return None
+
+
+def _diagnosis_candidates(step_id: str, ir_dir: Path) -> list[Path]:
+    """Candidate paths for IR diagnosis, in priority order."""
+    step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
+    return [
+        step_dir / "ir_diagnosis.json",     # where AI writes per prompt
+        ir_dir / IR_DIAGNOSIS_FILE,         # where classify writes parsed
+    ]
+
+
+def _find_td_file(llvm_project: Path, target_hash: str, op_name: str) -> str | None:
+    """Find the .td file that defines *op_name* at *target_hash*.
+
+    Uses ``git grep`` to search for ``def OpName`` in .td files.
+    """
+    # Strip dialect prefix for the def search (e.g., "triton::LoadOp" → "LoadOp")
+    short_name = op_name.split("::")[-1]
+    try:
+        result = subprocess.run(
+            ["git", "grep", "-l", f"def {short_name}", target_hash, "--", "*.td"],
+            cwd=str(llvm_project),
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    # Return first match (most OPs are defined once)
+    return result.stdout.strip().split("\n")[0]
+
+
+def _diff_td_file(llvm_project: Path, baseline_hash: str, target_hash: str,
+                  td_relative: str) -> str:
+    """Get the diff of a .td file between baseline and target LLVM."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", f"{baseline_hash}..{target_hash}", "--", td_relative],
+            cwd=str(llvm_project),
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
 def _ir_supplement_patch(
     ctx: WorkflowContext, config: TAConfig, step: dict, target_llvm_hash: str,
     supplement_iter: int = 1,
@@ -571,10 +730,23 @@ def _ir_supplement_patch(
         log.warning("No test failure logs found — cannot diagnose IR issues")
 
     # Include IR diagnosis if available (chain from classify step)
-    diagnosis_path = ir_dir / IR_DIAGNOSIS_FILE
-    if diagnosis_path.exists():
+    # Try both possible locations: where AI writes per prompt, where classify writes
+    diagnosis_path = _find_diagnosis_file(step_id, ir_dir)
+    if diagnosis_path:
         error_log_paths.append(str(diagnosis_path))
         log.info(f"Including IR diagnosis: {diagnosis_path}")
+    else:
+        diagnosis_path = None
+
+    # ── Focused OP change analysis ──
+    # Extract affected OPs from diagnosis, diff their .td definitions
+    # between baseline and target LLVM, write to focused_changes.json
+    focused_report_path = _build_focused_change_report(
+        ctx, config, step, target_llvm_hash,
+    )
+    if focused_report_path:
+        error_log_paths.append(str(focused_report_path))
+        log.info(f"Including focused change analysis: {focused_report_path}")
 
     # Build patch content snippet for AI context
     patch_content_snippet = ""
@@ -590,13 +762,18 @@ def _ir_supplement_patch(
     log.key_value("Existing patch", str(ascend_patch_file) if ascend_patch_file else "(none)")
     log.key_value("Target LLVM", target_llvm_hash[:12])
     log.key_value("Test error logs", str(len(error_log_paths)))
+    if focused_report_path:
+        log.key_value("Focused changes", str(focused_report_path))
+    if diagnosis_path:
+        log.key_value("Diagnosis", str(diagnosis_path))
 
     run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
         "ir_generate_patch",
         error_logs=json.dumps(error_log_paths, ensure_ascii=False),
         extra={
             "previous_step_id": "ir-diagnose",
-            "previous_step_summary_path": str(diagnosis_path),
+            "previous_step_summary_path": str(diagnosis_path or ""),
+            "focused_changes_path": str(focused_report_path or ""),
             "target_llvm_hash": target_llvm_hash,
             "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
             "ascend_patch_file": ascend_patch_file,
