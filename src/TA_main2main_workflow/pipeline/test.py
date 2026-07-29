@@ -8,7 +8,7 @@ from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.tracker import timed
 from TA_main2main_workflow.utils import TEST_RESULT_FILE, WORKSPACE_DIR
-from TA_main2main_workflow.pipeline.fix import ai_fix
+from TA_main2main_workflow.pipeline.ai_fix import ai_fix
 
 log = get_logger(__name__)
 
@@ -23,7 +23,7 @@ def test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         ctx = ctx.copy_with(retry_count=attempt)
         if attempt > 0:
             log.header(f"Test Fix Attempt {attempt}/{config.max_retries}")
-            ctx = ai_fix(ctx, config, attempt=attempt)
+            ctx = ai_fix(ctx, config, attempt=attempt, mode="test_fix")
         with timed("test"):
             ctx = _run_pytest(ctx, config)
         if ctx.test_passed:

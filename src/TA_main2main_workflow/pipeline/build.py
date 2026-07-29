@@ -9,7 +9,7 @@ from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.tracker import timed
 from TA_main2main_workflow.utils.git import run_git
 from TA_main2main_workflow.utils import BUILD_RESULT_FILE, STEPS_DIR, WORKSPACE_DIR
-from TA_main2main_workflow.pipeline.fix import ai_fix
+from TA_main2main_workflow.pipeline.ai_fix import ai_fix
 
 log = get_logger(__name__)
 
@@ -31,7 +31,7 @@ def build(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         ctx = ctx.copy_with(retry_count=attempt)
         if attempt > 0:
             log.header(f"Build Fix Attempt {attempt}/{config.max_retries}")
-            ctx = ai_fix(ctx, config, attempt=attempt)
+            ctx = ai_fix(ctx, config, attempt=attempt, mode="build_fix")
 
         # ── Rebuild LLVM every attempt ──────────────────────────────
         if not config.skip_llvm_rebuild:

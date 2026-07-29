@@ -3,7 +3,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from TA_main2main_workflow.agent.opencode_adapter import run_opencode_adapter
+from TA_main2main_workflow.pipeline.ai_fix import run_opencode_adapter
 from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
