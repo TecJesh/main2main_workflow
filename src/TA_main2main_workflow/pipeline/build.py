@@ -222,6 +222,7 @@ def build_triton(
             subprocess.run(["rm", "-rf", str(build_dir_path)], check=False)
 
     build_env = {
+        "LLVM_BUILD_DIR": llvm_prefix,
         "LLVM_SYSPATH": llvm_prefix,
         "LLVM_INSTALL_PREFIX": llvm_prefix,
         "TRITON_BUILD_WITH_CCACHE": "true",
@@ -251,6 +252,7 @@ def build_triton(
             cwd=ascend_path,
             log_fh=fh,
             timeout=1800,
+            env=build_env,
             label="Building Triton-Ascend",
         )
     passed = rc == 0

@@ -50,7 +50,7 @@ def run_git_no_check(repo: Path | str, *args: str) -> subprocess.CompletedProces
 
 
 def stream_cmd(cmd: list[str], cwd: Path, log_fh, timeout: int,
-               label: str = "") -> int:
+               label: str = "", env: dict | None = None) -> int:
     """Stream subprocess output line-by-line to console and log file.
 
     Each output line is:
@@ -58,11 +58,18 @@ def stream_cmd(cmd: list[str], cwd: Path, log_fh, timeout: int,
     - printed to the terminal as a single self-updating ``\\r`` line showing
       the last non-empty line (real-time progress)
 
+    If *env* is given, it is merged on top of the parent environment
+    (os.environ) before the subprocess is launched.
+
     Returns the process exit code.  Does NOT raise on non-zero.
     """
+    import os as _os
     import sys
+    proc_env = _os.environ.copy()
+    if env:
+        proc_env.update(env)
     proc = subprocess.Popen(
-        cmd, cwd=str(cwd),
+        cmd, cwd=str(cwd), env=proc_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     assert proc.stdout is not None

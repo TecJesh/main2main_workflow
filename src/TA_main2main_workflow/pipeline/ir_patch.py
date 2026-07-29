@@ -193,6 +193,9 @@ def _do_apply_existing_patch(
 
     if not patch_files:
         log.info("No existing patch — building LLVM directly")
+        if config.skip_llvm_rebuild:
+            log.status(True, "SKIP_LLVM_REBUILD set — assuming LLVM already built")
+            return True
         try:
             _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
             return True
@@ -226,6 +229,9 @@ def _do_apply_existing_patch(
             continue
         log.info(f"Applying existing patch Successfully (attempt {attempt})")
         # ── Build LLVM ──
+        if config.skip_llvm_rebuild:
+            log.status(True, f"SKIP_LLVM_REBUILD set — assuming LLVM already built (attempt {attempt})")
+            return True
         try:
             _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
             log.status(True, f"LLVM build with existing patch OK (attempt {attempt})")
@@ -302,11 +308,14 @@ def _do_test_and_fix_with_ir_retry(
             _ir_supplement_patch(ctx, config, step, target_llvm_hash,
                                 supplement_iter=ir_iter + 1)
             # Rebuild LLVM with updated patch
-            try:
-                _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
-            except Exception as e:
-                log.error(f"LLVM rebuild after supplement failed: {e}")
-                continue
+            if config.skip_llvm_rebuild:
+                log.status(True, "SKIP_LLVM_REBUILD set — skipping LLVM rebuild after supplement")
+            else:
+                try:
+                    _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
+                except Exception as e:
+                    log.error(f"LLVM rebuild after supplement failed: {e}")
+                    continue
             # Rebuild TA
             ctx = _do_ta_build_with_fix(ctx, config, step)
             if not ctx.build_passed:
@@ -370,11 +379,14 @@ def _per_step_ir_patch_fallback(
         log.warning(f"Patch generation failed: {e}")
 
     # 5. Build LLVM
-    try:
-        _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
-    except Exception as e:
-        log.error(f"LLVM build failed: {e}")
-        return ctx.copy_with(build_passed=False)
+    if config.skip_llvm_rebuild:
+        log.status(True, "SKIP_LLVM_REBUILD set — skipping LLVM build in fallback")
+    else:
+        try:
+            _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
+        except Exception as e:
+            log.error(f"LLVM build failed: {e}")
+            return ctx.copy_with(build_passed=False)
 
     # 6. Build TA
     ctx = _do_ta_build_with_fix(ctx, config, step)
