@@ -92,3 +92,73 @@ Layer 3: 实际验证
 ```
 
 详见 [fix-validation-flow.md](fix-validation-flow.md)
+
+## 环境变量速查
+
+### 仓库 & 分支
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TRITON_ASCEND_PATH` | (当前目录) | triton-ascend 本地路径 |
+| `TRITON_PATH` | (空) | 上游 triton 本地路径 |
+| `TRITON_TARGET_COMMIT` | (upstream HEAD) | 要合并的目标 commit |
+| `TA_BASE_BRANCH` | `upstream_sync` | 基线分支名 |
+| `TA_WORK_BRANCH_BASE` | `upstream-ascend` | 工作分支 base remote |
+
+### 构建 & 测试
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BUILD_PROCS` / `MAX_JOBS` | 32 | 并行编译数（`MAX_JOBS` 为旧名，向后兼容） |
+| `TEST_PROCS` / `NUM_PROCS` | 8 | 并行 pytest 数（`NUM_PROCS` 为旧名） |
+| `LLVM_PROJECT_PATH` | `~/llvm-project` | LLVM 源码路径 |
+| `LLVM_INSTALL_PREFIX_SYNC` | `~/llvm-install-sync` | LLVM 安装路径 |
+| `LLVM_INSTALL_PREFIX` | (空) | LLVM 安装前缀（优先级高于上面） |
+| `SKIP_BUILD` | `false` | 跳过编译 |
+| `SKIP_E2E_TEST` | `false` | 跳过测试 |
+| `SKIP_BASELINE_LLVM` | `false` | 跳过基线 LLVM 编译（已有 LLVM 时使用） |
+| `SKIP_LLVM_REBUILD` | `false` | 跳过 LLVM 版本变更时的重编译 |
+
+### 测试目录（可插拔）
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TA_TEST_DIR` | `third_party/ascend/unittest/pytest_ut` | 主测试目录 |
+| `TA_EXTRA_TEST_DIRS` | (空) | 额外 pytest 目录，逗号/空格分隔 |
+| `TA_TEST_COMMAND` | (空) | 自定义测试命令（在 pytest ut 之后额外执行） |
+
+### AI & 重试
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `AI_BACKEND` | `auto` | AI 后端（`opencode` / `claude`） |
+| `SKIP_AI_ANALYSIS` | `false` | 跳过 AI 调用 |
+| `TA_MAX_RETRIES` | 10 | AI 修复最大重试次数 |
+| `TA_LINE_BUDGET` | 1000 | 每步最大源码行数 |
+
+### PR
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PUSH_TO_GITHUB` | `false` | 自动创建 PR |
+| `GITHUB_REPO` | `triton-lang/triton-ascend` | PR 目标仓库 |
+
+### 其他
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TA_SINGLE_STEP_MODE` | `true` | 单步模式 |
+| `TA_RESUME` | `false` | 从缓存恢复（跳过已完成的步骤） |
+| `PYTHON` | `python3` | Python 解释器 |
+| `CONDA_ENV` | `ta-upgrade` | Conda 环境名 |
+| `TA_MAIN2MAIN_WORKSPACE` | `./workspace` | 工作区目录 |
+
+## CLI 参数
+
+```
+ta-kickoff [选项]
+
+  --triton-ascend-path PATH     triton-ascend 仓库路径
+  --triton-path PATH            上游 triton 仓库路径
+  --target-commit SHA           目标 commit
+  --llvm-prefix PATH            LLVM 安装前缀
+  --conda-env NAME              Conda 环境名
+  --build-procs N               并行编译数
+  --test-procs N                并行测试数
+  --extra-test-dirs DIRS        额外测试目录（逗号分隔）
+  --test-command CMD            自定义测试命令
+```

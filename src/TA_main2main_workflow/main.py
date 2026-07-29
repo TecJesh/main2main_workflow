@@ -23,6 +23,12 @@ Environment variables:
   TA_LINE_BUDGET       — max source lines per merge step (default: 1000)
   TA_MAX_RETRIES       — max AI fix retries (default: 10)
   TA_BASE_BRANCH       — base branch name (default: upstream_sync)
+  TA_TEST_DIR          — primary test directory (default: third_party/ascend/unittest/pytest_ut)
+  TA_EXTRA_TEST_DIRS   — extra test directories, comma/space separated (default: none)
+  TA_TEST_COMMAND      — additional custom test command (default: none; runs after pytest ut)
+  TA_SINGLE_STEP_MODE  — set to "true" for single-step mode (default: true)
+  TA_WORK_BRANCH_BASE  — remote name for work branch base (default: upstream-ascend)
+  TA_RESUME            — set to "true" to resume from cached step outputs
 """
 
 import argparse
@@ -32,7 +38,7 @@ from pathlib import Path
 
 from TA_main2main_workflow.flow import TA_Main2MainFlow
 from TA_main2main_workflow.utils import UpgradeFailed
-from TA_main2main_workflow.utils.config import TAConfig
+from TA_main2main_workflow.utils.config import TAConfig, _resolve_test_dirs
 from TA_main2main_workflow.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -70,6 +76,14 @@ def kickoff():
         "--test-procs", type=int, default=None,
         help="Parallel pytest workers (default: 8)"
     )
+    parser.add_argument(
+        "--extra-test-dirs", default=None,
+        help="Extra test directories (comma/space separated, appended to default pytest ut)"
+    )
+    parser.add_argument(
+        "--test-command", default=None,
+        help="Additional custom test command (runs after pytest ut)"
+    )
     args = parser.parse_args()
 
     config = TAConfig.from_env()
@@ -87,6 +101,13 @@ def kickoff():
         config.build_procs = args.build_procs
     if args.test_procs is not None:
         config.test_procs = args.test_procs
+    if args.extra_test_dirs is not None:
+        config.test_dirs = _resolve_test_dirs(
+            primary=config.test_dir,
+            extra=args.extra_test_dirs,
+        )
+    if args.test_command is not None:
+        config.test_command = args.test_command
 
     _print_banner(config)
 

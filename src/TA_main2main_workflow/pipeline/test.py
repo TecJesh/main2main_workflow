@@ -64,7 +64,7 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
 
         # Run tests
         with timed("test"):
-            ctx = run_pytest(ctx, config)
+            ctx = run_tests(ctx, config)
 
         if ctx.test_passed:
             return ctx.copy_with(
@@ -83,31 +83,162 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def run_pytest(ctx: WorkflowContext, config: TAConfig,
-                python_exe: str = "", test_procs: int = 0) -> WorkflowContext:
-    """Execute pytest and return updated ctx with test_passed + fix_errors."""
+def run_tests(ctx: WorkflowContext, config: TAConfig,
+              python_exe: str = "", test_procs: int = 0) -> WorkflowContext:
+    """Execute tests: always runs default pytest ut first, then optionally
+    appends a custom test command if ``TA_TEST_COMMAND`` is set.
+
+    Tests pass only if ALL test suites pass.
+    """
+    # 1. Always run the default pytest ut
+    ctx = _run_pytest(ctx, config, python_exe=python_exe, test_procs=test_procs)
+    if not ctx.test_passed and not config.test_command:
+        return ctx  # only pytest, already failed — no need to continue
+
+    # 2. Optionally run additional custom test command
+    if config.test_command:
+        log.section("Additional Tests (TA_TEST_COMMAND)")
+        custom_ctx = _run_custom_test(ctx, config)
+        # Merge results: pass only if both suites pass
+        all_passed = ctx.test_passed and custom_ctx.test_passed
+        merged_errors = ctx.fix_errors + custom_ctx.fix_errors
+        ctx = ctx.copy_with(
+            test_passed=all_passed,
+            fix_errors=merged_errors,
+            test_log_dir=str(WORKSPACE_DIR / "test-logs"),
+        )
+
+    return ctx
+
+
+def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
+    """Execute a user-supplied test command and capture results.
+
+    The command is run via ``bash -c`` in the ascend repo root.  stdout
+    and stderr are captured to ``test-logs/test-output.log``.  If the
+    command produces a JUnit XML file (``--junitxml=...``), it is parsed
+    for detailed pass/fail/counts.  Otherwise only the exit code is used.
+    """
     ascend_path = Path(ctx.triton_ascend_path)
     test_log_dir = WORKSPACE_DIR / "test-logs"
     test_log_dir.mkdir(parents=True, exist_ok=True)
 
-    test_dir_path = (ascend_path / config.test_dir).resolve()
+    cmd = config.test_command
+    output_log = test_log_dir / "test-output.log"
+
+    log.section("Run Tests (custom command)")
+    log.key_value("command", cmd)
+    log.key_value("output log", str(output_log))
+
+    _start = time.time()
+    with open(output_log, "w", encoding="utf-8") as fh:
+        fh.write(f"=== TA_TEST_COMMAND ===\n{cmd}\n\n")
+        fh.flush()
+        proc = subprocess.Popen(
+            ["bash", "-c", cmd],
+            cwd=str(ascend_path),
+            stdout=fh, stderr=subprocess.STDOUT,
+        )
+        try:
+            rc = proc.wait(timeout=7200)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            rc = -1
+            log.warning("Test command timed out after 7200s")
+
+    elapsed = time.time() - _start
+    log.info(f"Test command finished in {elapsed:.0f}s, exit={rc}")
+
+    # Try to parse JUnit XML if present (extract --junitxml=... from command)
+    pf = pe = tp = 0
+    junit_xml: Path | None = None
+    import re as _re
+    m = _re.search(r"--junitxml[= ](\S+)", cmd)
+    if m:
+        junit_xml = Path(m.group(1))
+        if not junit_xml.is_absolute():
+            junit_xml = ascend_path / junit_xml
+        if junit_xml.exists():
+            try:
+                tree = ET.parse(str(junit_xml))
+                root = tree.getroot()
+                suites = [root] if root.tag != "testsuites" else root.findall("testsuite")
+                for s in suites:
+                    tp += int(s.get("tests", 0))
+                    pf += int(s.get("failures", 0))
+                    pe += int(s.get("errors", 0))
+            except Exception:
+                log.warning(f"Could not parse JUnit XML: {junit_xml}")
+
+    passed = rc == 0 and pf == 0 and pe == 0
+    summary = {
+        "exit_code": rc,
+        "passed": passed,
+        "test_log": str(junit_xml or output_log),
+        "test_command": cmd,
+        "passed_count": tp,
+        "failed_count": pf,
+        "error_count": pe,
+    }
+    (WORKSPACE_DIR / TEST_RESULT_FILE).write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    if not passed:
+        log.error(f"Tests FAILED (exit={rc}, {pf} failed, {pe} errors)")
+        return ctx.copy_with(
+            test_passed=False,
+            fix_errors=[str(output_log), str(WORKSPACE_DIR / TEST_RESULT_FILE)],
+            test_log_dir=str(test_log_dir),
+        )
+    log.status(True, f"All tests passed ({tp} passed)" if tp else f"Tests passed (exit 0)")
+    return ctx.copy_with(test_passed=True, test_log_dir=str(test_log_dir))
+
+
+# ---------------------------------------------------------------------------
+# Default pytest runner (used when TA_TEST_COMMAND is not set)
+# ---------------------------------------------------------------------------
+
+
+def _run_pytest(ctx: WorkflowContext, config: TAConfig,
+                python_exe: str = "", test_procs: int = 0) -> WorkflowContext:
+    """Execute pytest across all configured test directories.
+
+    Test directories are resolved from ``config.test_dirs`` (built from
+    ``TA_TEST_DIR`` + ``TA_EXTRA_TEST_DIRS`` env vars).  All directories
+    are passed to a single pytest invocation.
+    """
+    ascend_path = Path(ctx.triton_ascend_path)
+    test_log_dir = WORKSPACE_DIR / "test-logs"
+    test_log_dir.mkdir(parents=True, exist_ok=True)
+
     python_exe = python_exe or config.python_exe or os.getenv("PYTHON", "python3.10")
     procs = test_procs or config.test_procs
 
-    if not test_dir_path.exists():
-        log.warning(f"Test directory not found: {test_dir_path}")
+    # Resolve test directories, skipping missing ones
+    test_paths: list[Path] = []
+    for d in config.test_dirs:
+        p = (ascend_path / d).resolve()
+        if p.exists():
+            test_paths.append(p)
+        else:
+            log.warning(f"Test directory not found, skipping: {p}")
+
+    if not test_paths:
+        log.warning("No test directories found — treating tests as passed")
         return ctx.copy_with(test_passed=True)
 
     junit_xml = test_log_dir / "pytest-junit.xml"
     pytest_bin = shutil.which("pytest")
     cmd = (
-        [pytest_bin, str(test_dir_path)]
-        if pytest_bin
-        else [python_exe, "-m", "pytest", str(test_dir_path)]
+        [pytest_bin] if pytest_bin
+        else [python_exe, "-m", "pytest"]
     )
+    cmd += [str(p) for p in test_paths]
     cmd += ["-n", str(procs), f"--junitxml={junit_xml}"]
 
-    log.section("Run Tests")
+    log.section("Run Tests (pytest)")
+    log.key_value("test dirs", ", ".join(str(p.relative_to(ascend_path)) for p in test_paths))
     log.info(f"cmd: {' '.join(cmd)}")
     _start = time.time()
     try:
@@ -115,7 +246,7 @@ def run_pytest(ctx: WorkflowContext, config: TAConfig,
         rc = result.returncode
     except subprocess.TimeoutExpired:
         rc = -1
-        log.warning("pytest timed out after 1000s")
+        log.warning("pytest timed out after 3000s")
 
     elapsed = time.time() - _start
     log.info(f"pytest finished in {elapsed:.0f}s, returncode={rc}")
@@ -138,7 +269,7 @@ def run_pytest(ctx: WorkflowContext, config: TAConfig,
         "exit_code": 0 if passed else 1,
         "passed": passed,
         "test_log": str(junit_xml),
-        "test_dir": str(test_dir_path),
+        "test_dirs": [str(p) for p in test_paths],
         "passed_count": tp,
         "failed_count": pf,
         "error_count": pe,
@@ -170,13 +301,25 @@ def detect_oom_in_tests(ctx: WorkflowContext) -> bool:
         "Exit code 137", "exit code 137",
         "CUDA error", "cuMemAlloc", "NPU error",
     ]
+    # Scan JUnit XML
     junit_xml = test_log_dir / "pytest-junit.xml"
     if junit_xml.exists():
         try:
             content = junit_xml.read_text(encoding="utf-8", errors="replace").lower()
             for kw in oom_keywords:
                 if kw.lower() in content:
-                    log.warning(f"OOM indicator found: '{kw}'")
+                    log.warning(f"OOM indicator found in junitxml: '{kw}'")
+                    return True
+        except Exception:
+            pass
+    # Also scan custom test output log
+    output_log = test_log_dir / "test-output.log"
+    if output_log.exists():
+        try:
+            content = output_log.read_text(encoding="utf-8", errors="replace").lower()
+            for kw in oom_keywords:
+                if kw.lower() in content:
+                    log.warning(f"OOM indicator found in test output: '{kw}'")
                     return True
         except Exception:
             pass
@@ -199,7 +342,7 @@ def rerun_tests_reduced_concurrency(
 
         ascend_path_str = str(ascend_path)
         ctx = WorkflowContext(triton_ascend_path=ascend_path_str)
-        ctx = run_pytest(ctx, config, test_procs=procs)
+        ctx = run_tests(ctx, config, test_procs=procs)
         if ctx.test_passed:
             log.status(True, f"Tests passed with {procs} workers")
             return ctx

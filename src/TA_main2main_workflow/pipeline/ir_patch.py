@@ -27,7 +27,7 @@ from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check, stream_cmd
 from TA_main2main_workflow.pipeline.build import build_and_fix_loop
-from TA_main2main_workflow.pipeline.test import run_pytest, detect_oom_in_tests, rerun_tests_reduced_concurrency, test_and_fix_loop
+from TA_main2main_workflow.pipeline.test import run_tests, detect_oom_in_tests, rerun_tests_reduced_concurrency, test_and_fix_loop
 from TA_main2main_workflow.pipeline.fix import ai_fix
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, STEPS_DIR, BUILD_RESULT_FILE, TEST_RESULT_FILE,
@@ -274,7 +274,7 @@ def _do_test_and_fix_with_ir_retry(
             log.header(f"IR Supplement Iteration {ir_iter}/{ir_max}")
 
         # ── Run tests ──
-        ctx = run_pytest(ctx, config)
+        ctx = run_tests(ctx, config)
         if ctx.test_passed:
             log.status(True, f"All tests passed (IR iter {ir_iter})")
             return ctx.copy_with(test_passed=True, pytest_passed=True)
@@ -377,7 +377,7 @@ def _per_step_ir_patch_fallback(
         return ctx
 
     # 7. Test
-    ctx = run_pytest(ctx, config)
+    ctx = run_tests(ctx, config)
     return ctx
 
 

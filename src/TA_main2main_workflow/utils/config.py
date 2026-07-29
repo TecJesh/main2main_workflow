@@ -9,7 +9,7 @@ Priority:  CLI args  >  env vars  >  defaults
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -68,6 +68,8 @@ class TAConfig:
     # ── Conda / Python ────────────────────────────────────────────────────
     conda_env: str = "ta-upgrade"
     test_dir: str = "third_party/ascend/unittest/pytest_ut"
+    test_dirs: list[str] = field(default_factory=list)  # resolved from env
+    test_command: str = ""  # full shell command override (TA_TEST_COMMAND)
     python_exe: str = ""
 
     # ── Single-step mode (always enabled) ─────────────────────────────────
@@ -118,6 +120,8 @@ class TAConfig:
             llvm_install_prefix_sync=os.getenv("LLVM_INSTALL_PREFIX_SYNC", ""),
             conda_env=os.getenv("CONDA_ENV", "ta-upgrade"),
             test_dir=os.getenv("TA_TEST_DIR", "third_party/ascend/unittest/pytest_ut"),
+            test_dirs=_resolve_test_dirs(),
+            test_command=os.getenv("TA_TEST_COMMAND", ""),
             python_exe=os.getenv("PYTHON", ""),
             single_step_mode=_env_bool("TA_SINGLE_STEP_MODE", True),
             ir_max_iterations=_env_int("TA_IR_MAX_ITERATIONS", 3),
@@ -168,6 +172,29 @@ def _env_int_fallback(name: str, legacy_name: str, default: int) -> int:
         except (TypeError, ValueError):
             pass
     return default
+
+
+def _resolve_test_dirs(primary: str = "", extra: str = "") -> list[str]:
+    """Build the ordered list of test directories to run.
+
+    ``TA_TEST_DIR`` provides the primary directory (default
+    ``third_party/ascend/unittest/pytest_ut``).  ``TA_EXTRA_TEST_DIRS``
+    adds additional directories, comma- or space-separated.
+
+    When called from main.py with CLI args, *primary* and *extra* override
+    the env vars.
+    """
+    _primary = primary or os.getenv("TA_TEST_DIR", "third_party/ascend/unittest/pytest_ut")
+    dirs = [_primary] if _primary else []
+
+    extra_raw = extra or os.getenv("TA_EXTRA_TEST_DIRS", "")
+    if extra_raw:
+        for part in extra_raw.replace(",", " ").split():
+            part = part.strip()
+            if part and part not in dirs:
+                dirs.append(part)
+
+    return dirs
 
 
 def _env_choice(name: str, choices: list[str], default: str) -> str:
