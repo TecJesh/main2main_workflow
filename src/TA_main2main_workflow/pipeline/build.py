@@ -255,7 +255,7 @@ def build_triton(
     result = {
         "all_passed": passed,
         "steps": [
-            {"step": "setup_py_install", "passed": passed, "exit_code": proc.returncode}
+            {"step": "setup_py_install", "passed": passed, "exit_code": rc}
         ],
     }
     (step_dir / BUILD_RESULT_FILE).write_text(

@@ -293,8 +293,9 @@ def _do_test_and_fix_with_ir_retry(
         # ── Classify failures: IR vs code ──
         is_ir_issue = _classify_test_failures(ctx, config, step)
         if is_ir_issue:
-            log.info("IR issues detected — generating supplement patch")
-            _ir_supplement_patch(ctx, config, step, target_llvm_hash)
+            log.info(f"IR issues detected — supplementing patch (iter {ir_iter + 1}/{ir_max})")
+            _ir_supplement_patch(ctx, config, step, target_llvm_hash,
+                                supplement_iter=ir_iter + 1)
             # Rebuild LLVM with updated patch
             try:
                 _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
@@ -525,8 +526,16 @@ def _ai_adjust_patch_for_failure(
 
 def _ir_supplement_patch(
     ctx: WorkflowContext, config: TAConfig, step: dict, target_llvm_hash: str,
+    supplement_iter: int = 1,
 ) -> None:
-    """AI generates supplemental IR patches for test failures."""
+    """AI supplements the existing IR patch with missing OP IR changes.
+
+    AI is given:
+    - Test failure logs showing IR errors (collected from test-logs/)
+    - The existing patch file content (first 5000 bytes as context)
+    - The target LLVM commit and llvm-project path for OP definition lookup
+    - IR diagnosis from previous step (chained via previous_step_summary_path)
+    """
     step_id = step["id"]
     ir_dir = WORKSPACE_DIR / STEPS_DIR / step_id / IR_ANALYSIS_DIR
     ir_dir.mkdir(parents=True, exist_ok=True)
@@ -536,21 +545,72 @@ def _ir_supplement_patch(
     patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
 
+    # Collect actual test failure logs
+    error_log_paths = _collect_test_error_logs()
+    if not error_log_paths:
+        log.warning("No test failure logs found — cannot diagnose IR issues")
+
+    # Include IR diagnosis if available (chain from classify step)
+    diagnosis_path = ir_dir / IR_DIAGNOSIS_FILE
+    if diagnosis_path.exists():
+        error_log_paths.append(str(diagnosis_path))
+        log.info(f"Including IR diagnosis: {diagnosis_path}")
+
+    # Build patch content snippet for AI context
+    patch_content_snippet = ""
+    if ascend_patch_file:
+        try:
+            full = Path(ascend_patch_file).read_text(encoding="utf-8", errors="replace")
+            patch_content_snippet = full[:5000]
+            if len(full) > 5000:
+                patch_content_snippet += f"\n\n... ({len(full) - 5000} more bytes)"
+        except Exception:
+            pass
+
+    log.key_value("Existing patch", str(ascend_patch_file) if ascend_patch_file else "(none)")
+    log.key_value("Target LLVM", target_llvm_hash[:12])
+    log.key_value("Test error logs", str(len(error_log_paths)))
+
     run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
-        "ir_supplement",
-        error_logs=json.dumps(ctx.fix_errors, ensure_ascii=False),
+        "ir_generate_patch",
+        error_logs=json.dumps(error_log_paths, ensure_ascii=False),
         extra={
+            "previous_step_id": "ir-diagnose",
+            "previous_step_summary_path": str(diagnosis_path),
             "target_llvm_hash": target_llvm_hash,
             "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
             "ascend_patch_file": ascend_patch_file,
+            "patch_content_snippet": patch_content_snippet,
+            "adjust_mode": "supplement",
+            "supplement_iteration": str(supplement_iter),
+            "ascend_npu_ir_compat_ref": str(
+                Path(__file__).parent.parent / "reference"
+                / "AscendNPU-IR_LLVM_VERSION_COMPAT.md"),
         },
     ))
+
+
+def _collect_test_error_logs() -> list[str]:
+    """Collect actual test failure log files for AI analysis."""
+    error_log_paths: list[str] = []
+    test_log_dir = WORKSPACE_DIR / "test-logs"
+    if test_log_dir.exists():
+        for log_file in sorted(test_log_dir.rglob("*.log")):
+            error_log_paths.append(str(log_file))
+    test_result = WORKSPACE_DIR / TEST_RESULT_FILE
+    if test_result.exists():
+        error_log_paths.append(str(test_result))
+    return error_log_paths
 
 
 def _classify_test_failures(
     ctx: WorkflowContext, config: TAConfig, step: dict,
 ) -> bool:
-    """AI classifies test failures as IR issues or code issues.
+    """AI classifies test failures: IR compatibility vs code issues.
+
+    Collects actual test log files, invokes AI diagnosis, and writes
+    the result to ``IR_DIAGNOSIS_FILE`` so downstream supplement
+    steps can chain from it.
 
     Returns True if IR issues are present (needs supplement),
     False if purely code issues (needs AI fix).
@@ -559,15 +619,42 @@ def _classify_test_failures(
     ir_dir = WORKSPACE_DIR / STEPS_DIR / step_id / IR_ANALYSIS_DIR
     ir_dir.mkdir(parents=True, exist_ok=True)
 
+    # Collect actual test failure logs (not just fix_errors paths)
+    error_log_paths = _collect_test_error_logs()
+    if not error_log_paths:
+        log.warning("No test failure logs found — assuming IR issues")
+        return True
+
+    log.info(f"Collected {len(error_log_paths)} log file(s) for AI diagnosis")
+    for p in error_log_paths[:5]:
+        log.info(f"  - {p}")
+    if len(error_log_paths) > 5:
+        log.info(f"  ... and {len(error_log_paths) - 5} more")
+
     try:
         result = run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
             "ir_diagnose",
-            error_logs=json.dumps(ctx.fix_errors, ensure_ascii=False),
+            error_logs=json.dumps(error_log_paths, ensure_ascii=False),
         ))
-        summary = result.step_summary or ""
-        return "ir_issue" in summary.lower()
-    except Exception:
+    except Exception as e:
+        log.error(f"IR diagnosis failed: {e}")
         return True  # Default to IR issue on failure
+
+    # Write diagnosis result for chaining
+    diagnosis_path = ir_dir / IR_DIAGNOSIS_FILE
+    summary = result.step_summary or ""
+    try:
+        diagnosis_data = json.loads(summary)
+    except json.JSONDecodeError:
+        diagnosis_data = {"summary": summary, "has_ir_issues": "ir_issue" in summary.lower()}
+    diagnosis_path.write_text(
+        json.dumps(diagnosis_data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    log.info(f"IR diagnosis written: {diagnosis_path}")
+
+    has_ir = diagnosis_data.get("has_ir_issues", False) or "ir_issue" in summary.lower()
+    return bool(has_ir)
 
 
 def _do_ai_fix_loop(
