@@ -27,6 +27,8 @@ from TA_main2main_workflow.utils import (
     BUILD_RESULT_FILE, STEPS_DIR, WORKSPACE_DIR,
 )
 from TA_main2main_workflow.pipeline.fix import ai_fix
+from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
+from TA_main2main_workflow.utils.submodule import commit_submodule, submodule_has_changes
 
 log = get_logger(__name__)
 
@@ -40,8 +42,6 @@ def build_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContex
     if config.skip_build:
         log.info("SKIP_BUILD=true — skipping build")
         return ctx.copy_with(build_passed=True)
-
-    ascend_path = Path(ctx.triton_ascend_path)
 
     attempt = 0
     while attempt <= config.max_retries:
@@ -57,9 +57,7 @@ def build_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContex
         if ctx.build_passed:
             # Commit fixes if any
             if attempt > 0:
-                step = ctx.steps[ctx.current_step] if ctx.steps else {"id": "step-0"}
-                step_dir = WORKSPACE_DIR / STEPS_DIR / step["id"]
-                commit_fixes(ascend_path, step_dir)
+                commit_fixes(ctx, config)
             return ctx.copy_with(
                 build_passed=True,
                 build_fix_count=ctx.build_fix_count + (1 if attempt > 0 else 0),
@@ -276,13 +274,105 @@ def build_triton(
     return ctx.copy_with(build_passed=True)
 
 
-def commit_fixes(ascend_path: Path, step_dir: Path) -> None:
-    """Commit AI build fixes."""
+def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
+    """Commit AI build/test fixes with AI-authored commit message.
+
+    Commit message priority:
+      1. ``commit_message.txt`` written by AI (one-line subject)
+      2. First line of ``step_summary.md`` written by AI
+      3. Default generic message
+
+    Commits submodule changes first (AscendNPU-IR), then parent repo.
+    """
+    ascend_path = Path(ctx.triton_ascend_path)
+    step = ctx.steps[ctx.current_step] if ctx.current_step < len(ctx.steps) else None
+    step_id = step["id"] if step else "step-0"
+    step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
+    target_short = ctx.target_commit[:12]
+
+    # ── 1. Commit submodule changes first ──────────────────────────────
+    if submodule_has_changes(ascend_path):
+        commit_submodule(
+            ascend_path,
+            f"[Sync](fix) AI fix for {target_short}\n",
+        )
+
+    # ── 2. Clean temp files before staging ─────────────────────────────
+    cleanup_temp_files(ascend_path)
+
+    # ── 3. Check if there's anything to commit ─────────────────────────
+    status = run_git(ascend_path, "status", "--porcelain").strip()
+    if not status:
+        log.info("No uncommitted fix changes — nothing to commit")
+        return
+
+    # ── 4. Build commit message (AI-authored priority) ─────────────────
+    commit_subject = _read_ai_commit_subject(step_dir, target_short)
+    commit_msg = (
+        f"[Sync](fix) {commit_subject}\n\n"
+        f"Upstream target: {target_short}\n"
+        f"Fix attempt: {ctx.retry_count}\n"
+        f"Work branch: {ctx.work_branch}\n"
+    )
+
+    # ── 5. Stage and commit ────────────────────────────────────────────
+    log.section("Commit AI Fixes")
     try:
-        if run_git(ascend_path, "status", "--porcelain").strip():
-            run_git(ascend_path, "add", "-A")
-            run_git(ascend_path, "commit", "-s", "-m",
-                    "[Sync](fix) AI build fix\n")
-            log.status(True, "Build fixes committed")
+        staged_files = run_git(ascend_path, "diff", "--name-only", "HEAD").strip()
+        run_git(ascend_path, "add", "-A")
+        staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
+        if staged:
+            files = staged.splitlines()
+            log.info(f"Files staged ({len(files)}):")
+            for f in files[:20]:
+                log.info(f"  {f}")
+            if len(files) > 20:
+                log.info(f"  ... and {len(files) - 20} more")
+        run_git(ascend_path, "commit", "-s", "-m", commit_msg)
+        log.status(True, f"Committed: {commit_subject[:60]}")
     except Exception as e:
-        log.warning(f"Failed to commit build fixes: {e}")
+        stderr = (getattr(e, "stderr", "") or "").strip()
+        if "nothing to commit" in stderr.lower():
+            log.info("Nothing to commit (AI made no changes)")
+        else:
+            log.warning(f"Failed to commit fixes: {stderr[-200:]}")
+
+
+def _read_ai_commit_subject(step_dir: Path, target_short: str) -> str:
+    """Extract AI-authored commit subject from fix output files.
+
+    Priority:
+      1. ``commit_message.txt`` — AI-written one-line subject
+      2. ``step_summary.md``  — first heading line of AI summary
+      3. Default generic fallback
+    """
+    # Priority 1: AI-written commit_message.txt
+    cmt_file = step_dir / "commit_message.txt"
+    if cmt_file.exists():
+        try:
+            subject = cmt_file.read_text(encoding="utf-8").strip()
+            # Take first line only, cap at 72 chars
+            subject = subject.split("\n")[0].strip()[:72]
+            if subject:
+                log.info(f"Using AI-written commit message: {subject}")
+                return subject
+        except Exception:
+            pass
+
+    # Priority 2: First line of step_summary.md
+    summary_file = step_dir / "step_summary.md"
+    if summary_file.exists():
+        try:
+            first_line = summary_file.read_text(encoding="utf-8").strip().split("\n")[0]
+            # Strip leading # marks and whitespace
+            subject = first_line.lstrip("#").strip()[:72]
+            if subject:
+                log.info(f"Using step_summary.md first line: {subject}")
+                return subject
+        except Exception:
+            pass
+
+    # Priority 3: Default
+    subject = f"Resolve build/test failures for {target_short}"
+    log.info(f"Using default commit message: {subject}")
+    return subject
