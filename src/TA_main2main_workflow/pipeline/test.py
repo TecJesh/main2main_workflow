@@ -23,6 +23,10 @@ from TA_main2main_workflow.pipeline.fix import ai_fix
 
 log = get_logger(__name__)
 
+# Single-file pre-test to smoke-check before running the full suite.
+# Must pass before any other tests are attempted.
+_PRETEST_FILE = "third_party/ascend/unittest/pytest_ut/test_add.py"
+
 
 def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     """Test + AI fix loop with OOM detection and reduced concurrency retry.
@@ -36,6 +40,12 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
         return ctx.copy_with(test_passed=True, pytest_passed=True)
 
     ascend_path = Path(ctx.triton_ascend_path)
+
+    # ── Pre-test: run a single smoke test before the full suite ──────
+    ctx = _run_pretest_and_fix(ctx, config, ascend_path)
+    if not ctx.test_passed:
+        log.error("Pre-test failed after all retries — aborting")
+        return ctx.copy_with(test_passed=False, pytest_passed=False)
 
     attempt = 0
     while attempt <= config.max_retries:
@@ -81,6 +91,62 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
 # ═══════════════════════════════════════════════════════════════════════════
 # Internal
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def _run_pretest_and_fix(
+    ctx: WorkflowContext, config: TAConfig, ascend_path: Path,
+) -> WorkflowContext:
+    """Run a single-file pre-test (test_add.py) with its own fix loop.
+
+    The pre-test must pass before the full test suite runs.  It uses the
+    same OOM detection → AI fix → rebuild pattern as the main loop, but
+    only exercises one known-good test file to smoke-check the build.
+    """
+    pretest_path = ascend_path / _PRETEST_FILE
+    if not pretest_path.exists():
+        log.warning(f"Pre-test file not found: {_PRETEST_FILE} — skipping")
+        return ctx.copy_with(test_passed=True)
+
+    log.section("Pre-Test (smoke check)")
+    log.key_value("file", _PRETEST_FILE)
+
+    pretest_attempt = 0
+    while pretest_attempt <= config.max_retries:
+        ctx = ctx.copy_with(retry_count=pretest_attempt)
+
+        if pretest_attempt > 0:
+            # OOM detection: check BEFORE AI fix
+            if detect_oom_in_tests(ctx):
+                log.warning("OOM in pre-test — reducing concurrency")
+                oom_ctx = rerun_tests_reduced_concurrency(ascend_path, config)
+                if oom_ctx is not None and oom_ctx.test_passed:
+                    log.status(True, "Pre-test passed (OOM rerun)")
+                    return ctx.copy_with(test_passed=True)
+
+            log.header(f"Pre-Test Fix Attempt {pretest_attempt}/{config.max_retries}")
+            ctx = ai_fix(ctx, config, attempt=pretest_attempt, mode="fix")
+
+            with timed("pretest-fix-rebuild"):
+                ctx = build_triton(ctx, config, clean=False)
+            if not ctx.build_passed:
+                log.error("Rebuild after pre-test AI fix failed")
+                pretest_attempt += 1
+                continue
+
+        # Run the single pre-test file
+        with timed("pretest"):
+            ctx = _run_pytest(ctx, config, [_PRETEST_FILE],
+                              test_procs=1, label="pretest")
+
+        if ctx.test_passed:
+            log.status(True, "Pre-test passed")
+            return ctx.copy_with(test_passed=True)
+
+        log.info(f"Pre-test failed (attempt {pretest_attempt + 1}) — retrying")
+        pretest_attempt += 1
+
+    log.error(f"Pre-test failed after {config.max_retries} retries")
+    return ctx.copy_with(test_passed=False)
 
 
 def run_tests(ctx: WorkflowContext, config: TAConfig,
