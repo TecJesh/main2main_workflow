@@ -51,25 +51,45 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     log.info(
         f"[plan] Scanning {len(commits)} upstream commits ({base[:8]}..{target[:8]})"
     )
-    log.info(f"[plan] Line budget: {line_budget}")
+    log.info(f"[plan] Line budget: {line_budget} (no commit-count limit)")
 
     if config.progressive_merge:
-        lines_per_commit, llvm_commits = _scan_commits(triton_path, commits)
+        lines_per_commit, llvm_commits, source_touching = _scan_commits(triton_path, commits)
         steps = _plan_steps_inner(
             commits, lines_per_commit, base, line_budget, llvm_commits
         )
         _enrich_steps(triton_path, steps)
 
+        # Print per-step detail (matching pre-refactor output)
+        for s in steps:
+            reason_tag = ""
+            if s.get("reason") == "llvm_version":
+                reason_tag = " [LLVM VERSION]"
+            elif s.get("reason") == "oversized":
+                reason_tag = " [OVERSIZED]"
+            budget_label = "OVERSIZED" if s["source_changed_lines"] > line_budget else "OK"
+            log.info(
+                f"        {s['id']}: {s['commit_count']} commits, "
+                f"{s['source_changed_lines']} lines ({budget_label})"
+                f"{reason_tag}"
+            )
+
+        total_commits = sum(s["commit_count"] for s in steps)
         plan = {
             "base_commit": base,
             "target_commit": target,
             "line_budget": line_budget,
+            "total_source_commits": source_touching,
+            "total_commits": total_commits,
             "total_steps": len(steps),
             "steps": steps,
         }
         _write_plan(plan)
 
-        log.info(f"[plan] Generated {len(steps)} step(s)")
+        log.info(
+            f"[plan] Generated {len(steps)} step(s) totaling "
+            f"{source_touching} source-touching commits"
+        )
         return ctx.copy_with(steps=steps, total_steps=len(steps))
     else:
         return ctx.copy_with(
@@ -138,7 +158,8 @@ def _source_lines_for_commit(repo: Path, sha: str) -> int:
     for d in SOURCE_DIRS:
         try:
             output = run_git(
-                repo, "diff-tree", "--no-commit-id", "--numstat", "-r", sha, "--", d,
+                repo, "diff-tree", "--no-commit-id", "-r", "--numstat",
+                sha, "--", f":(top){d}",
             )
         except Exception:
             continue
@@ -165,18 +186,28 @@ def _commit_changed_llvm_hash(repo: Path, sha: str) -> bool:
 
 def _scan_commits(
     repo: Path, commits: list[dict[str, str]]
-) -> tuple[dict[str, int], set[str]]:
+) -> tuple[dict[str, int], set[str], int]:
     lines_per_commit: dict[str, int] = {}
     llvm_commits: set[str] = set()
+    source_touching = 0
     for i, c in enumerate(commits):
         lines = _source_lines_for_commit(repo, c["sha"])
         lines_per_commit[c["sha"]] = lines
+        if lines > 0:
+            source_touching += 1
         if _commit_changed_llvm_hash(repo, c["sha"]):
             llvm_commits.add(c["sha"])
-            log.info(f"[plan] LLVM version change: {c['sha'][:8]} {c['subject'][:80]}")
+            log.info(f"[plan]   LLVM version change detected: {c['sha'][:8]} {c['subject'][:80]}")
         if (i + 1) % 50 == 0:
-            log.info(f"[plan] ... scanned {i + 1}/{len(commits)} commits")
-    return lines_per_commit, llvm_commits
+            log.info(f"[plan]   ... scanned {i + 1}/{len(commits)} commits")
+    # Print zero-lines summary (matching pre-refactor)
+    if source_touching < len(commits):
+        log.info(f"[plan] {len(commits) - source_touching} commits touch zero "
+                 f"source lines — included in steps with 0 line contribution")
+    if llvm_commits:
+        log.info(f"[plan] {len(llvm_commits)} commit(s) changed LLVM hash "
+                 f"— each will be a solo merge step")
+    return lines_per_commit, llvm_commits, source_touching
 
 
 def _make_step(

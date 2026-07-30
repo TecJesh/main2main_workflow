@@ -27,7 +27,10 @@ from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check, stream_cmd
 from TA_main2main_workflow.pipeline.build import build_and_fix_loop
-from TA_main2main_workflow.pipeline.test import run_tests, detect_oom_in_tests, rerun_tests_reduced_concurrency, test_and_fix_loop
+from TA_main2main_workflow.pipeline.test import (
+    run_tests, detect_oom_in_tests, rerun_tests_reduced_concurrency,
+    test_and_fix_loop, _run_pretest_and_fix,
+)
 from TA_main2main_workflow.pipeline.fix import ai_fix
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR, STEPS_DIR, BUILD_RESULT_FILE, TEST_RESULT_FILE,
@@ -279,6 +282,13 @@ def _do_test_and_fix_with_ir_retry(
     llvm_project = config.llvm_project
     llvm_install = config.llvm_install
     ir_max = config.ir_max_iterations
+
+    # ── Pre-test: smoke check before full test suite ────────────────
+    if not config.skip_e2e_test:
+        ctx = _run_pretest_and_fix(ctx, config, ascend_path)
+        if not ctx.test_passed:
+            log.error("Pre-test failed after all retries — aborting")
+            return ctx.copy_with(test_passed=False, pytest_passed=False)
 
     for ir_iter in range(ir_max + 1):
         if ir_iter > 0:
