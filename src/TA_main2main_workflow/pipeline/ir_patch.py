@@ -283,16 +283,16 @@ def _do_test_and_fix_with_ir_retry(
     llvm_install = config.llvm_install
     ir_max = config.ir_max_iterations
 
-    # ── Pre-test: smoke check before full test suite ────────────────
-    if not config.skip_e2e_test:
-        ctx = _run_pretest_and_fix(ctx, config, ascend_path)
-        if not ctx.test_passed:
-            log.error("Pre-test failed after all retries — aborting")
-            return ctx.copy_with(test_passed=False, pytest_passed=False)
-
     for ir_iter in range(ir_max + 1):
         if ir_iter > 0:
             log.header(f"IR Supplement Iteration {ir_iter}/{ir_max}")
+
+        # ── Pre-test: smoke check before every test run ──────────────
+        if not config.skip_e2e_test:
+            ctx = _run_pretest_and_fix(ctx, config, ascend_path)
+            if not ctx.test_passed:
+                log.error("Pre-test failed after all retries — aborting")
+                return ctx.copy_with(test_passed=False, pytest_passed=False)
 
         # ── Run tests ──
         ctx = run_tests(ctx, config)
