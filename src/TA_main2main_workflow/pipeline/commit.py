@@ -57,10 +57,12 @@ def commit_step(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     if len(staged_files) > 30:
         log.info(f"  ... and {len(staged_files) - 30} more")
 
+    start_short = step.get("start_commit", "?")[:12]
     end_short = step["end_commit"][:12]
     msg = (
-        f"sync: merge upstream commits for step {step_id}\n\n"
-        f"Upstream range: {step.get('start_commit', '?')[:12]}..{end_short}\n"
+        f"[Sync](feat) Merge upstream commits for step {step_id}"
+        f"({start_short}..{end_short}, {step['commit_count']} commits)\n\n"
+        f"Upstream range: {start_short}..{end_short}\n"
         f"Step: {ctx.current_step + 1}/{ctx.total_steps}\n"
         f"Commits: {step['commit_count']}\n"
     )
