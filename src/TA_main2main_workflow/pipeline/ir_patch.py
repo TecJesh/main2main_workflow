@@ -788,12 +788,25 @@ def _ir_supplement_patch(
 
 
 def _collect_test_error_logs() -> list[str]:
-    """Collect actual test failure log files for AI analysis."""
+    """Collect actual test failure log files for AI analysis.
+
+    Gathers all per-suite JUnit XMLs, result JSONs, and custom test
+    output logs so the AI has the full failure picture across all
+    sequentially-run test suites.
+    """
     error_log_paths: list[str] = []
     test_log_dir = WORKSPACE_DIR / "test-logs"
     if test_log_dir.exists():
-        for log_file in sorted(test_log_dir.rglob("*.log")):
-            error_log_paths.append(str(log_file))
+        # JUnit XML per suite (pytest-junit-primary.xml, pytest-junit-extra-*.xml)
+        for f in sorted(test_log_dir.glob("pytest-junit-*.xml")):
+            error_log_paths.append(str(f))
+        # Result JSON per suite (test-result-primary.json, etc.)
+        for f in sorted(test_log_dir.glob("test-result-*.json")):
+            error_log_paths.append(str(f))
+        # Custom test command output
+        for f in sorted(test_log_dir.glob("*.log")):
+            error_log_paths.append(str(f))
+    # Legacy single-result file (backward compat)
     test_result = WORKSPACE_DIR / TEST_RESULT_FILE
     if test_result.exists():
         error_log_paths.append(str(test_result))

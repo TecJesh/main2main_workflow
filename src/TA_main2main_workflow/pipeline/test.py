@@ -85,29 +85,62 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
 
 def run_tests(ctx: WorkflowContext, config: TAConfig,
               python_exe: str = "", test_procs: int = 0) -> WorkflowContext:
-    """Execute tests: always runs default pytest ut first, then optionally
-    appends a custom test command if ``TA_TEST_COMMAND`` is set.
+    """Execute tests sequentially.
 
-    Tests pass only if ALL test suites pass.
+    1. Default pytest UT (primary test dir) — always runs first
+    2. Extra test dirs — each runs individually, one after another
+    3. Custom test command (``TA_TEST_COMMAND``) — runs last if set
+
+    Test results and error logs accumulate across all runs so AI fix
+    steps can see the full failure picture.
     """
-    # 1. Always run the default pytest ut
-    ctx = _run_pytest(ctx, config, python_exe=python_exe, test_procs=test_procs)
-    if not ctx.test_passed and not config.test_command:
-        return ctx  # only pytest, already failed — no need to continue
+    test_dirs = list(config.test_dirs)
+    if not test_dirs and not config.test_command:
+        log.warning("No test directories or test command configured")
+        return ctx.copy_with(test_passed=True, test_log_dir=str(WORKSPACE_DIR / "test-logs"))
 
-    # 2. Optionally run additional custom test command
+    primary = test_dirs[0] if test_dirs else None
+    extras = test_dirs[1:] if len(test_dirs) > 1 else []
+
+    all_passed = True
+    all_errors: list[str] = list(ctx.fix_errors)
+
+    # ── Step 1: Default pytest UT ─────────────────────────────────────
+    if primary:
+        log.section("Default pytest UT")
+        ctx = _run_pytest(ctx, config, [primary], python_exe=python_exe,
+                          test_procs=test_procs, label="primary")
+        all_passed = all_passed and ctx.test_passed
+        all_errors.extend(ctx.fix_errors)
+
+    # ── Step 2: Extra test dirs — one by one ──────────────────────────
+    for i, extra_dir in enumerate(extras):
+        log.section(f"Extra Tests ({i + 1}/{len(extras)}): {extra_dir}")
+        extra_ctx = _run_pytest(ctx, config, [extra_dir], python_exe=python_exe,
+                                test_procs=test_procs, label=f"extra-{i + 1}")
+        if not extra_ctx.test_passed:
+            all_passed = False
+        all_errors.extend(extra_ctx.fix_errors)
+
+    # ── Step 3: Custom test command ───────────────────────────────────
     if config.test_command:
-        log.section("Additional Tests (TA_TEST_COMMAND)")
+        log.section("Custom Test Command (TA_TEST_COMMAND)")
         custom_ctx = _run_custom_test(ctx, config)
-        # Merge results: pass only if both suites pass
-        all_passed = ctx.test_passed and custom_ctx.test_passed
-        merged_errors = ctx.fix_errors + custom_ctx.fix_errors
-        ctx = ctx.copy_with(
-            test_passed=all_passed,
-            fix_errors=merged_errors,
-            test_log_dir=str(WORKSPACE_DIR / "test-logs"),
-        )
+        if not custom_ctx.test_passed:
+            all_passed = False
+        all_errors.extend(custom_ctx.fix_errors)
 
+    # Merge: pass only if ALL suites pass; accumulate all error paths
+    ctx = ctx.copy_with(
+        test_passed=all_passed,
+        fix_errors=all_errors,
+        test_log_dir=str(WORKSPACE_DIR / "test-logs"),
+    )
+
+    if all_passed:
+        log.status(True, "All test suites passed")
+    else:
+        log.error(f"Tests FAILED — {len(all_errors)} error log(s)")
     return ctx
 
 
@@ -171,7 +204,11 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
                 log.warning(f"Could not parse JUnit XML: {junit_xml}")
 
     passed = rc == 0 and pf == 0 and pe == 0
+
+    # Write per-suite result file (unique name so it doesn't clobber pytest results)
+    result_file = test_log_dir / "test-result-custom.json"
     summary = {
+        "label": "custom",
         "exit_code": rc,
         "passed": passed,
         "test_log": str(junit_xml or output_log),
@@ -180,7 +217,7 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         "failed_count": pf,
         "error_count": pe,
     }
-    (WORKSPACE_DIR / TEST_RESULT_FILE).write_text(
+    result_file.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
@@ -188,7 +225,7 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         log.error(f"Tests FAILED (exit={rc}, {pf} failed, {pe} errors)")
         return ctx.copy_with(
             test_passed=False,
-            fix_errors=[str(output_log), str(WORKSPACE_DIR / TEST_RESULT_FILE)],
+            fix_errors=[str(junit_xml or output_log), str(result_file)],
             test_log_dir=str(test_log_dir),
         )
     log.status(True, f"All tests passed ({tp} passed)" if tp else f"Tests passed (exit 0)")
@@ -201,12 +238,14 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 
 
 def _run_pytest(ctx: WorkflowContext, config: TAConfig,
-                python_exe: str = "", test_procs: int = 0) -> WorkflowContext:
-    """Execute pytest across all configured test directories.
+                test_dirs: list[str],
+                python_exe: str = "", test_procs: int = 0,
+                label: str = "pytest") -> WorkflowContext:
+    """Execute pytest for the given *test_dirs* in a single invocation.
 
-    Test directories are resolved from ``config.test_dirs`` (built from
-    ``TA_TEST_DIR`` + ``TA_EXTRA_TEST_DIRS`` env vars).  All directories
-    are passed to a single pytest invocation.
+    Each call with a unique *label* writes to a separate JUnit XML file
+    (``pytest-junit-{label}.xml``) so results from different test suites
+    don't clobber each other.
     """
     ascend_path = Path(ctx.triton_ascend_path)
     test_log_dir = WORKSPACE_DIR / "test-logs"
@@ -217,7 +256,7 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig,
 
     # Resolve test directories, skipping missing ones
     test_paths: list[Path] = []
-    for d in config.test_dirs:
+    for d in test_dirs:
         p = (ascend_path / d).resolve()
         if p.exists():
             test_paths.append(p)
@@ -225,10 +264,10 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig,
             log.warning(f"Test directory not found, skipping: {p}")
 
     if not test_paths:
-        log.warning("No test directories found — treating tests as passed")
+        log.warning(f"[{label}] No test directories found — treating as passed")
         return ctx.copy_with(test_passed=True)
 
-    junit_xml = test_log_dir / "pytest-junit.xml"
+    junit_xml = test_log_dir / f"pytest-junit-{label}.xml"
     pytest_bin = shutil.which("pytest")
     cmd = (
         [pytest_bin] if pytest_bin
@@ -237,19 +276,18 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig,
     cmd += [str(p) for p in test_paths]
     cmd += ["-n", str(procs), f"--junitxml={junit_xml}"]
 
-    log.section("Run Tests (pytest)")
-    log.key_value("test dirs", ", ".join(str(p.relative_to(ascend_path)) for p in test_paths))
-    log.info(f"cmd: {' '.join(cmd)}")
+    log.key_value(f"[{label}] test dirs", ", ".join(str(p.relative_to(ascend_path)) for p in test_paths))
+    log.info(f"[{label}] cmd: {' '.join(cmd)}")
     _start = time.time()
     try:
         result = subprocess.run(cmd, cwd=ascend_path, timeout=3000)
         rc = result.returncode
     except subprocess.TimeoutExpired:
         rc = -1
-        log.warning("pytest timed out after 3000s")
+        log.warning(f"[{label}] pytest timed out after 3000s")
 
     elapsed = time.time() - _start
-    log.info(f"pytest finished in {elapsed:.0f}s, returncode={rc}")
+    log.info(f"[{label}] pytest finished in {elapsed:.0f}s, returncode={rc}")
 
     pf = pe = tp = 0
     if junit_xml.exists():
@@ -265,7 +303,11 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig,
             pass
 
     passed = pf == 0 and pe == 0
+
+    # Write per-suite result file (unique name so they don't clobber)
+    result_file = test_log_dir / f"test-result-{label}.json"
     summary = {
+        "label": label,
         "exit_code": 0 if passed else 1,
         "passed": passed,
         "test_log": str(junit_xml),
@@ -274,18 +316,18 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig,
         "failed_count": pf,
         "error_count": pe,
     }
-    (WORKSPACE_DIR / TEST_RESULT_FILE).write_text(
+    result_file.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
     if not passed:
-        log.error(f"Tests FAILED ({pf} failed, {pe} errors)")
+        log.error(f"[{label}] Tests FAILED ({pf} failed, {pe} errors)")
         return ctx.copy_with(
             test_passed=False,
-            fix_errors=[str(WORKSPACE_DIR / TEST_RESULT_FILE)],
+            fix_errors=[str(junit_xml), str(result_file)],
             test_log_dir=str(test_log_dir),
         )
-    log.status(True, f"All tests passed ({tp} passed)")
+    log.status(True, f"[{label}] All tests passed ({tp} passed)")
     return ctx.copy_with(test_passed=True, test_log_dir=str(test_log_dir))
 
 
@@ -301,14 +343,13 @@ def detect_oom_in_tests(ctx: WorkflowContext) -> bool:
         "Exit code 137", "exit code 137",
         "CUDA error", "cuMemAlloc", "NPU error",
     ]
-    # Scan JUnit XML
-    junit_xml = test_log_dir / "pytest-junit.xml"
-    if junit_xml.exists():
+    # Scan ALL JUnit XML files (each test suite writes its own)
+    for junit_xml in sorted(test_log_dir.glob("pytest-junit-*.xml")):
         try:
             content = junit_xml.read_text(encoding="utf-8", errors="replace").lower()
             for kw in oom_keywords:
                 if kw.lower() in content:
-                    log.warning(f"OOM indicator found in junitxml: '{kw}'")
+                    log.warning(f"OOM indicator '{kw}' found in: {junit_xml.name}")
                     return True
         except Exception:
             pass
