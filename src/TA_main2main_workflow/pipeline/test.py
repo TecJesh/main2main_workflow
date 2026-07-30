@@ -18,7 +18,7 @@ from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.tracker import timed
 from TA_main2main_workflow.utils import TEST_RESULT_FILE, WORKSPACE_DIR, STEPS_DIR
-from TA_main2main_workflow.pipeline.build import build_triton
+from TA_main2main_workflow.pipeline.build import build_triton, commit_fixes
 from TA_main2main_workflow.pipeline.fix import ai_fix
 
 log = get_logger(__name__)
@@ -76,6 +76,9 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
             ctx = run_tests(ctx, config)
 
         if ctx.test_passed:
+            # Commit AI test fixes with AI-authored message
+            if attempt > 0:
+                commit_fixes(ctx, config)
             return ctx.copy_with(
                 test_passed=True, pytest_passed=True,
                 test_fix_count=ctx.test_fix_count + (1 if attempt > 0 else 0),
@@ -127,6 +130,8 @@ def _run_pretest_and_fix(
             ctx = _run_pytest(ctx, config, [_PRETEST_FILE],
                               test_procs=1, label="pretest")
         if ctx.test_passed:
+            if pretest_attempt > 0:
+                commit_fixes(ctx, config)
             log.status(True, "Pre-test passed")
             return ctx.copy_with(test_passed=True)
 
