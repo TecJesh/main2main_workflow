@@ -33,30 +33,48 @@ The active mode is: {mode}
 
 ── report mode ────────────────────────────────────────────────────
 
-  Trigger: {mode} is "report" (sync complete, generate summary).
+  Trigger: {mode} is "report" (sync complete, generate PR description).
 
-  ALL data is in {error_logs} (JSON context file). Read it first.
+  ALL context data is in {error_logs} (JSON context file). Read it first.
 
-  Generate a comprehensive report to {step_dir}/step_summary.md:
+  Generate the PR description to {step_dir}/step_summary.md with these
+  sections (write in English — this goes to a GitHub PR):
 
-    ## 1. Executive Summary (总体概况)
-    - Upstream commits synced, steps, conflicts, build/test fixes, AI rounds
+    ## Summary
+    - Upstream Triton commits synced: {upstream_commits_count} commits
+    - Steps: {total_steps} step(s)
+    - Conflicts resolved: {conflict_files_resolved} file(s)
+    - AI build fixes: {build_fix_count} round(s)
+    - AI test fixes: {test_fix_count} round(s)
+    - Status: {final_status}
 
-    ## 2. Per-Step Analysis (逐步分析)
-    - Commits merged, modules affected, conflicts and resolutions
-    - Build errors: root causes and fixes (specific files and error messages)
-    - Test failures: root causes and fixes (specific cases and fixes)
+    ## Background
+    - Source: triton-lang/triton (upstream)
+    - Target: this triton-ascend fork
+    - Why this sync is needed (e.g., keeping Ascend backend aligned with
+      upstream API changes, LLVM version updates, new features)
 
-    ## 3. Fix Pattern Analysis (修复模式总结)
-    - Cross-step patterns, API changes, recurring issues
-    - Fixes that required multiple attempts
+    ## Changes
+    - Per-step breakdown: commits merged, source lines changed, modules affected
+    - Any LLVM version changes and IR compatibility patches applied
+    - List key files modified by AI fixes (from commit history or fix_errors)
 
-    ## 4. Recommendations (建议)
-    - Preventative measures, fragile areas
+    ## Impact
+    - Which Ascend backend modules are affected (python/triton_ascend/,
+      third_party/ascend/, lib/Target/Ascend/)
+    - Any API/ABI changes that downstream consumers need to know about
+    - Test results: passed/failed counts per suite
 
-  Rules: DO NOT modify source code. Write in Chinese (中文).
-  Be specific with file paths, error messages, commit SHAs.
-  用中文写同步工作流总结报告
+    ## Additional Notes
+    - Any known limitations or follow-up work needed
+    - Recommendations for reviewers
+
+  Rules:
+    - DO NOT modify source code
+    - Write in English (this is a GitHub PR description)
+    - Be specific: cite commit SHAs, file paths, error messages
+    - Read all context files in {error_logs} before writing
+    - Keep it concise but thorough — reviewers depend on this
 
 ── conflict mode ──────────────────────────────────────────────────
 
@@ -172,12 +190,14 @@ The active mode is: {mode}
        - Confirm the fix directly addresses the root cause, not just
          silences the error.
     7. Write fix summary to {step_dir}/step_summary.md
-    8. Write a ONE-LINE commit message to {step_dir}/commit_message.txt
-       - Format: "<type>: <brief description>"
-       - Types: fix, build, test, cmake, compat
-       - Example: "fix: update AscendDotOp::build() signature for LLVM 22"
-       - Example: "test: fix pytest assertion for renamed attribute getLhs→getA"
-       - Keep under 72 characters, be specific about WHAT was fixed
+    8. Write a ONE-LINE commit subject to {step_dir}/commit_message.txt
+       - Describe WHAT was fixed, be specific (file/module and change)
+       - Keep under 72 characters
+       - Do NOT add a type prefix like "fix:" or "build:" — the workflow
+         will wrap it as [Sync](fix) automatically
+       - Good Example: "Update AscendDotOp::build() signature for LLVM 22"
+       - Good Example: "Fix pytest assertion for renamed attribute getLhs to getA"
+       - Bad Example:  "fix: update AscendDotOp::build() signature" (redundant fix:)
        - This line will be used as the git commit subject
 
   Common failure patterns in Triton-Ascend:
