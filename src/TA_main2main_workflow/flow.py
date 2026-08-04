@@ -200,7 +200,7 @@ class TA_Main2MainFlow:
         # ── Phase 4: Finalize ───────────────────────────────────────
         log.header("Phase 4: Finalize")
         with timed("finalize"):
-            ctx = finalize(ctx)
+            ctx = finalize(ctx, self.config)
 
         # ── Phase 5: Push PR ────────────────────────────────────────
         if self.config.push_to_github:
