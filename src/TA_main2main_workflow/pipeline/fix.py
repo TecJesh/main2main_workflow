@@ -94,7 +94,7 @@ def ai_fix(ctx: WorkflowContext, config: TAConfig, attempt: int = 1,
             rejection_file = fix_dir / "fix_rejection.txt"
             rejection_file.write_text(
                 f"VALIDATION REJECTED: {reason}\n"
-                f"Allowed prefix: third_party/ascend/\n"
+                f"Allowed paths: {', '.join(_ALLOWED_FIX_PREFIXES)}\n"
                 f"Modified files: {result.modified_files}\n",
                 encoding="utf-8",
             )
@@ -112,6 +112,15 @@ def ai_fix(ctx: WorkflowContext, config: TAConfig, attempt: int = 1,
         return ctx
 
 
+# Paths AI is allowed to modify when fixing test failures.
+# Build fixes are restricted to third_party/ascend/ only.
+_ALLOWED_FIX_PREFIXES = [
+    "third_party/ascend/",
+    "python/triton/extension",
+    "python/triton/runtime/libentry.py",
+]
+
+
 def validate_fix(
     ascend_path: Path,
     pre_fix_files: set[str],
@@ -119,23 +128,19 @@ def validate_fix(
 ) -> tuple[bool, str]:
     """Validate that AI fixes only touch allowed paths.
 
-    Enforces that all changes are under ``third_party/ascend/``.
-
     Returns (is_valid, reason).
     """
-    ALLOWED_PREFIX = "third_party/ascend/"
-
     if not modified_files:
         return False, "No files were modified"
 
     for f in modified_files:
-        if not f.startswith(ALLOWED_PREFIX):
+        if not any(f.startswith(p) for p in _ALLOWED_FIX_PREFIXES):
             return False, (
-                f"File '{f}' is outside allowed path '{ALLOWED_PREFIX}'. "
-                f"AI fixes must only modify files under third_party/ascend/"
+                f"File '{f}' is outside allowed paths. "
+                f"Allowed: {', '.join(_ALLOWED_FIX_PREFIXES)}"
             )
 
-    return True, "all changes within allowed path"
+    return True, "all changes within allowed paths"
 
 
 def _list_tracked_files(repo: Path) -> set[str]:

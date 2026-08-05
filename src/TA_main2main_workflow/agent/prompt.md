@@ -172,8 +172,11 @@ The active mode is: {mode}
          {ascend_path}/third_party/ascend/.  All other paths are read-only.
          If an upstream API change broke the build, adapt the Ascend backend
          code that depends on it.
-       - For TEST / PYTEST failures: FIRST try to fix in
-         {ascend_path}/third_party/ascend/ or {ascend_path}/python/triton_ascend/.
+       - For TEST / PYTEST failures: FIRST try to fix in Ascend-specific
+         code under:
+           - {ascend_path}/third_party/ascend/
+           - {ascend_path}/python/triton/extension/
+           - {ascend_path}/python/triton/runtime/libentry.py
          Most test failures can be resolved by adapting the Ascend backend
          without touching upstream code.  If — and only if — root cause
          analysis shows the issue is inherently in upstream code with no
@@ -183,8 +186,11 @@ The active mode is: {mode}
        the Ascend call sites, not the upstream declarations.
     6. SELF-REVIEW before returning:
        - List every file you modified.
-       - For each file, verify it is under {ascend_path}/third_party/ascend/
-         (or under {ascend_path}/python/triton_ascend/ for test fixes only).
+       - For build fixes, verify it is under {ascend_path}/third_party/ascend/
+       - For test fixes, verify it is under one of:
+           {ascend_path}/third_party/ascend/
+           {ascend_path}/python/triton/extension/
+           {ascend_path}/python/triton/runtime/libentry.py
        - If ANY modified file is outside these paths, REVERT that change
          BEFORE returning — the fix will be rejected by the workflow.
        - Confirm the fix directly addresses the root cause, not just
