@@ -81,6 +81,11 @@ class TAConfig:
     # ── IR patch ──────────────────────────────────────────────────────────
     ir_max_iterations: int = 3
 
+    # ── External test ─────────────────────────────────────────────────────
+    external_test_enabled: bool = False  # TA_EXTERNAL_TEST_ENABLED env
+    external_test_config: str = ""  # TA_EXTERNAL_TEST_CONFIG env
+    external_test_mode: str = "inline"  # TA_EXTERNAL_TEST_MODE env
+
     # ═══════════════════════════════════════════════════════════════════════
     @classmethod
     def from_env(cls) -> TAConfig:
@@ -132,6 +137,11 @@ class TAConfig:
             python_exe=os.getenv("PYTHON", ""),
             single_step_mode=_env_bool("TA_SINGLE_STEP_MODE", True),
             ir_max_iterations=_env_int("TA_IR_MAX_ITERATIONS", 3),
+            external_test_enabled=_env_bool("TA_EXTERNAL_TEST_ENABLED", False),
+            external_test_config=os.getenv("TA_EXTERNAL_TEST_CONFIG", ""),
+            external_test_mode=_env_choice(
+                "TA_EXTERNAL_TEST_MODE", ["inline", "standalone", "off"], "inline"
+            ),
         )
 
     @property

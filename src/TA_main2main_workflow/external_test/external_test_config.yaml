@@ -1,0 +1,28 @@
+# ── 全局开关：是否启用外部测试（默认 false，需用户主动开启）──
+enabled: false                  # 设为 true 启用外部测试
+
+# ── 运行模式：inline（阻塞主流程）| standalone（不阻塞）| off（禁用）──
+mode: inline                    # 仅在 enabled=true 时生效
+
+# ── 全局默认值 ────────────────────────────────────────────────────
+test_procs: 8                   # 每个外部算子仓 pytest 并行进程数
+max_retries: 5                  # 每仓最大 AI 修复重试次数
+timeout: 7200                   # 单仓测试超时（秒）
+
+# ── 外部算子仓列表（按配置顺序串行执行）───────────────────────────
+external_test_repos:
+  # 示例配置 — 取消注释并修改为实际仓库：
+  # - name: "Liger-Kernel"
+  #   url: "https://github.com/linkedin/Liger-Kernel.git"
+  #   branch: "main"
+  #   # install_cmd: "pip install -e ."    # 可选，为空则跳过安装
+  #   test_cases:
+  #     - "test/transformers/test_attn_res.py"
+  #     - "test/transformers/test_auto_model.py"
+  #
+  # - name: "flash-linear-attention"
+  #   url: "https://github.com/fla-org/flash-linear-attention.git"
+  #   branch: "main"
+  #   test_cases:
+  #     - "tests/context_parallel/test_cp_conv.py"
+  #     - "tests/context_parallel/test_cp_dplr.py"

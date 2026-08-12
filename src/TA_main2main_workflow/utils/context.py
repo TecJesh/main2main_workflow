@@ -84,6 +84,11 @@ class WorkflowContext:
     step_pr_descriptions: list[str] = field(default_factory=list)
     summary_rows: list[tuple] = field(default_factory=list)
 
+    # ── External test results ─────────────────────────────────────────────
+    external_test_passed: bool = False
+    external_test_results: list[dict] = field(default_factory=list)
+    # Per-repo entry: {"repo": "Liger-Kernel", "passed": True, "failed_cases": [], "fix_count": 0}
+
     # ── Final state ───────────────────────────────────────────────────────
     final_status: str = ""
     pr_url: str = ""

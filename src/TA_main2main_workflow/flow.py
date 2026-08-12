@@ -7,7 +7,7 @@ Assembles pipeline steps for single-step mode::
         if LLVM hash changed: per_step_ir_patch (apply existing → build LLVM →
           build TA → test → supplement IR → loop)
         else: build_and_fix_loop → test_and_fix_loop
-      → commit
+      → [external_test] → commit
     → finalize → [push_pr]
 """
 
@@ -32,6 +32,10 @@ from TA_main2main_workflow.pipeline.merge import merge_upstream_commit
 from TA_main2main_workflow.pipeline.resolve import resolve_conflicts
 from TA_main2main_workflow.pipeline.build import build_and_fix_loop
 from TA_main2main_workflow.pipeline.test import test_and_fix_loop
+from TA_main2main_workflow.external_test import (
+    load_external_test_config,
+    run_external_tests,
+)
 from TA_main2main_workflow.pipeline.commit import commit_step
 from TA_main2main_workflow.pipeline.finalize import finalize
 from TA_main2main_workflow.pipeline.ir_patch import (
@@ -46,7 +50,8 @@ class TA_Main2MainFlow:
     """Orchestrator — builds context, runs pipeline steps, handles PR.
 
     Single-step mode is the only supported mode.  Each step runs the full
-    pipeline: merge → resolve conflicts → build → fix → test → fix → commit.
+    pipeline: merge → resolve conflicts → build → fix → test → fix →
+    external_test → commit.
     """
 
     def __init__(self, config: TAConfig | None = None) -> None:
@@ -163,7 +168,12 @@ class TA_Main2MainFlow:
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
 
-            # ── Step D: Commit ──────────────────────────────────
+            # ── Step D: External test ──────────────────────────
+            ctx = self._run_external_test_stage(ctx)
+            if ctx.final_status == UpgradeFailed:
+                return UpgradeFailed
+
+            # ── Step E: Commit ──────────────────────────────────
             with timed("commit"):
                 ctx = commit_step(ctx, self.config)
 
@@ -220,6 +230,42 @@ class TA_Main2MainFlow:
 
         ctx = ctx.copy_with(final_status=UpgradeCompleted)
         return UpgradeCompleted
+
+    def _run_external_test_stage(self, ctx: WorkflowContext) -> WorkflowContext:
+        """Run external operator repo tests (if enabled).
+
+        Loads the YAML config, checks the enabled flag, and executes the
+        external test pipeline.  In ``inline`` mode failures are fatal;
+        in ``standalone`` mode failures are recorded but don't block.
+        """
+        external_cfg = load_external_test_config(self.config.external_test_config)
+
+        if external_cfg is None:
+            # No config file found — not an error, just nothing to do
+            return ctx
+
+        if not external_cfg.enabled:
+            log.info("External test is disabled (enabled=false) — skipped")
+            return ctx
+
+        if external_cfg.mode == "off":
+            log.info("External test mode is 'off' — skipped")
+            return ctx
+
+        log.section(f"External Test — {external_cfg.mode} mode")
+        with timed("external-test"):
+            ctx = run_external_tests(ctx, self.config, external_cfg)
+
+        if external_cfg.mode == "inline" and not ctx.external_test_passed:
+            log.error("External tests failed (inline mode)")
+            ctx = ctx.copy_with(final_status=UpgradeFailed)
+
+        if ctx.external_test_passed:
+            log.status(True, "External tests passed")
+        else:
+            log.status(False, "External tests failed")
+
+        return ctx
 
     def _push_pr(self, ctx: WorkflowContext) -> None:
         """Push work branch and create GitHub PR."""
