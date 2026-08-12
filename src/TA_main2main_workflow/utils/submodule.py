@@ -7,7 +7,6 @@ commit + push for the submodule before the parent repo is committed.
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check
@@ -46,7 +45,7 @@ def commit_submodule(repo: Path, commit_msg: str) -> bool:
     if not submodule_has_changes(repo):
         return False
 
-    log.info(f"Committing AscendNPU-IR submodule changes...")
+    log.info("Committing AscendNPU-IR submodule changes...")
     try:
         run_git(sp, "add", "-A")
         run_git(sp, "commit", "-s", "-m", commit_msg)
@@ -58,8 +57,7 @@ def commit_submodule(repo: Path, commit_msg: str) -> bool:
         return False
 
 
-def push_submodule(repo: Path, branch: str | None = None,
-                   force: bool = True) -> bool:
+def push_submodule(repo: Path, branch: str | None = None, force: bool = True) -> bool:
     """Push the AscendNPU-IR submodule to its dedicated remote.
 
     Creates/updates a branch at current HEAD and pushes using

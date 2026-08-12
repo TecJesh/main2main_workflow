@@ -15,7 +15,9 @@ from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check
 from TA_main2main_workflow.utils import (
-    WORKSPACE_DIR, STEPS_DIR, get_base_branch_ref,
+    WORKSPACE_DIR,
+    STEPS_DIR,
+    get_base_branch_ref,
 )
 
 log = get_logger(__name__)
@@ -59,7 +61,9 @@ def merge_upstream_commit(ctx: WorkflowContext, config: TAConfig) -> WorkflowCon
         # Ensure we're on the work branch
         current_branch = run_git(ascend_path, "branch", "--show-current").strip()
         if ctx.work_branch and current_branch != ctx.work_branch:
-            log.warning(f"Expected '{ctx.work_branch}' but on '{current_branch}' — switching")
+            log.warning(
+                f"Expected '{ctx.work_branch}' but on '{current_branch}' — switching"
+            )
             run_git(ascend_path, "checkout", ctx.work_branch)
 
     # ── Do the merge ────────────────────────────────────────────────
@@ -68,11 +72,11 @@ def merge_upstream_commit(ctx: WorkflowContext, config: TAConfig) -> WorkflowCon
         ascend_path, "merge", "--no-ff", "--no-edit", step["end_commit"]
     )
 
-    conflict_files = run_git(
+    conflict_raw = run_git(
         ascend_path, "diff", "--name-only", "--diff-filter=U"
     ).strip()
-    conflict_files = (
-        [f for f in conflict_files.splitlines() if f] if conflict_files else []
+    conflict_files: list[str] = (
+        [f for f in conflict_raw.splitlines() if f] if conflict_raw else []
     )
     has_conflicts = len(conflict_files) > 0
 
@@ -89,8 +93,10 @@ def merge_upstream_commit(ctx: WorkflowContext, config: TAConfig) -> WorkflowCon
     if has_conflicts:
         log.conflict_list(conflict_files)
     elif merge_proc.returncode != 0:
-        log.warning(f"Merge exited with code {merge_proc.returncode} "
-                     f"but no conflict markers found — continuing")
+        log.warning(
+            f"Merge exited with code {merge_proc.returncode} "
+            f"but no conflict markers found — continuing"
+        )
     else:
         log.key_value("merge exit code", str(merge_proc.returncode))
         log.key_value("conflict files", "0")
@@ -135,7 +141,9 @@ def _create_work_branch(repo: Path, config: TAConfig) -> None:
     try:
         run_git(repo, "fetch", config.work_branch_base)
     except Exception:
-        log.warning(f"Could not fetch remote '{config.work_branch_base}' — using origin")
+        log.warning(
+            f"Could not fetch remote '{config.work_branch_base}' — using origin"
+        )
 
     # ── 4. Checkout base ref and create work branch ────────────────
     try:

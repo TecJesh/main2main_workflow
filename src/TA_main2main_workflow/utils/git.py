@@ -29,7 +29,10 @@ def run_git(repo: Path | str, *args: str) -> str:
 
     for attempt in range(1, MAX_RETRIES + 1 if is_retryable else 2):
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
         )
         if result.returncode == 0:
             return result.stdout
@@ -49,8 +52,14 @@ def run_git_no_check(repo: Path | str, *args: str) -> subprocess.CompletedProces
     return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
 
-def stream_cmd(cmd: list[str], cwd: Path, log_fh, timeout: int,
-               label: str = "", env: dict | None = None) -> int:
+def stream_cmd(
+    cmd: list[str],
+    cwd: Path,
+    log_fh,
+    timeout: int,
+    label: str = "",
+    env: dict | None = None,
+) -> int:
     """Stream subprocess output line-by-line to console and log file.
 
     Each output line is:
@@ -65,12 +74,17 @@ def stream_cmd(cmd: list[str], cwd: Path, log_fh, timeout: int,
     """
     import os as _os
     import sys
+
     proc_env = _os.environ.copy()
     if env:
         proc_env.update(env)
     proc = subprocess.Popen(
-        cmd, cwd=str(cwd), env=proc_env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        cmd,
+        cwd=str(cwd),
+        env=proc_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
     assert proc.stdout is not None
     last_line = ""

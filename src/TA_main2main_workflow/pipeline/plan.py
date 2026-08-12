@@ -13,7 +13,11 @@ from typing import Any
 from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils import (
-    WORKSPACE_DIR, STEPS_FILE, STEPS_DIR, LLVM_HASH_FILE, SOURCE_DIRS,
+    WORKSPACE_DIR,
+    STEPS_FILE,
+    STEPS_DIR,
+    LLVM_HASH_FILE,
+    SOURCE_DIRS,
 )
 from TA_main2main_workflow.utils.git import run_git
 from TA_main2main_workflow.utils.logging import get_logger
@@ -54,7 +58,9 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     log.info(f"[plan] Line budget: {line_budget} (no commit-count limit)")
 
     if config.progressive_merge:
-        lines_per_commit, llvm_commits, source_touching = _scan_commits(triton_path, commits)
+        lines_per_commit, llvm_commits, source_touching = _scan_commits(
+            triton_path, commits
+        )
         steps = _plan_steps_inner(
             commits, lines_per_commit, base, line_budget, llvm_commits
         )
@@ -67,7 +73,9 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
                 reason_tag = " [LLVM VERSION]"
             elif s.get("reason") == "oversized":
                 reason_tag = " [OVERSIZED]"
-            budget_label = "OVERSIZED" if s["source_changed_lines"] > line_budget else "OK"
+            budget_label = (
+                "OVERSIZED" if s["source_changed_lines"] > line_budget else "OK"
+            )
             log.info(
                 f"        {s['id']}: {s['commit_count']} commits, "
                 f"{s['source_changed_lines']} lines ({budget_label})"
@@ -130,8 +138,7 @@ def llvm_hash_changed_after_merge(ctx: WorkflowContext) -> bool:
     if ctx.step_start_ascend_head:
         try:
             old_content = run_git(
-                ascend_path, "show",
-                f"{ctx.step_start_ascend_head}:{LLVM_HASH_FILE}"
+                ascend_path, "show", f"{ctx.step_start_ascend_head}:{LLVM_HASH_FILE}"
             ).strip()
             return old_content != current_hash
         except Exception:
@@ -158,8 +165,14 @@ def _source_lines_for_commit(repo: Path, sha: str) -> int:
     for d in SOURCE_DIRS:
         try:
             output = run_git(
-                repo, "diff-tree", "--no-commit-id", "-r", "--numstat",
-                sha, "--", f":(top){d}",
+                repo,
+                "diff-tree",
+                "--no-commit-id",
+                "-r",
+                "--numstat",
+                sha,
+                "--",
+                f":(top){d}",
             )
         except Exception:
             continue
@@ -177,8 +190,7 @@ def _source_lines_for_commit(repo: Path, sha: str) -> int:
 
 def _commit_changed_llvm_hash(repo: Path, sha: str) -> bool:
     try:
-        output = run_git(
-            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        output = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
         return LLVM_HASH_FILE in output
     except Exception:
         return False
@@ -197,16 +209,22 @@ def _scan_commits(
             source_touching += 1
         if _commit_changed_llvm_hash(repo, c["sha"]):
             llvm_commits.add(c["sha"])
-            log.info(f"[plan]   LLVM version change detected: {c['sha'][:8]} {c['subject'][:80]}")
+            log.info(
+                f"[plan]   LLVM version change detected: {c['sha'][:8]} {c['subject'][:80]}"
+            )
         if (i + 1) % 50 == 0:
             log.info(f"[plan]   ... scanned {i + 1}/{len(commits)} commits")
     # Print zero-lines summary (matching pre-refactor)
     if source_touching < len(commits):
-        log.info(f"[plan] {len(commits) - source_touching} commits touch zero "
-                 f"source lines — included in steps with 0 line contribution")
+        log.info(
+            f"[plan] {len(commits) - source_touching} commits touch zero "
+            f"source lines — included in steps with 0 line contribution"
+        )
     if llvm_commits:
-        log.info(f"[plan] {len(llvm_commits)} commit(s) changed LLVM hash "
-                 f"— each will be a solo merge step")
+        log.info(
+            f"[plan] {len(llvm_commits)} commit(s) changed LLVM hash "
+            f"— each will be a solo merge step"
+        )
     return lines_per_commit, llvm_commits, source_touching
 
 
@@ -257,7 +275,12 @@ def _plan_steps_inner(
                 step_commits, step_lines = [], 0
             steps.append(
                 _make_step(
-                    len(steps) + 1, [commit], start, lines, budget, reason="llvm_version"
+                    len(steps) + 1,
+                    [commit],
+                    start,
+                    lines,
+                    budget,
+                    reason="llvm_version",
                 )
             )
             start = steps[-1]["end_commit"]
@@ -272,7 +295,9 @@ def _plan_steps_inner(
                 start = steps[-1]["end_commit"]
                 step_commits, step_lines = [], 0
             steps.append(
-                _make_step(len(steps) + 1, [commit], start, lines, budget, reason="oversized")
+                _make_step(
+                    len(steps) + 1, [commit], start, lines, budget, reason="oversized"
+                )
             )
             start = steps[-1]["end_commit"]
             continue
@@ -301,14 +326,19 @@ def _enrich_steps(repo: Path, steps: list[dict[str, Any]]) -> None:
         # Build pathspec args for SOURCE_DIRS filtering
         pathspecs = [f":(top){d}" for d in SOURCE_DIRS]
         step["upstream_patch"] = run_git(
-            repo, "diff",
+            repo,
+            "diff",
             f"{step['start_commit']}..{step['end_commit']}",
-            "--", *pathspecs,
+            "--",
+            *pathspecs,
         )
         step["changed_files"] = run_git(
-            repo, "diff", "--name-only",
+            repo,
+            "diff",
+            "--name-only",
             f"{step['start_commit']}..{step['end_commit']}",
-            "--", *pathspecs,
+            "--",
+            *pathspecs,
         )
         step["files_changed"] = sorted(
             f for f in step["changed_files"].strip().splitlines() if f

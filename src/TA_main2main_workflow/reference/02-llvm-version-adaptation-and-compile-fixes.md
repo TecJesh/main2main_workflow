@@ -94,7 +94,7 @@ FILES=$(grep -rl "\.get<Value>\|\.get<Attribute>\|\.is<Value>" \
     third_party/ascend/lib/ --include="*.cpp" --include="*.h")
 
 for f in $FILES; do
-    # 替换 .get<Value>() → cast<Value>(...) 
+    # 替换 .get<Value>() → cast<Value>(...)
     # 替换 .get<Attribute>() → cast<Attribute>(...)
     # 替换 .is<Value>() → isa<Value>(...)
     echo "Processing: $f"

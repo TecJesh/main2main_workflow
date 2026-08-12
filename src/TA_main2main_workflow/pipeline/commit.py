@@ -35,10 +35,7 @@ def commit_step(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     # ── 1. Submodule first ────────────────────────────────────────────
     if submodule_has_changes(ascend_path):
         target_short = ctx.target_commit[:12] if ctx.target_commit else "HEAD"
-        commit_submodule(
-            ascend_path,
-            f"[Sync](fix) AI fix for {target_short}\n"
-        )
+        commit_submodule(ascend_path, f"[Sync](fix) AI fix for {target_short}\n")
 
     # ── 2. Clean temp files ───────────────────────────────────────────
     cleanup_temp_files(ascend_path)
@@ -50,7 +47,7 @@ def commit_step(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         return ctx
 
     # Print staged files for visibility
-    staged_files = [l[3:] for l in staged.splitlines() if l.strip()]
+    staged_files = [line[3:] for line in staged.splitlines() if line.strip()]
     log.info(f"Files staged ({len(staged_files)}):")
     for f in staged_files[:30]:
         log.info(f"  {f}")

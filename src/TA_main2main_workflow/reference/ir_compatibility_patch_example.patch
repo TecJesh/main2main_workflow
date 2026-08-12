@@ -21,7 +21,7 @@ index e735651d5366..26632e26cbbf 100644
 @@ -61,6 +61,12 @@ LogicalResult foldToBufferToTensorPair(RewriterBase &rewriter,
                                         ToBufferOp toBuffer,
                                         const BufferizationOptions &options);
- 
+
 +/// Try to fold to_memref(to_tensor(x)). If x's type and the result type of the
 +/// to_memref op are different, a memref.cast is needed.
 +LogicalResult foldToMemrefToTensorPair(RewriterBase &rewriter,
@@ -38,7 +38,7 @@ index 6724d4c48310..33cfd50c6849 100644
 @@ -483,13 +483,85 @@ def Bufferization_ToTensorOp : Bufferization_Op<"to_tensor", [
      }
    }];
- 
+
 +  let hasCustomAssemblyFormat = 1;
 +
 +  let hasCanonicalizer = 1;
@@ -117,20 +117,20 @@ index 6724d4c48310..33cfd50c6849 100644
 -      `:` type($buffer) `to` type($result)
 +    $tensor (`read_only` $read_only^)? attr-dict `:` type($memref)
    }];
- 
+
 -  let hasCanonicalizer = 1;
    let hasFolder = 1;
 +  let hasCanonicalizer = 1;
  }
- 
- 
+
+
 diff --git a/mlir/include/mlir/Dialect/ControlFlow/IR/ControlFlowOps.td b/mlir/include/mlir/Dialect/ControlFlow/IR/ControlFlowOps.td
 index a441fd82546e..543ab84ef896 100644
 --- a/mlir/include/mlir/Dialect/ControlFlow/IR/ControlFlowOps.td
 +++ b/mlir/include/mlir/Dialect/ControlFlow/IR/ControlFlowOps.td
 @@ -227,12 +227,7 @@ def CondBranchOp
    }];
- 
+
    let hasCanonicalizer = 1;
 -  let assemblyFormat = [{
 -    $condition (`weights` `(` $branch_weights^ `)` )? `,`
@@ -140,7 +140,7 @@ index a441fd82546e..543ab84ef896 100644
 -  }];
 +  let hasCustomAssemblyFormat = 1;
  }
- 
+
  //===----------------------------------------------------------------------===//
 diff --git a/mlir/include/mlir/Dialect/Func/IR/FuncOps.td b/mlir/include/mlir/Dialect/Func/IR/FuncOps.td
 index 06ce4f16c867..a17cec470904 100644
@@ -149,13 +149,13 @@ index 06ce4f16c867..a17cec470904 100644
 @@ -119,9 +119,7 @@ def CallOp : Func_Op<"call",
      }
    }];
- 
+
 -  let assemblyFormat = [{
 -    $callee `(` $operands `)` attr-dict `:` functional-type($operands, results)
 -  }];
 +  let hasCustomAssemblyFormat = 1;
  }
- 
+
  //===----------------------------------------------------------------------===//
 diff --git a/mlir/include/mlir/Dialect/LLVMIR/LLVMIntrinsicOps.td b/mlir/include/mlir/Dialect/LLVMIR/LLVMIntrinsicOps.td
 index 398388bd720b..877ebc89e9f0 100644
@@ -164,14 +164,14 @@ index 398388bd720b..877ebc89e9f0 100644
 @@ -557,12 +557,6 @@ def LLVM_AssumeOp
    dag args = (ins I1:$cond);
    let arguments = !con(args, baseArgs);
- 
+
 -  let assemblyFormat = [{
 -    $cond
 -    ( custom<OpBundles>($op_bundle_operands, type($op_bundle_operands),
 -                        $op_bundle_tags)^ )?
 -    `:` type($cond) attr-dict
 -  }];
- 
+
    let builders = [
      OpBuilder<(ins "Value":$cond)>,
 diff --git a/mlir/include/mlir/Dialect/LLVMIR/LLVMOps.td b/mlir/include/mlir/Dialect/LLVMIR/LLVMOps.td
@@ -221,9 +221,9 @@ index 9753dca67c23..48bf6d8d4893 100644
                                    LLVM_ScalarOrVectorOf<LLVM_AnyPointer>,
                                    LLVM_ScalarOrVectorOf<AnySignlessInteger>>;
 @@ -2394,16 +2385,7 @@ def LLVM_InlineAsmOp : LLVM_Op<"inline_asm", [DeclareOpInterfaceMethods<MemoryEf
- 
+
    let results = (outs Optional<LLVM_Type>:$res);
- 
+
 -  let assemblyFormat = [{
 -    (`has_side_effects` $has_side_effects^)?
 -    (`is_align_stack` $is_align_stack^)?
@@ -235,7 +235,7 @@ index 9753dca67c23..48bf6d8d4893 100644
 -    operands `:` functional-type(operands, results)
 -   }];
 +  let hasCustomAssemblyFormat = 1;
- 
+
    let extraClassDeclaration = [{
      static StringRef getElementTypeAttrName() {
 diff --git a/mlir/lib/Dialect/Arith/IR/ArithOps.cpp b/mlir/lib/Dialect/Arith/IR/ArithOps.cpp
@@ -245,7 +245,7 @@ index 7cfd6d3a98df..e78cb55f8bae 100644
 @@ -1561,6 +1561,83 @@ LogicalResult arith::ScalingExtFOp::verify() {
  // TruncIOp
  //===----------------------------------------------------------------------===//
- 
+
 +ParseResult TruncIOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
 +  ::mlir::OpAsmParser::UnresolvedOperand inRawOperand{};
 +  ::llvm::ArrayRef<::mlir::OpAsmParser::UnresolvedOperand> inOperands(&inRawOperand, 1);  ::llvm::SMLoc inOperandsLoc;
@@ -332,7 +332,7 @@ index e0cf353da207..6bd0b89e5517 100644
 +++ b/mlir/lib/Dialect/Bufferization/IR/BufferizableOpInterface.cpp
 @@ -654,7 +654,9 @@ bool AnalysisState::canOmitTensorCopy(OpOperand &opOperand) const {
  }
- 
+
  bool AnalysisState::isInPlace(OpOperand &opOperand) const {
 -  // ToBufferOps are always in-place.
 +  // ToMemrefOps and ToBufferOps are always in-place.
@@ -340,11 +340,11 @@ index e0cf353da207..6bd0b89e5517 100644
 +    return true;
    if (isa<ToBufferOp>(opOperand.getOwner()))
      return true;
- 
+
 @@ -690,6 +692,16 @@ static void ensureToBufferOpIsValid(Value tensor, Type memrefType) {
  #endif
  }
- 
+
 +// bufferization.to_memref is not allowed to change the rank.
 +static void ensureToMemrefOpIsValid(Value tensor, Type memrefType) {
 +#ifndef NDEBUG
@@ -361,7 +361,7 @@ index e0cf353da207..6bd0b89e5517 100644
 @@ -702,12 +714,13 @@ FailureOr<Value> bufferization::getBuffer(RewriterBase &rewriter, Value value,
    if (auto toTensorOp = value.getDefiningOp<bufferization::ToTensorOp>())
      return toTensorOp.getBuffer();
- 
+
 -  // Insert to_buffer op.
 +  // Insert to_memref or to_buffer op.
    OpBuilder::InsertionGuard g(rewriter);
@@ -383,12 +383,12 @@ index 56ff2121e462..5d1d7a165c3d 100644
  #include "mlir/IR/Matchers.h"
 +#include "mlir/Interfaces/InferTypeOpInterface.h"
  #include <optional>
- 
+
  using namespace mlir;
 @@ -127,6 +128,53 @@ LogicalResult mlir::bufferization::foldToBufferToTensorPair(
    return success();
  }
- 
+
 +/// Try to fold to_memref(to_tensor(x)). If x's type and the result type of the
 +/// to_memref op are different, a memref.cast is needed.
 +LogicalResult mlir::bufferization::foldToMemrefToTensorPair(
@@ -442,7 +442,7 @@ index 56ff2121e462..5d1d7a165c3d 100644
 @@ -750,6 +798,101 @@ bool ToTensorOp::isWritable(Value value, const AnalysisState &state) {
    return getWritable();
  }
- 
+
 +
 +ParseResult ToTensorOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
 +  ::mlir::OpAsmParser::UnresolvedOperand bufferRawOperand{};
@@ -553,11 +553,11 @@ index 56ff2121e462..5d1d7a165c3d 100644
 +      return toMemref.getTensor();
    return {};
  }
- 
+
 @@ -1198,6 +1347,107 @@ void bufferization::populateDeallocOpCanonicalizationPatterns(
                 RemoveAllocDeallocPairWhenNoOtherUsers>(context);
  }
- 
+
 +//===----------------------------------------------------------------------===//
 +// ToMemrefOp
 +//===----------------------------------------------------------------------===//
@@ -669,7 +669,7 @@ index 582593adfa5c..a81a84bae601 100644
 @@ -437,6 +437,114 @@ struct CondBranchTruthPropagation : public OpRewritePattern<CondBranchOp> {
  };
  } // namespace
- 
+
 +ParseResult CondBranchOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
 +  ::mlir::OpAsmParser::UnresolvedOperand conditionRawOperand{};
 +  ::llvm::ArrayRef<::mlir::OpAsmParser::UnresolvedOperand> conditionOperands(&conditionRawOperand, 1);  ::llvm::SMLoc conditionOperandsLoc;
@@ -788,7 +788,7 @@ index 3c09a2124bd7..a1bf2bdf5a09 100644
 @@ -59,6 +59,72 @@ Operation *FuncDialect::materializeConstant(OpBuilder &builder, Attribute value,
  // CallOp
  //===----------------------------------------------------------------------===//
- 
+
 +ParseResult CallOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
 +  ::mlir::FlatSymbolRefAttr calleeAttr;
 +  ::llvm::SmallVector<::mlir::OpAsmParser::UnresolvedOperand, 4> operandsOperands;
@@ -865,7 +865,7 @@ index 5d08cccb4faa..219e64280985 100644
 @@ -834,6 +834,172 @@ LogicalResult LLVM::GEPOp::verify() {
  // LoadOp
  //===----------------------------------------------------------------------===//
- 
+
 +ParseResult LoadOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
 +  ::mlir::OpAsmParser::UnresolvedOperand addrRawOperand{};
 +  ::llvm::ArrayRef<::mlir::OpAsmParser::UnresolvedOperand> addrOperands(&addrRawOperand, 1);  ::llvm::SMLoc addrOperandsLoc;
@@ -1204,13 +1204,13 @@ index 5d08cccb4faa..219e64280985 100644
 +  _odsPrinter << ' ';
 +   _odsPrinter << getAddr().getType();
 +}
- 
+
  void StoreOp::getEffects(
      SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
 @@ -4209,6 +4540,234 @@ LogicalResult InlineAsmOp::verify() {
    return success();
  }
- 
+
 +ParseResult InlineAsmOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
 +  ::mlir::LLVM::AsmDialectAttr asm_dialectAttr;
 +  ::mlir::ArrayAttr operand_attrsAttr;
@@ -1448,7 +1448,7 @@ index 59013a23b3e3..b44c025c9c33 100644
 +++ b/mlir/lib/Dialect/Linalg/IR/LinalgOps.cpp
 @@ -3898,33 +3898,14 @@ static FailureOr<ArrayAttr> parseIndexingMapsAttr(OpAsmParser &parser) {
  }
- 
+
  ParseResult MatmulOp::parse(OpAsmParser &parser, OperationState &result) {
 -  FailureOr<ArrayAttr> indexingMapsAttr = parseIndexingMapsAttr(parser);
 -  if (failed(indexingMapsAttr))
@@ -1484,7 +1484,7 @@ index 59013a23b3e3..b44c025c9c33 100644
 +                       // LinalgNamedStructuredOps.yamlgen.cpp.inc
 +                       "linalg.memoized_indexing_maps"});
  }
- 
+
  /// Verify the user defined indexing maps.
 @@ -4678,11 +4659,9 @@ void BatchMatmulOp::print(OpAsmPrinter &p) {
    SmallVector<Attribute, 3> indexingMaps = llvm::map_to_vector<3>(
@@ -1492,7 +1492,7 @@ index 59013a23b3e3..b44c025c9c33 100644
        [](AffineMap map) -> Attribute { return AffineMapAttr::get(map); });
 -  if (!llvm::equal(getIndexingMaps(), indexingMaps))
 -    p << " indexing_maps = " << llvm::interleaved_array(getIndexingMaps());
- 
+
    std::array<StringRef, 3> elidedAttrs = {
 -      "operandSegmentSizes", "linalg.memoized_indexing_maps", "indexing_maps"};
 +      "operandSegmentSizes", "linalg.memoized_indexing_maps"};
@@ -1505,18 +1505,18 @@ index a9da6c2c8320..4ebc46deae3d 100644
 +++ b/mlir/lib/Dialect/SCF/IR/SCF.cpp
 @@ -486,9 +486,6 @@ static void printInitializationList(OpAsmPrinter &p,
  }
- 
+
  void ForOp::print(OpAsmPrinter &p) {
 -  if (getUnsignedCmp())
 -    p << " unsigned";
 -
    p << " " << getInductionVar() << " = " << getLowerBound() << " to "
      << getUpperBound() << " step " << getStep();
- 
+
 @@ -512,10 +509,6 @@ ParseResult ForOp::parse(OpAsmParser &parser, OperationState &result) {
    OpAsmParser::Argument inductionVariable;
    OpAsmParser::UnresolvedOperand lb, ub, step;
- 
+
 -  if (succeeded(parser.parseOptionalKeyword("unsigned")))
 -    result.addAttribute(getUnsignedCmpAttrName(result.name),
 -                        builder.getUnitAttr());
@@ -1531,7 +1531,7 @@ index a9da6c2c8320..4ebc46deae3d 100644
 -      [](OpBuilder &, Location, Value, ValueRange) {}, getUnsignedCmp());
 +      [](OpBuilder &, Location, Value, ValueRange) {}, false);
    newLoop->setAttrs(getPrunedAttributeList(getOperation(), {}));
- 
+
    // Generate the new yield values and append them to the scf.yield operation.
 @@ -854,7 +847,7 @@ mlir::scf::replaceAndCastForOpIterArg(RewriterBase &rewriter, scf::ForOp forOp,
    scf::ForOp newForOp = scf::ForOp::create(
@@ -1550,22 +1550,22 @@ index a9da6c2c8320..4ebc46deae3d 100644
 +                           /*bodyBuilder=*/nullptr, false);
      newForOp->setAttrs(forOp->getAttrs());
      Block &newBlock = newForOp.getRegion().front();
- 
+
 @@ -1175,7 +1168,7 @@ Speculation::Speculatability ForOp::getSpeculatability() {
- 
+
  std::optional<APInt> ForOp::getStaticTripCount() {
    return constantTripCount(getLowerBound(), getUpperBound(), getStep(),
 -                           /*isSigned=*/!getUnsignedCmp(), computeUbMinusLb);
 +                           /*isSigned=*/!false, computeUbMinusLb);
  }
- 
+
  //===----------------------------------------------------------------------===//
 diff --git a/mlir/lib/IR/AsmPrinter.cpp b/mlir/lib/IR/AsmPrinter.cpp
 index 3d19c5ad8fbc..8b8d6d4b95dc 100644
 --- a/mlir/lib/IR/AsmPrinter.cpp
 +++ b/mlir/lib/IR/AsmPrinter.cpp
 @@ -3733,8 +3733,14 @@ void OperationPrinter::printGenericOp(Operation *op, bool printOpName) {
- 
+
    // Print the properties.
    if (Attribute prop = op->getPropertiesAsAttribute()) {
 +    auto dict = cast<DictionaryAttr>(prop);
@@ -1579,7 +1579,7 @@ index 3d19c5ad8fbc..8b8d6d4b95dc 100644
 +    Impl::printAttribute(DictionaryAttr::get(op->getContext(), filtered));
      os << '>';
    }
- 
+
 diff --git a/mlir/lib/Interfaces/FunctionImplementation.cpp b/mlir/lib/Interfaces/FunctionImplementation.cpp
 index 90f32896e818..855410ae2580 100644
 --- a/mlir/lib/Interfaces/FunctionImplementation.cpp

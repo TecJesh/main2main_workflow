@@ -24,11 +24,16 @@ from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.tracker import timed
 from TA_main2main_workflow.utils.git import run_git, stream_cmd
 from TA_main2main_workflow.utils import (
-    BUILD_RESULT_FILE, STEPS_DIR, WORKSPACE_DIR,
+    BUILD_RESULT_FILE,
+    STEPS_DIR,
+    WORKSPACE_DIR,
 )
 from TA_main2main_workflow.pipeline.fix import ai_fix
 from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
-from TA_main2main_workflow.utils.submodule import commit_submodule, submodule_has_changes
+from TA_main2main_workflow.utils.submodule import (
+    commit_submodule,
+    submodule_has_changes,
+)
 
 log = get_logger(__name__)
 
@@ -112,10 +117,12 @@ def llvm_setup(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 
 def build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
     """cmake + ninja for LLVM. Pure build — no retry logic."""
-    llvm_project = Path(os.path.expanduser(
-        os.getenv("LLVM_PROJECT_PATH", "~/llvm-project")))
-    llvm_install = Path(os.path.expanduser(
-        os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")))
+    llvm_project = Path(
+        os.path.expanduser(os.getenv("LLVM_PROJECT_PATH", "~/llvm-project"))
+    )
+    llvm_install = Path(
+        os.path.expanduser(os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync"))
+    )
     ascend_path = Path(ctx.triton_ascend_path)
     required_hash = (
         (ascend_path / "cmake" / "llvm-hash.txt").read_text(encoding="utf-8").strip()
@@ -128,6 +135,7 @@ def build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
     build_dir = WORKSPACE_DIR / "llvm-build"
     if build_dir.exists():
         import shutil
+
         shutil.rmtree(build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,8 +145,10 @@ def build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
 
     # ── cmake configure ──
     cmake_cmd = [
-        "cmake", str(llvm_project / "llvm"),
-        "-G", "Ninja",
+        "cmake",
+        str(llvm_project / "llvm"),
+        "-G",
+        "Ninja",
         "-DCMAKE_BUILD_TYPE=Release",
         "-DLLVM_ENABLE_ASSERTIONS=ON",
         "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
@@ -150,33 +160,34 @@ def build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
     with open(llvm_build_log, "w", encoding="utf-8") as fh:
         fh.write(f"=== cmake ===\n{' '.join(cmake_cmd)}\n\n")
         fh.flush()
-        rc = stream_cmd(cmake_cmd, build_dir, fh, timeout=300,
-                        label="Configuring LLVM with cmake")
+        rc = stream_cmd(
+            cmake_cmd, build_dir, fh, timeout=300, label="Configuring LLVM with cmake"
+        )
     if rc != 0:
         log.error(f"LLVM cmake FAILED — see {llvm_build_log}")
-        return ctx.copy_with(
-            build_passed=False, fix_errors=[str(llvm_build_log)]
-        )
+        return ctx.copy_with(build_passed=False, fix_errors=[str(llvm_build_log)])
     log.status(True, "cmake configure OK")
 
     # ── ninja build + install ──
     log.info(f"ninja -j{num_procs} install (this may take a while)...")
     with open(llvm_build_log, "a", encoding="utf-8") as fh:
-        fh.write(f"\n=== ninja install ===\n")
+        fh.write("\n=== ninja install ===\n")
         fh.flush()
         rc = stream_cmd(
             ["ninja", "-j", str(num_procs), "install"],
-            build_dir, fh, timeout=7200, label="ninja install",
+            build_dir,
+            fh,
+            timeout=7200,
+            label="ninja install",
         )
     if rc != 0:
         log.error(f"LLVM ninja FAILED — see {llvm_build_log}")
-        return ctx.copy_with(
-            build_passed=False, fix_errors=[str(llvm_build_log)]
-        )
+        return ctx.copy_with(build_passed=False, fix_errors=[str(llvm_build_log)])
     log.status(True, "LLVM ninja install OK")
 
     # Copy FileCheck
     import shutil
+
     fc = build_dir / "bin" / "FileCheck"
     if fc.exists():
         shutil.copy2(fc, llvm_install / "bin" / "FileCheck")
@@ -203,8 +214,10 @@ def build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
 
 
 def build_triton(
-    ctx: WorkflowContext, config: TAConfig,
-    clean: bool = False, python_exe: str = "",
+    ctx: WorkflowContext,
+    config: TAConfig,
+    clean: bool = False,
+    python_exe: str = "",
 ) -> WorkflowContext:
     """Build triton-ascend. Pure build — no retry logic."""
     ascend_path = Path(ctx.triton_ascend_path)
@@ -257,9 +270,7 @@ def build_triton(
 
     result = {
         "all_passed": passed,
-        "steps": [
-            {"step": "setup_py_install", "passed": passed, "exit_code": rc}
-        ],
+        "steps": [{"step": "setup_py_install", "passed": passed, "exit_code": rc}],
     }
     (step_dir / BUILD_RESULT_FILE).write_text(
         json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -267,9 +278,7 @@ def build_triton(
 
     if not passed:
         log.error(f"Build FAILED — see {build_log}")
-        return ctx.copy_with(
-            build_passed=False, fix_errors=[str(build_log)]
-        )
+        return ctx.copy_with(build_passed=False, fix_errors=[str(build_log)])
     log.status(True, "Build passed")
     return ctx.copy_with(build_passed=True)
 
@@ -318,7 +327,7 @@ def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
     # ── 5. Stage and commit ────────────────────────────────────────────
     log.section("Commit AI Fixes")
     try:
-        staged_files = run_git(ascend_path, "diff", "--name-only", "HEAD").strip()
+        _ = run_git(ascend_path, "diff", "--name-only", "HEAD").strip()
         run_git(ascend_path, "add", "-A")
         staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
         if staged:

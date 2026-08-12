@@ -113,7 +113,7 @@ class NPUOptions:
 ascend.indirect_store %ptr, %indices, %data : <f32>, tensor<8x32xi64>, tensor<8x32xf32>
 
 # 新 IR (3.5.x):
-%result = ascend.unstructured_load %ptr, %indices : <f32>, tensor<8x32xi64> 
+%result = ascend.unstructured_load %ptr, %indices : <f32>, tensor<8x32xi64>
           unstructured_dims = [0, 1] -> tensor<8x32xf32>
 ascend.unstructured_store %ptr, %indices, %data : <f32>, tensor<8x32xi64>, tensor<8x32xf32>
           unstructured_dims = [0, 1]
@@ -251,7 +251,7 @@ name, mix_mode = name.rsplit("_", 1)
 @dataclass
 class NPUOptions:
     ir_override: Optional[str] = None  # 覆盖 IR 文件的路径前缀
-    
+
 # 使用方式:
 # 如果 ir_override = "/path/to/kernel"
 # 则会查找:

@@ -17,7 +17,7 @@ from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.tracker import timed
-from TA_main2main_workflow.utils import TEST_RESULT_FILE, WORKSPACE_DIR, STEPS_DIR
+from TA_main2main_workflow.utils import WORKSPACE_DIR
 from TA_main2main_workflow.pipeline.build import build_triton, commit_fixes
 from TA_main2main_workflow.pipeline.fix import ai_fix
 
@@ -57,7 +57,8 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
                 oom_ctx = rerun_tests_reduced_concurrency(ascend_path, config)
                 if oom_ctx is not None and oom_ctx.test_passed:
                     return ctx.copy_with(
-                        test_passed=True, pytest_passed=True,
+                        test_passed=True,
+                        pytest_passed=True,
                         test_fix_count=ctx.test_fix_count,
                     )
 
@@ -80,7 +81,8 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
             if attempt > 0:
                 commit_fixes(ctx, config)
             return ctx.copy_with(
-                test_passed=True, pytest_passed=True,
+                test_passed=True,
+                pytest_passed=True,
                 test_fix_count=ctx.test_fix_count + (1 if attempt > 0 else 0),
             )
 
@@ -96,7 +98,9 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
 
 
 def _run_pretest_and_fix(
-    ctx: WorkflowContext, config: TAConfig, ascend_path: Path,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    ascend_path: Path,
 ) -> WorkflowContext:
     """Run a single-file pre-test with its own fix loop.
 
@@ -127,8 +131,9 @@ def _run_pretest_and_fix(
                 continue
 
         with timed("pretest"):
-            ctx = _run_pytest(ctx, config, [_PRETEST_FILE],
-                              test_procs=1, label="pretest")
+            ctx = _run_pytest(
+                ctx, config, [_PRETEST_FILE], test_procs=1, label="pretest"
+            )
         if ctx.test_passed:
             if pretest_attempt > 0:
                 commit_fixes(ctx, config)
@@ -141,8 +146,9 @@ def _run_pretest_and_fix(
     return ctx.copy_with(test_passed=False)
 
 
-def run_tests(ctx: WorkflowContext, config: TAConfig,
-              python_exe: str = "", test_procs: int = 0) -> WorkflowContext:
+def run_tests(
+    ctx: WorkflowContext, config: TAConfig, python_exe: str = "", test_procs: int = 0
+) -> WorkflowContext:
     """Execute tests sequentially.
 
     1. Default pytest UT (primary test dir) — always runs first
@@ -155,7 +161,9 @@ def run_tests(ctx: WorkflowContext, config: TAConfig,
     test_dirs = list(config.test_dirs)
     if not test_dirs and not config.test_command:
         log.warning("No test directories or test command configured")
-        return ctx.copy_with(test_passed=True, test_log_dir=str(WORKSPACE_DIR / "test-logs"))
+        return ctx.copy_with(
+            test_passed=True, test_log_dir=str(WORKSPACE_DIR / "test-logs")
+        )
 
     primary = test_dirs[0] if test_dirs else None
     extras = test_dirs[1:] if len(test_dirs) > 1 else []
@@ -166,16 +174,28 @@ def run_tests(ctx: WorkflowContext, config: TAConfig,
     # ── Step 1: Default pytest UT ─────────────────────────────────────
     if primary:
         log.section("Default pytest UT")
-        ctx = _run_pytest(ctx, config, [primary], python_exe=python_exe,
-                          test_procs=test_procs, label="primary")
+        ctx = _run_pytest(
+            ctx,
+            config,
+            [primary],
+            python_exe=python_exe,
+            test_procs=test_procs,
+            label="primary",
+        )
         all_passed = all_passed and ctx.test_passed
         all_errors.extend(ctx.fix_errors)
 
     # ── Step 2: Extra test dirs — one by one ──────────────────────────
     for i, extra_dir in enumerate(extras):
         log.section(f"Extra Tests ({i + 1}/{len(extras)}): {extra_dir}")
-        extra_ctx = _run_pytest(ctx, config, [extra_dir], python_exe=python_exe,
-                                test_procs=test_procs, label=f"extra-{i + 1}")
+        extra_ctx = _run_pytest(
+            ctx,
+            config,
+            [extra_dir],
+            python_exe=python_exe,
+            test_procs=test_procs,
+            label=f"extra-{i + 1}",
+        )
         if not extra_ctx.test_passed:
             all_passed = False
         all_errors.extend(extra_ctx.fix_errors)
@@ -228,7 +248,8 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         proc = subprocess.Popen(
             ["bash", "-c", cmd],
             cwd=str(ascend_path),
-            stdout=fh, stderr=subprocess.STDOUT,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
         )
         try:
             rc = proc.wait(timeout=7200)
@@ -244,6 +265,7 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     pf = pe = tp = 0
     junit_xml: Path | None = None
     import re as _re
+
     m = _re.search(r"--junitxml[= ](\S+)", cmd)
     if m:
         junit_xml = Path(m.group(1))
@@ -253,7 +275,9 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
             try:
                 tree = ET.parse(str(junit_xml))
                 root = tree.getroot()
-                suites = [root] if root.tag != "testsuites" else root.findall("testsuite")
+                suites = (
+                    [root] if root.tag != "testsuites" else root.findall("testsuite")
+                )
                 for s in suites:
                     tp += int(s.get("tests", 0))
                     pf += int(s.get("failures", 0))
@@ -286,7 +310,9 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
             fix_errors=[str(junit_xml or output_log), str(result_file)],
             test_log_dir=str(test_log_dir),
         )
-    log.status(True, f"All tests passed ({tp} passed)" if tp else f"Tests passed (exit 0)")
+    log.status(
+        True, f"All tests passed ({tp} passed)" if tp else "Tests passed (exit 0)"
+    )
     return ctx.copy_with(test_passed=True, test_log_dir=str(test_log_dir))
 
 
@@ -295,10 +321,14 @@ def _run_custom_test(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 # ---------------------------------------------------------------------------
 
 
-def _run_pytest(ctx: WorkflowContext, config: TAConfig,
-                test_dirs: list[str],
-                python_exe: str = "", test_procs: int = 0,
-                label: str = "pytest") -> WorkflowContext:
+def _run_pytest(
+    ctx: WorkflowContext,
+    config: TAConfig,
+    test_dirs: list[str],
+    python_exe: str = "",
+    test_procs: int = 0,
+    label: str = "pytest",
+) -> WorkflowContext:
     """Execute pytest for the given *test_dirs* in a single invocation.
 
     Each call with a unique *label* writes to a separate JUnit XML file
@@ -327,14 +357,14 @@ def _run_pytest(ctx: WorkflowContext, config: TAConfig,
 
     junit_xml = test_log_dir / f"pytest-junit-{label}.xml"
     pytest_bin = shutil.which("pytest")
-    cmd = (
-        [pytest_bin] if pytest_bin
-        else [python_exe, "-m", "pytest"]
-    )
+    cmd = [pytest_bin] if pytest_bin else [python_exe, "-m", "pytest"]
     cmd += [str(p) for p in test_paths]
     cmd += ["-n", str(procs), f"--junitxml={junit_xml}"]
 
-    log.key_value(f"[{label}] test dirs", ", ".join(str(p.relative_to(ascend_path)) for p in test_paths))
+    log.key_value(
+        f"[{label}] test dirs",
+        ", ".join(str(p.relative_to(ascend_path)) for p in test_paths),
+    )
     log.info(f"[{label}] cmd: {' '.join(cmd)}")
     _start = time.time()
     try:
@@ -396,10 +426,17 @@ def detect_oom_in_tests(ctx: WorkflowContext) -> bool:
         return False
 
     oom_keywords = [
-        "OutOfMemoryError", "out of memory", "MemoryError",
-        "Cannot allocate memory", "OOM", "Killed",
-        "Exit code 137", "exit code 137",
-        "CUDA error", "cuMemAlloc", "NPU error",
+        "OutOfMemoryError",
+        "out of memory",
+        "MemoryError",
+        "Cannot allocate memory",
+        "OOM",
+        "Killed",
+        "Exit code 137",
+        "exit code 137",
+        "CUDA error",
+        "cuMemAlloc",
+        "NPU error",
     ]
     # Scan ALL JUnit XML files (each test suite writes its own)
     for junit_xml in sorted(test_log_dir.glob("pytest-junit-*.xml")):
@@ -440,7 +477,9 @@ def rerun_tests_reduced_concurrency(
         procs = max(1, original_procs // (2 ** (r + 1)))
         if procs >= original_procs:
             break
-        log.info(f"Rerunning tests with {procs} workers (attempt {r + 1}/{max_reruns})...")
+        log.info(
+            f"Rerunning tests with {procs} workers (attempt {r + 1}/{max_reruns})..."
+        )
 
         ascend_path_str = str(ascend_path)
         ctx = WorkflowContext(triton_ascend_path=ascend_path_str)
@@ -450,7 +489,9 @@ def rerun_tests_reduced_concurrency(
             return ctx
         # Stop if OOM is gone — remaining failures are code issues
         if not detect_oom_in_tests(ctx):
-            log.info("OOM resolved — remaining failures are not memory-related, stopping rerun")
+            log.info(
+                "OOM resolved — remaining failures are not memory-related, stopping rerun"
+            )
             return ctx
 
     log.error(f"Tests still failing after {max_reruns} concurrency reductions")

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 
 AIBackendChoice = Literal["opencode", "claude", "auto"]
@@ -50,7 +50,9 @@ class TAConfig:
     skip_build: bool = False
     skip_e2e_test: bool = False
     skip_llvm_rebuild: bool = False  # skip LLVM rebuild when version changes (IR patch)
-    skip_baseline_llvm: bool = False  # skip initial baseline LLVM build at workflow start
+    skip_baseline_llvm: bool = (
+        False  # skip initial baseline LLVM build at workflow start
+    )
     skip_ir_patch: bool = False  # skip entire IR patch phase (SKIP_IR_PATCH)
 
     # ── Git / Branch ──────────────────────────────────────────────────────
@@ -92,8 +94,9 @@ class TAConfig:
                 "TRITON_UPSTREAM_URL", "https://github.com/triton-lang/triton.git"
             ),
             target_commit=os.getenv("TRITON_TARGET_COMMIT", ""),
-            ai_backend=_env_choice(
-                "AI_BACKEND", ["opencode", "claude", "auto"], "auto"
+            ai_backend=cast(
+                AIBackendChoice,
+                _env_choice("AI_BACKEND", ["opencode", "claude", "auto"], "auto"),
             ),
             ai_timeout_minutes=_env_int("TA_AI_TIMEOUT_MINUTES", 30),
             ai_stale_seconds=_env_int("TA_AI_STALE_SECONDS", 1200),
@@ -119,7 +122,9 @@ class TAConfig:
             push_to_github=_env_bool("PUSH_TO_GITHUB", False),
             github_repo=os.getenv("GITHUB_REPO", "triton-lang/triton-ascend"),
             llvm_project_path=os.getenv("LLVM_PROJECT_PATH", "~/llvm-project"),
-            llvm_install_prefix_sync=os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync"),
+            llvm_install_prefix_sync=os.getenv(
+                "LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync"
+            ),
             conda_env=os.getenv("CONDA_ENV", "ta-upgrade"),
             test_dir=os.getenv("TA_TEST_DIR", "third_party/ascend/unittest/pytest_ut"),
             test_dirs=_resolve_test_dirs(),
@@ -133,14 +138,19 @@ class TAConfig:
     def llvm_project(self) -> Path:
         if self.llvm_project_path:
             return Path(os.path.expanduser(self.llvm_project_path))
-        return Path(os.path.expanduser(os.getenv("LLVM_PROJECT_PATH", "~/llvm-project")))
+        return Path(
+            os.path.expanduser(os.getenv("LLVM_PROJECT_PATH", "~/llvm-project"))
+        )
 
     @property
     def llvm_install(self) -> Path:
         if self.llvm_install_prefix_sync:
             return Path(os.path.expanduser(self.llvm_install_prefix_sync))
-        return Path(os.path.expanduser(
-            os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")))
+        return Path(
+            os.path.expanduser(
+                os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")
+            )
+        )
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -186,7 +196,9 @@ def _resolve_test_dirs(primary: str = "", extra: str = "") -> list[str]:
     When called from main.py with CLI args, *primary* and *extra* override
     the env vars.
     """
-    _primary = primary or os.getenv("TA_TEST_DIR", "third_party/ascend/unittest/pytest_ut")
+    _primary = primary or os.getenv(
+        "TA_TEST_DIR", "third_party/ascend/unittest/pytest_ut"
+    )
     dirs = [_primary] if _primary else []
 
     extra_raw = extra or os.getenv("TA_EXTRA_TEST_DIRS", "")
