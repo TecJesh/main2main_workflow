@@ -73,10 +73,6 @@ Common code-bug mechanisms in Triton-Ascend:
   `reference/02-llvm-version-adaptation-and-compile-fixes.md`.
   Never modify files under `third_party/nvidia/` or `third_party/amd/`.
 - Pytest assertion failures → expected behavior changed due to upstream modifications
-- **`expected offsets to be non-negative` / `test_neg_index*`** → LLVM 3.7+
-  `ReinterpretCastOpConstantFolder` exposing negative `reinterpret_cast`
-  offsets. **Do not** fix with `maxsi(neg, 0)`. Use pointer rebase:
-  `reference/06-negative-memref-offset-rebase.md`.
 
 Then look up the matching pattern in `reference/error-pattern-examples.md`.
 

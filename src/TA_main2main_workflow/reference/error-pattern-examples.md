@@ -155,30 +155,6 @@ the test. If the test failure reveals a real bug in Ascend code, fix the source.
 
 ---
 
-## Negative memref offset / test_neg_index (LLVM 3.7+)
-
-**Error:** `expected offsets to be non-negative, but got -N` under
-`TritonToLinalg` + `Canonicalizer`, or `test_neg_index*` numerical / compile
-failure after an LLVM bump.
-
-**Cause:** Ascend used to turn negative Attribute offsets into `%c-N`. LLVM
-3.7+ `ReinterpretCastOpConstantFolder` folds them back to illegal
-`staticOffsets=[-N]`. Clamping with `arith.maxsi(neg, 0)` makes the pipeline
-pass but **shifts the tile** (e.g. `out[6]=in[6]` instead of `in[0]`).
-
-**Fix (mandatory):** In `BlockPtrAnalysis.cpp` `rewriteAddPtr`, if the **sum**
-of constant BlockData offsets is `< 0`, advance the source pointer by that many
-elements (via `extract_aligned_pointer_as_index` / existing `pointer_cast`
-addrs + byte arithmetic), zero all offsets, then `createCastOp` with
-`offset:[0]`. See `reference/06-negative-memref-offset-rebase.md`.
-
-**Do NOT:**
-- `maxsi(negOffset, 0)` in `inferBlockOffset`
-- Attribute → `%c-N` only (NegOffsetElim)
-- Emit `reinterpret_cast` / `subview` with negative static offsets
-
----
-
 ## Pre-CI Check Failure
 
 **Error source:** `{step_dir}/pre_ci_check.json`

@@ -36,12 +36,13 @@
 ### [03-unit-test-failure-diagnosis-and-fixes.md](./03-unit-test-failure-diagnosis-and-fixes.md)
 **单元测试用例报错定位与修复指导**
 - 测试架构概览（pytest_ut/device_ut/Conversion/）
-- 7 种典型测试失败案例详解
+- 8 种典型测试失败案例详解
 - API 签名不匹配：`tl.load` 缺少 `other` 参数
 - Pass 选项废弃：`force-simt-template` → `compile-mode`
 - 自定义算子回退到社区版本
 - NPUIR 更新导致测试跳过
 - 测试参数膨胀导致 CI 超时
+- 负 base offset / `test_neg_index`：pointer rebase（禁止 maxsi）
 - 升级后测试检查清单
 - 测试调试工具与技巧
 
@@ -56,13 +57,6 @@
 - Ascend 特有 API 的移除与适配
 - [BC-breaking] 上游变更速查
 - IR 兼容性问题诊断流程
-
-### [06-negative-memref-offset-rebase.md](./06-negative-memref-offset-rebase.md)
-**负 memref offset / `test_neg_index` 专家方案（禁止 maxsi 夹紧）**
-- LLVM 3.7 `ReinterpretCastOpConstantFolder` 与 verifier 因果
-- 正确修复：线性 offset 总和 `<0` → pointer rebase + `offset:[0]`
-- 禁止：`maxsi(neg,0)`、Attribute→`%c-N` 假消负
-- 回归：pytest `test_neg_index*` + lit `test_load_with_neg_index.mlir`
 
 ---
 
