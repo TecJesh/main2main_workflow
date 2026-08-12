@@ -48,6 +48,7 @@ All 2090 existing functional regression tests:
 | **设备兼容性** | NPU 特定功能不支持 | ⭐⭐ | 中 |
 | **测试用例膨胀** | CI 超时 | ⭐ | 低 |
 | **重复测试代码** | 测试运行两次 | ⭐ | 低 |
+| **负 memref offset / test_neg_index** | `expected offsets to be non-negative` | ⭐⭐ | 中 |
 
 ### 2.2 标准诊断流程
 
@@ -316,6 +317,79 @@ if __name__ == "__main__":
 
 **相关提交:**
 - `a6ee6dbd09` — `[Tutorials](fix) Remove duplicate test code from UT`（删除 1889 行重复代码）
+
+---
+
+### 3.8 案例 8: 负 base offset 连续 load（`test_neg_index`）在 LLVM 3.7+ 失败
+
+**错误表现:**
+```text
+error: expected offsets to be non-negative, but got -6
+Pipeline failed while executing
+  [`TritonToLinalg` on 'builtin.module', `Canonicalizer` on 'builtin.module']
+```
+或 `pytest_ut/test_neg_index.py` 编译/数值失败。
+
+典型 kernel：
+```python
+tmp = tl.load(in_ptr + ((-NEG_INDEX) + offset), mask=(offset >= NEG_INDEX), other=0.0)
+# NEG=6, BLOCK=12 → 有效 lane 读 in[0..5] 写到 out[6..11]
+```
+
+**根因分析（勿判成 “verifier 变严”）:**
+
+1. 旧 `NegOffsetElim` 把负 Attribute 改成 `%c-6 : index`（仍是负常量）。
+2. LLVM 3.7+ 新增 `ReinterpretCastOpConstantFolder`（[#163505](https://github.com/llvm/llvm-project/pull/163505)），在 `TritonToLinalg` 内嵌 Canonicalizer 里把 `%c-6` 折回 `staticOffsets=[-6]`。
+3. `ViewLikeInterface` 一直拒绝负 **static** offset（3.6/3.7 规则相同）。3.6 能过是因为没有 ConstantFolder。
+
+**正确修复（pointer rebase）:**
+
+文件：`third_party/ascend/lib/TritonToLinalg/BlockPtrAnalysis.cpp`  
+函数：`BlockDataParser::rewriteAddPtr`（IntToPtr→`pointer_cast` 之后、`createCastOp` 之前）
+
+```text
+linear = Σ getConstantIntValue(offsets[i])   # 有动态维则跳过
+if linear 存在 && linear < 0:
+    指针前进 linear 个元素（一次，不是按维循环）
+    所有 offsets = 0
+    再 createCastOp → reinterpret_cast offset:[0]
+```
+
+地址前进：
+
+| 分支 | 条件 | 做法 |
+|---|---|---|
+| A | source 已是 `hivm.pointer_cast` | `addrs[0] + linear * elemBytes`（i64） |
+| B | 普通 memref（函数参） | `extract_aligned_pointer_as_index` → 字节加减 → `index_cast` → i64 |
+
+然后：`hivm.hir.pointer_cast(%addr) : memref<?xT>`（动态 `?` 基址；定长 tile 由后续 `reinterpret_cast sizes` 给出）。
+
+等价：`base + (i + S)`（`S<0`）≡ `(base advanced by S elems) + i`。  
+有加有减但 **总和 ≥ 0**：**不要改**。
+
+**禁止的错误修复:**
+
+```cpp
+// ❌ maxsi 夹紧 —— 能过 verifier，但语义错（NEG=6 时 out[6]=in[6] 而非 in[0]）
+retOffset = maxsi(constant(-6), constant(0));  // → 0
+
+// ❌ 仅 Attribute → %c-N（NegOffsetElim）—— 3.7 ConstantFolder 再折回负 static
+
+// ❌ 负 reinterpret_cast / subview offset —— 同样撞 verifier
+```
+
+| | maxsi 夹 0 | rebase |
+|---|---|---|
+| verifier | 过 | 过 |
+| `out[6]`（NEG=6） | `in[6]`（错） | `in[0]`（对） |
+
+**回归测试:**
+
+- `pytest_ut/test_neg_index.py::test_neg_index_load`
+- `test_mixed_static_index_load`：`(8,2)` 和负 / `(4,10)` 和不负
+- lit：`Conversion/General/TritonToLinalg/test_load_with_neg_index.mlir`（函数参 / int_to_ptr / zero-offset）
+
+数值参考：`out[index:] = in[:n - index]`。
 
 ---
 
