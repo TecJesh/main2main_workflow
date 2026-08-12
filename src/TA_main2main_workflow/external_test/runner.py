@@ -68,6 +68,17 @@ def run_external_tests(
     all_passed = True
     results: list[dict] = []
 
+    if not external_cfg.repos:
+        log.warning("No external test repos configured — nothing to run")
+        log.info(
+            "Set TA_EXTERNAL_TEST_CONFIG to point to a config file with repos, "
+            "or edit the default config at external_test/external_test_config.yaml"
+        )
+        return ctx.copy_with(
+            external_test_passed=True,
+            external_test_results=[],
+        )
+
     for i, repo_cfg in enumerate(external_cfg.repos):
         log.section(f"External Repo {i + 1}/{len(external_cfg.repos)}: {repo_cfg.name}")
         repo_result = _process_one_repo(
