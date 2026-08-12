@@ -167,7 +167,14 @@ The active mode is: {mode}
        - IR compatibility issues (BC pipeline, Op/IR structure changes,
          NPUIR updates) →
          {reference_dir}/04-ir-compatibility-and-backend-adaptation.md
+       - Negative memref offset / `test_neg_index` /
+         `expected offsets to be non-negative` →
+         {reference_dir}/06-negative-memref-offset-rebase.md
+         (pointer rebase ONLY; NEVER arith.maxsi(neg, 0) clamp)
     4. Apply minimal fixes:
+       - HARD BAN for negative reinterpret_cast offsets: do NOT clamp with
+         maxsi/max(neg,0) or Attribute→%c-N tricks; rebase into the pointer
+         (see 06-negative-memref-offset-rebase.md) and keep numerical asserts
        - For BUILD / COMPILE errors: ONLY modify code under
          {ascend_path}/third_party/ascend/.  All other paths are read-only.
          If an upstream API change broke the build, adapt the Ascend backend
@@ -274,6 +281,10 @@ The active mode is: {mode}
   {reference_dir}/05-ir-patch-generation-guide.md
       — direct OP patch strategy (TA-side only), patch format, OP change analysis
       — USE FOR: generating LLVM backward-compatible OP patches (ir_generate_patch mode)
+  {reference_dir}/06-negative-memref-offset-rebase.md
+      — negative reinterpret_cast offset / test_neg_index: pointer rebase ONLY
+      — USE FOR: "expected offsets to be non-negative" or test_neg_index* (fix mode)
+      — FORBIDDEN: arith.maxsi(neg, 0) clamp; Attribute→%c-N NegOffsetElim tricks
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -290,6 +301,8 @@ The active mode is: {mode}
   - Prefer minimal, targeted fixes over large refactors
   - Preserve all Ascend-specific functionality (triton-ascend is the primary
     codebase, not upstream triton)
+  - For negative memref view offsets: NEVER clamp with maxsi/max(neg,0);
+    follow 06-negative-memref-offset-rebase.md (rebase into pointer).
   - **NEVER modify code under `third_party/nvidia/` or `third_party/amd/`.**
     These directories contain vendor-specific code that is NOT part of the
     Ascend backend. Build errors or test failures in these paths must be

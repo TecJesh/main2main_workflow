@@ -57,6 +57,13 @@
 - [BC-breaking] 上游变更速查
 - IR 兼容性问题诊断流程
 
+### [06-negative-memref-offset-rebase.md](./06-negative-memref-offset-rebase.md)
+**负 memref offset / `test_neg_index` 专家方案（禁止 maxsi 夹紧）**
+- LLVM 3.7 `ReinterpretCastOpConstantFolder` 与 verifier 因果
+- 正确修复：线性 offset 总和 `<0` → pointer rebase + `offset:[0]`
+- 禁止：`maxsi(neg,0)`、Attribute→`%c-N` 假消负
+- 回归：pytest `test_neg_index*` + lit `test_load_with_neg_index.mlir`
+
 ---
 
 ## 核心发现摘要
