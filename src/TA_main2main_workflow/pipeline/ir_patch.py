@@ -28,14 +28,20 @@ from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check, stream_cmd
 from TA_main2main_workflow.pipeline.build import build_and_fix_loop
 from TA_main2main_workflow.pipeline.test import (
-    run_tests, detect_oom_in_tests, rerun_tests_reduced_concurrency,
-    test_and_fix_loop, _run_pretest_and_fix,
+    run_tests,
+    detect_oom_in_tests,
+    rerun_tests_reduced_concurrency,
+    test_and_fix_loop,
+    _run_pretest_and_fix,
 )
-from TA_main2main_workflow.pipeline.fix import ai_fix
 from TA_main2main_workflow.utils import (
-    WORKSPACE_DIR, STEPS_DIR, BUILD_RESULT_FILE, TEST_RESULT_FILE,
-    IR_ANALYSIS_DIR, IR_OPS_REPORT_FILE, IR_CHANGES_REPORT_FILE,
-    IR_DIAGNOSIS_FILE, IR_MAX_ITERATIONS, LLVM_CHANGE_ANALYSIS_DIR,
+    WORKSPACE_DIR,
+    STEPS_DIR,
+    TEST_RESULT_FILE,
+    IR_ANALYSIS_DIR,
+    IR_OPS_REPORT_FILE,
+    IR_CHANGES_REPORT_FILE,
+    IR_DIAGNOSIS_FILE,
     _ASCEND_BASELINE_LLVM_HASH,
 )
 
@@ -82,7 +88,9 @@ def build_baseline_llvm(ctx: WorkflowContext, config: TAConfig) -> WorkflowConte
 
     # Allow skipping baseline LLVM build (LLVM already built for current TA)
     if config.skip_baseline_llvm:
-        log.status(True, "SKIP_BASELINE_LLVM set — assuming baseline LLVM already built")
+        log.status(
+            True, "SKIP_BASELINE_LLVM set — assuming baseline LLVM already built"
+        )
         return ctx.copy_with(build_passed=True)
 
     # Ensure llvm-project exists
@@ -133,8 +141,9 @@ def build_baseline_llvm(ctx: WorkflowContext, config: TAConfig) -> WorkflowConte
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def per_step_ir_patch(ctx: WorkflowContext, config: TAConfig,
-                      step: dict) -> WorkflowContext:
+def per_step_ir_patch(
+    ctx: WorkflowContext, config: TAConfig, step: dict
+) -> WorkflowContext:
     """Full per-step IR patch pipeline for LLVM version changes.
 
     Strategy: apply existing patch first → build → test → AI supplement.
@@ -180,7 +189,10 @@ def per_step_ir_patch(ctx: WorkflowContext, config: TAConfig,
 
 
 def _do_apply_existing_patch(
-    ctx: WorkflowContext, config: TAConfig, step: dict, target_llvm_hash: str,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
+    target_llvm_hash: str,
 ) -> bool:
     """Apply existing Ascend LLVM patch to llvm-project, with AI fix retry.
 
@@ -189,7 +201,7 @@ def _do_apply_existing_patch(
     ascend_path = Path(ctx.triton_ascend_path)
     llvm_project = config.llvm_project
     llvm_install = config.llvm_install
-    step_id = step["id"]
+    _ = step["id"]
 
     patch_dir = ascend_path / "third_party/ascend/patch"
     patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
@@ -233,7 +245,10 @@ def _do_apply_existing_patch(
         log.info(f"Applying existing patch Successfully (attempt {attempt})")
         # ── Build LLVM ──
         if config.skip_llvm_rebuild:
-            log.status(True, f"SKIP_LLVM_REBUILD set — assuming LLVM already built (attempt {attempt})")
+            log.status(
+                True,
+                f"SKIP_LLVM_REBUILD set — assuming LLVM already built (attempt {attempt})",
+            )
             return True
         try:
             _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
@@ -257,7 +272,9 @@ def _do_apply_existing_patch(
 
 
 def _do_ta_build_with_fix(
-    ctx: WorkflowContext, config: TAConfig, step: dict,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
 ) -> WorkflowContext:
     """Build Triton-Ascend with AI fix loop for compile errors."""
     return build_and_fix_loop(ctx, config)
@@ -269,7 +286,10 @@ def _do_ta_build_with_fix(
 
 
 def _do_test_and_fix_with_ir_retry(
-    ctx: WorkflowContext, config: TAConfig, step: dict, target_llvm_hash: str,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
+    target_llvm_hash: str,
 ) -> WorkflowContext:
     """Test with IR supplement loop.
 
@@ -277,7 +297,7 @@ def _do_test_and_fix_with_ir_retry(
     rebuild LLVM → rebuild TA → retest.  Code issues → AI fix loop.
     Max 3 IR supplement iterations.
     """
-    step_id = step["id"]
+    _ = step["id"]
     ascend_path = Path(ctx.triton_ascend_path)
     llvm_project = config.llvm_project
     llvm_install = config.llvm_install
@@ -314,17 +334,25 @@ def _do_test_and_fix_with_ir_retry(
         # ── Classify failures: IR vs code ──
         is_ir_issue = _classify_test_failures(ctx, config, step)
         if is_ir_issue:
-            log.info(f"IR issues detected — supplementing patch (iter {ir_iter + 1}/{ir_max})")
-            _ir_supplement_patch(ctx, config, step, target_llvm_hash,
-                                supplement_iter=ir_iter + 1)
+            log.info(
+                f"IR issues detected — supplementing patch (iter {ir_iter + 1}/{ir_max})"
+            )
+            _ir_supplement_patch(
+                ctx, config, step, target_llvm_hash, supplement_iter=ir_iter + 1
+            )
             # Rebuild LLVM with updated patch
             if config.skip_llvm_rebuild:
-                log.status(True, "SKIP_LLVM_REBUILD set — skipping LLVM rebuild after supplement")
+                log.status(
+                    True,
+                    "SKIP_LLVM_REBUILD set — skipping LLVM rebuild after supplement",
+                )
             else:
                 try:
                     # Re-apply updated patch to clean workspace before building
                     _clean_checkout_apply_patch(
-                        llvm_project, ascend_path, target_llvm_hash,
+                        llvm_project,
+                        ascend_path,
+                        target_llvm_hash,
                         reason=f"IR supplement iter {ir_iter + 1}",
                     )
                     _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
@@ -350,7 +378,10 @@ def _do_test_and_fix_with_ir_retry(
 
 
 def _per_step_ir_patch_fallback(
-    ctx: WorkflowContext, config: TAConfig, step: dict, target_llvm_hash: str,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
+    target_llvm_hash: str,
 ) -> WorkflowContext:
     """Fallback: Full OP analysis pipeline when existing-patch-first fails.
 
@@ -393,7 +424,9 @@ def _per_step_ir_patch_fallback(
     else:
         try:
             _clean_checkout_apply_patch(
-                llvm_project, ascend_path, target_llvm_hash,
+                llvm_project,
+                ascend_path,
+                target_llvm_hash,
                 reason="fallback IR pipeline",
             )
             _do_llvm_build(llvm_project, llvm_install, target_llvm_hash)
@@ -416,9 +449,15 @@ def _per_step_ir_patch_fallback(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _ir_ai_base(ctx: WorkflowContext, config: TAConfig, step_id: str,
-                 ir_dir: Path, mode: str, error_logs: str = "[]",
-                 extra: dict | None = None) -> dict:
+def _ir_ai_base(
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step_id: str,
+    ir_dir: Path,
+    mode: str,
+    error_logs: str = "[]",
+    extra: dict | None = None,
+) -> dict:
     """Build the common AI context dict for IR patch calls."""
     ascend_path = Path(ctx.triton_ascend_path)
     base = {
@@ -450,53 +489,71 @@ def _run_ir_op_analysis(ctx: WorkflowContext, config: TAConfig) -> dict:
     ir_dir = WORKSPACE_DIR / STEPS_DIR / step_id / IR_ANALYSIS_DIR
     ir_dir.mkdir(parents=True, exist_ok=True)
 
-    result = run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
-                                               "ir_op_analysis"))
+    result = run_opencode_adapter(
+        _ir_ai_base(ctx, config, step_id, ir_dir, "ir_op_analysis")
+    )
 
     ops_file = ir_dir / IR_OPS_REPORT_FILE
-    if hasattr(result, 'step_summary') and result.step_summary:
+    if hasattr(result, "step_summary") and result.step_summary:
         try:
             ops_data = json.loads(result.step_summary)
-            ops_file.write_text(json.dumps(ops_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            ops_file.write_text(
+                json.dumps(ops_data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
             return ops_data
         except json.JSONDecodeError:
             pass
     return {}
 
 
-def _run_ir_change_analysis(ctx: WorkflowContext, config: TAConfig,
-                            target_llvm_hash: str) -> dict:
+def _run_ir_change_analysis(
+    ctx: WorkflowContext, config: TAConfig, target_llvm_hash: str
+) -> dict:
     """AI compares OP .td definitions between baseline and target LLVM."""
     step = ctx.steps[ctx.current_step] if ctx.steps else {"id": "step-0"}
     step_id = step["id"]
     ir_dir = WORKSPACE_DIR / STEPS_DIR / step_id / IR_ANALYSIS_DIR
     ir_dir.mkdir(parents=True, exist_ok=True)
 
-    result = run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
-        "ir_change_analysis",
-        error_logs=json.dumps({
-            "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
-            "target_llvm_hash": target_llvm_hash,
-        }, ensure_ascii=False),
-        extra={
-            "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
-            "target_llvm_hash": target_llvm_hash,
-        },
-    ))
+    result = run_opencode_adapter(
+        _ir_ai_base(
+            ctx,
+            config,
+            step_id,
+            ir_dir,
+            "ir_change_analysis",
+            error_logs=json.dumps(
+                {
+                    "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                    "target_llvm_hash": target_llvm_hash,
+                },
+                ensure_ascii=False,
+            ),
+            extra={
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "target_llvm_hash": target_llvm_hash,
+            },
+        )
+    )
 
     changes_file = ir_dir / IR_CHANGES_REPORT_FILE
-    if hasattr(result, 'step_summary') and result.step_summary:
+    if hasattr(result, "step_summary") and result.step_summary:
         try:
             changes_data = json.loads(result.step_summary)
-            changes_file.write_text(json.dumps(changes_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            changes_file.write_text(
+                json.dumps(changes_data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
             return changes_data
         except json.JSONDecodeError:
             pass
     return {}
 
 
-def _run_ir_generate_patches(ctx: WorkflowContext, config: TAConfig,
-                             step: dict, target_llvm_hash: str = "") -> None:
+def _run_ir_generate_patches(
+    ctx: WorkflowContext, config: TAConfig, step: dict, target_llvm_hash: str = ""
+) -> None:
     """AI modifies the existing patch file in-place for new LLVM version."""
     step_id = step["id"]
     ir_dir = WORKSPACE_DIR / STEPS_DIR / step_id / IR_ANALYSIS_DIR
@@ -507,18 +564,28 @@ def _run_ir_generate_patches(ctx: WorkflowContext, config: TAConfig,
     patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
 
-    run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
-        "ir_patch_gen",
-        error_logs=json.dumps({
-            "ops_report": ctx.ir_ops_report,
-            "changes_report": ctx.ir_changes_report,
-        }, ensure_ascii=False, default=str),
-        extra={
-            "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
-            "target_llvm_hash": target_llvm_hash,
-            "ascend_patch_file": ascend_patch_file,
-        },
-    ))
+    run_opencode_adapter(
+        _ir_ai_base(
+            ctx,
+            config,
+            step_id,
+            ir_dir,
+            "ir_patch_gen",
+            error_logs=json.dumps(
+                {
+                    "ops_report": ctx.ir_ops_report,
+                    "changes_report": ctx.ir_changes_report,
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+            extra={
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "target_llvm_hash": target_llvm_hash,
+                "ascend_patch_file": ascend_patch_file,
+            },
+        )
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -527,7 +594,10 @@ def _run_ir_generate_patches(ctx: WorkflowContext, config: TAConfig,
 
 
 def _ai_adjust_patch_for_failure(
-    ctx: WorkflowContext, config: TAConfig, step: dict, error_info: str,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
+    error_info: str,
 ) -> None:
     """AI adjusts the LLVM patch after build failure."""
     step_id = step["id"]
@@ -540,22 +610,30 @@ def _ai_adjust_patch_for_failure(
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
     target_llvm_hash = _get_current_llvm_hash(ascend_path)
 
-    run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
-        "ir_patch_fix",
-        error_logs=json.dumps({"error": error_info[:5000]}, ensure_ascii=False),
-        extra={
-            "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
-            "target_llvm_hash": target_llvm_hash,
-            "ascend_patch_file": ascend_patch_file,
-            "adjust_mode": "patch_apply_failure",
-            "patch_error_type": "apply_or_build",
-            "patch_error_msg": error_info[:2000],
-        },
-    ))
+    run_opencode_adapter(
+        _ir_ai_base(
+            ctx,
+            config,
+            step_id,
+            ir_dir,
+            "ir_patch_fix",
+            error_logs=json.dumps({"error": error_info[:5000]}, ensure_ascii=False),
+            extra={
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "target_llvm_hash": target_llvm_hash,
+                "ascend_patch_file": ascend_patch_file,
+                "adjust_mode": "patch_apply_failure",
+                "patch_error_type": "apply_or_build",
+                "patch_error_msg": error_info[:2000],
+            },
+        )
+    )
 
 
 def _build_focused_change_report(
-    ctx: WorkflowContext, config: TAConfig, step: dict,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
     target_llvm_hash: str,
 ) -> Path | None:
     """Analyze OP definition diffs for affected OPs identified by ir_diagnose.
@@ -585,11 +663,13 @@ def _build_focused_change_report(
             if f.get("classification") == "ir_compatibility":
                 op_name = f.get("affected_op", "").strip()
                 if op_name and op_name not in {o["name"] for o in affected_ops}:
-                    affected_ops.append({
-                        "name": op_name,
-                        "error_summary": f.get("error_summary", ""),
-                        "rationale": f.get("rationale", ""),
-                    })
+                    affected_ops.append(
+                        {
+                            "name": op_name,
+                            "error_summary": f.get("error_summary", ""),
+                            "rationale": f.get("rationale", ""),
+                        }
+                    )
     if not affected_ops:
         log.info("No ir_compatibility OPs in diagnosis — nothing to analyze")
         return None
@@ -617,7 +697,9 @@ def _build_focused_change_report(
         # Only diff each .td file once (multiple OPs in same file)
         if td_relative not in seen_td_files:
             seen_td_files.add(td_relative)
-            diff = _diff_td_file(llvm_project, baseline_hash, target_llvm_hash, td_relative)
+            diff = _diff_td_file(
+                llvm_project, baseline_hash, target_llvm_hash, td_relative
+            )
             entry["td_diff"] = diff[:8000] if diff else "(no diff)"
             if diff and len(diff) > 8000:
                 entry["td_diff_truncated"] = True
@@ -673,8 +755,8 @@ def _diagnosis_candidates(step_id: str, ir_dir: Path) -> list[Path]:
     """Candidate paths for IR diagnosis, in priority order."""
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
     return [
-        step_dir / "ir_diagnosis.json",     # where AI writes per prompt
-        ir_dir / IR_DIAGNOSIS_FILE,         # where classify writes parsed
+        step_dir / "ir_diagnosis.json",  # where AI writes per prompt
+        ir_dir / IR_DIAGNOSIS_FILE,  # where classify writes parsed
     ]
 
 
@@ -689,7 +771,9 @@ def _find_td_file(llvm_project: Path, target_hash: str, op_name: str) -> str | N
         result = subprocess.run(
             ["git", "grep", "-l", f"def {short_name}", target_hash, "--", "*.td"],
             cwd=str(llvm_project),
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -699,14 +783,17 @@ def _find_td_file(llvm_project: Path, target_hash: str, op_name: str) -> str | N
     return result.stdout.strip().split("\n")[0]
 
 
-def _diff_td_file(llvm_project: Path, baseline_hash: str, target_hash: str,
-                  td_relative: str) -> str:
+def _diff_td_file(
+    llvm_project: Path, baseline_hash: str, target_hash: str, td_relative: str
+) -> str:
     """Get the diff of a .td file between baseline and target LLVM."""
     try:
         result = subprocess.run(
             ["git", "diff", f"{baseline_hash}..{target_hash}", "--", td_relative],
             cwd=str(llvm_project),
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError):
         return ""
@@ -714,7 +801,10 @@ def _diff_td_file(llvm_project: Path, baseline_hash: str, target_hash: str,
 
 
 def _ir_supplement_patch(
-    ctx: WorkflowContext, config: TAConfig, step: dict, target_llvm_hash: str,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
+    target_llvm_hash: str,
     supplement_iter: int = 1,
 ) -> None:
     """AI supplements the existing IR patch with missing OP IR changes.
@@ -752,7 +842,10 @@ def _ir_supplement_patch(
     # Extract affected OPs from diagnosis, diff their .td definitions
     # between baseline and target LLVM, write to focused_changes.json
     focused_report_path = _build_focused_change_report(
-        ctx, config, step, target_llvm_hash,
+        ctx,
+        config,
+        step,
+        target_llvm_hash,
     )
     if focused_report_path:
         error_log_paths.append(str(focused_report_path))
@@ -769,7 +862,9 @@ def _ir_supplement_patch(
         except Exception:
             pass
 
-    log.key_value("Existing patch", str(ascend_patch_file) if ascend_patch_file else "(none)")
+    log.key_value(
+        "Existing patch", str(ascend_patch_file) if ascend_patch_file else "(none)"
+    )
     log.key_value("Target LLVM", target_llvm_hash[:12])
     log.key_value("Test error logs", str(len(error_log_paths)))
     if focused_report_path:
@@ -777,24 +872,32 @@ def _ir_supplement_patch(
     if diagnosis_path:
         log.key_value("Diagnosis", str(diagnosis_path))
 
-    run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
-        "ir_generate_patch",
-        error_logs=json.dumps(error_log_paths, ensure_ascii=False),
-        extra={
-            "previous_step_id": "ir-diagnose",
-            "previous_step_summary_path": str(diagnosis_path or ""),
-            "focused_changes_path": str(focused_report_path or ""),
-            "target_llvm_hash": target_llvm_hash,
-            "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
-            "ascend_patch_file": ascend_patch_file,
-            "patch_content_snippet": patch_content_snippet,
-            "adjust_mode": "supplement",
-            "supplement_iteration": str(supplement_iter),
-            "ascend_npu_ir_compat_ref": str(
-                Path(__file__).parent.parent / "reference"
-                / "AscendNPU-IR_LLVM_VERSION_COMPAT.md"),
-        },
-    ))
+    run_opencode_adapter(
+        _ir_ai_base(
+            ctx,
+            config,
+            step_id,
+            ir_dir,
+            "ir_generate_patch",
+            error_logs=json.dumps(error_log_paths, ensure_ascii=False),
+            extra={
+                "previous_step_id": "ir-diagnose",
+                "previous_step_summary_path": str(diagnosis_path or ""),
+                "focused_changes_path": str(focused_report_path or ""),
+                "target_llvm_hash": target_llvm_hash,
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "ascend_patch_file": ascend_patch_file,
+                "patch_content_snippet": patch_content_snippet,
+                "adjust_mode": "supplement",
+                "supplement_iteration": str(supplement_iter),
+                "ascend_npu_ir_compat_ref": str(
+                    Path(__file__).parent.parent
+                    / "reference"
+                    / "AscendNPU-IR_LLVM_VERSION_COMPAT.md"
+                ),
+            },
+        )
+    )
 
 
 def _collect_test_error_logs() -> list[str]:
@@ -824,7 +927,9 @@ def _collect_test_error_logs() -> list[str]:
 
 
 def _classify_test_failures(
-    ctx: WorkflowContext, config: TAConfig, step: dict,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
 ) -> bool:
     """AI classifies test failures: IR compatibility vs code issues.
 
@@ -852,10 +957,16 @@ def _classify_test_failures(
         log.info(f"  ... and {len(error_log_paths) - 5} more")
 
     try:
-        result = run_opencode_adapter(_ir_ai_base(ctx, config, step_id, ir_dir,
-            "ir_diagnose",
-            error_logs=json.dumps(error_log_paths, ensure_ascii=False),
-        ))
+        result = run_opencode_adapter(
+            _ir_ai_base(
+                ctx,
+                config,
+                step_id,
+                ir_dir,
+                "ir_diagnose",
+                error_logs=json.dumps(error_log_paths, ensure_ascii=False),
+            )
+        )
     except Exception as e:
         log.error(f"IR diagnosis failed: {e}")
         return True  # Default to IR issue on failure
@@ -866,7 +977,10 @@ def _classify_test_failures(
     try:
         diagnosis_data = json.loads(summary)
     except json.JSONDecodeError:
-        diagnosis_data = {"summary": summary, "has_ir_issues": "ir_issue" in summary.lower()}
+        diagnosis_data = {
+            "summary": summary,
+            "has_ir_issues": "ir_issue" in summary.lower(),
+        }
     diagnosis_path.write_text(
         json.dumps(diagnosis_data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -878,7 +992,9 @@ def _classify_test_failures(
 
 
 def _do_ai_fix_loop(
-    ctx: WorkflowContext, config: TAConfig, step: dict,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    step: dict,
 ) -> WorkflowContext:
     """Standard AI fix loop for code issues (not IR-related)."""
     return test_and_fix_loop(ctx, config)
@@ -929,8 +1045,10 @@ def _ensure_commit_available(llvm_project: Path, commit_hash: str) -> None:
         if result.returncode == 0:
             return
         if attempt < max_attempts:
-            log.info(f"Commit {commit_hash[:12]} not found locally — fetching "
-                     f"(attempt {attempt}/{max_attempts})...")
+            log.info(
+                f"Commit {commit_hash[:12]} not found locally — fetching "
+                f"(attempt {attempt}/{max_attempts})..."
+            )
             try:
                 run_git(llvm_project, "fetch", "origin", commit_hash)
             except Exception:
@@ -941,7 +1059,10 @@ def _ensure_commit_available(llvm_project: Path, commit_hash: str) -> None:
 
 
 def _clean_checkout_apply_patch(
-    llvm_project: Path, ascend_path: Path, target_llvm_hash: str, reason: str = "",
+    llvm_project: Path,
+    ascend_path: Path,
+    target_llvm_hash: str,
+    reason: str = "",
 ) -> bool:
     """Clean workspace, checkout target hash, apply the current Ascend patch.
 
@@ -974,9 +1095,7 @@ def _get_current_llvm_hash(ascend_path: Path) -> str:
     return ""
 
 
-
-def _do_llvm_build(llvm_project: Path, llvm_install: Path,
-                   required_hash: str) -> str:
+def _do_llvm_build(llvm_project: Path, llvm_install: Path, required_hash: str) -> str:
     """Build and install LLVM from current working tree state.
 
     Cleans build directory, runs cmake + ninja install, copies FileCheck.
@@ -1000,8 +1119,10 @@ def _do_llvm_build(llvm_project: Path, llvm_install: Path,
 
     # ── cmake configure ──────────────────────────────────────────────
     cmake_cmd = [
-        "cmake", str(llvm_project / "llvm"),
-        "-G", "Ninja",
+        "cmake",
+        str(llvm_project / "llvm"),
+        "-G",
+        "Ninja",
         "-DCMAKE_BUILD_TYPE=Release",
         "-DLLVM_ENABLE_ASSERTIONS=ON",
         "-DLLVM_ENABLE_PROJECTS=mlir;llvm;lld",
@@ -1014,8 +1135,9 @@ def _do_llvm_build(llvm_project: Path, llvm_install: Path,
     with open(llvm_build_log, "w", encoding="utf-8") as fh:
         fh.write(f"=== cmake ===\n{' '.join(cmake_cmd)}\n\n")
         fh.flush()
-        rc = stream_cmd(cmake_cmd, build_dir, fh, timeout=300,
-                         label="Configuring LLVM with cmake")
+        rc = stream_cmd(
+            cmake_cmd, build_dir, fh, timeout=300, label="Configuring LLVM with cmake"
+        )
     if rc != 0:
         raise RuntimeError(
             f"LLVM cmake configure failed (exit {rc}). See: {llvm_build_log}"
@@ -1025,10 +1147,11 @@ def _do_llvm_build(llvm_project: Path, llvm_install: Path,
     # ── ninja build + install ───────────────────────────────────────
     log.info("ninja install (this may take a while)...")
     with open(llvm_build_log, "a", encoding="utf-8") as fh:
-        fh.write(f"\n=== ninja install ===\n")
+        fh.write("\n=== ninja install ===\n")
         fh.flush()
-        rc = stream_cmd(["ninja", "install"], build_dir, fh, timeout=7200,
-                         label="ninja install")
+        rc = stream_cmd(
+            ["ninja", "install"], build_dir, fh, timeout=7200, label="ninja install"
+        )
     if rc != 0:
         raise RuntimeError(
             f"LLVM ninja build failed (exit {rc}). See: {llvm_build_log}"
@@ -1060,9 +1183,12 @@ def _detect_ascend_npu_ir_errors(ctx: WorkflowContext) -> bool:
     try:
         content = build_log.read_text(encoding="utf-8", errors="replace").lower()
         indicators = [
-            "AscendNPU-IR".lower(), "ascendnpu-ir",
-            "llvm::", "mlir::",
-            "fatal error", "undefined reference",
+            "AscendNPU-IR".lower(),
+            "ascendnpu-ir",
+            "llvm::",
+            "mlir::",
+            "fatal error",
+            "undefined reference",
         ]
         return any(ind in content for ind in indicators)
     except Exception:

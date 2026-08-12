@@ -30,7 +30,7 @@ from typing import Any
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TALogger(logging.getLoggerClass()):
+class TALogger(logging.Logger):
     """Logger with extra formatting methods for workflow output."""
 
     def header(self, title: str) -> None:
@@ -53,11 +53,10 @@ class TALogger(logging.getLoggerClass()):
         icon = "✔" if ok else "✘"
         self.info(f"    {icon} {msg}")
 
-    def warn(self, msg: str, *args, **kwargs) -> None:
-        # Override to use consistent prefix
+    def warn(self, msg: object, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
         super().warning(f"    ⚠ {msg}", *args, **kwargs)
 
-    def error(self, msg: str, *args, **kwargs) -> None:
+    def error(self, msg: object, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
         super().error(f"    ✘ {msg}", *args, **kwargs)
 
     def key_value(self, key: str, value: Any) -> None:
@@ -78,18 +77,20 @@ class TALogger(logging.getLoggerClass()):
 
     def ai_call(self, backend: str, mode: str, attempt: int, max_attempts: int) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        self.info(f"\n  ╭─ AI Call ─────────────────────────────────────────────")
+        self.info("\n  ╭─ AI Call ─────────────────────────────────────────────")
         self.info(f"  │ Backend:  {backend}")
         self.info(f"  │ Mode:     {mode}")
         self.info(f"  │ Attempt:  {attempt}/{max_attempts}")
         self.info(f"  │ Time:     {ts}")
-        self.info(f"  ╰──────────────────────────────────────────────────────")
+        self.info("  ╰──────────────────────────────────────────────────────")
 
     def ai_result(
-        self, ok: bool, modified_files: list[str] = (), summary: str = ""
+        self, ok: bool, modified_files: list[str] | None = None, summary: str = ""
     ) -> None:
+        if modified_files is None:
+            modified_files = []
         icon = "✔" if ok else "✘"
-        self.info(f"\n  ╭─ AI Result ───────────────────────────────────────────")
+        self.info("\n  ╭─ AI Result ───────────────────────────────────────────")
         self.info(f"  │ Status: {icon} {'Success' if ok else 'Failed'}")
         if modified_files:
             self.info(f"  │ Modified files ({len(modified_files)}):")
@@ -98,7 +99,7 @@ class TALogger(logging.getLoggerClass()):
         if summary:
             preview = summary[:500] + "..." if len(summary) > 500 else summary
             self.info(f"  │ Summary: {preview}")
-        self.info(f"  ╰──────────────────────────────────────────────────────")
+        self.info("  ╰──────────────────────────────────────────────────────")
 
     def table(self, rows: list[tuple[str, str, str]]) -> None:
         ts = datetime.now().strftime("%H:%M:%S")

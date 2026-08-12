@@ -310,7 +310,7 @@ if __name__ == "__main__":
     def test_vector_add():
         # ...测试逻辑...
         torch.testing.assert_close(output, expected)
-    
+
     test_vector_add()
 ```
 

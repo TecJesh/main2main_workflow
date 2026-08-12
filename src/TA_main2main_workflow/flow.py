@@ -23,8 +23,6 @@ from TA_main2main_workflow.utils.tracker import timed, total_elapsed
 from TA_main2main_workflow.utils import (
     UpgradeCompleted,
     UpgradeFailed,
-    HasNewCommits,
-    HasNoNewCommits,
     WORKSPACE_DIR,
 )
 from TA_main2main_workflow.pipeline.prepare import prepare
@@ -36,7 +34,10 @@ from TA_main2main_workflow.pipeline.build import build_and_fix_loop
 from TA_main2main_workflow.pipeline.test import test_and_fix_loop
 from TA_main2main_workflow.pipeline.commit import commit_step
 from TA_main2main_workflow.pipeline.finalize import finalize
-from TA_main2main_workflow.pipeline.ir_patch import build_baseline_llvm, per_step_ir_patch
+from TA_main2main_workflow.pipeline.ir_patch import (
+    build_baseline_llvm,
+    per_step_ir_patch,
+)
 
 log = get_logger(__name__)
 
@@ -97,9 +98,7 @@ class TA_Main2MainFlow:
             step_id = step["id"]
             ctx = ctx.copy_with(retry_count=0)
 
-            log.header(
-                f"Step {ctx.current_step + 1}/{ctx.total_steps}: {step_id}"
-            )
+            log.header(f"Step {ctx.current_step + 1}/{ctx.total_steps}: {step_id}")
             log.key_value("commits in step", str(step["commit_count"]))
             log.key_value("end commit", step["end_commit"][:12])
             reason = step.get("reason", "line_budget")
@@ -129,13 +128,15 @@ class TA_Main2MainFlow:
                 log.status(True, "Conflicts resolved")
 
             # ── Step C: Build/Test — IR patch or standard ───────
-            llvm_hash_changed = (reason == "llvm_version")
+            llvm_hash_changed = reason == "llvm_version"
             if not llvm_hash_changed:
                 llvm_hash_changed = llvm_hash_changed_after_merge(ctx)
             if llvm_hash_changed:
                 if reason != "llvm_version":
-                    log.info(f"[{step_id}] LLVM hash changed during merge "
-                             f"(post-merge detection) — routing to IR patch pipeline")
+                    log.info(
+                        f"[{step_id}] LLVM hash changed during merge "
+                        f"(post-merge detection) — routing to IR patch pipeline"
+                    )
                 log.section(f"LLVM Version Change in {step_id} — IR Patch Pipeline")
                 with timed("ir-patch"):
                     ctx = per_step_ir_patch(ctx, self.config, step)
@@ -176,25 +177,26 @@ class TA_Main2MainFlow:
             ctx.step_pr_descriptions.append(desc)
 
             # Record per-step detail for sync report
-            ctx.step_details.append({
-                "step_id": step_id,
-                "step_index": ctx.current_step + 1,
-                "commits": step["commit_count"],
-                "end_commit": step["end_commit"][:12],
-                "source_lines": step.get("source_changed_lines", 0),
-                "conflict_files": len(ctx.conflict_files),
-                "build_fixes": ctx.build_fix_count,
-                "test_fixes": ctx.test_fix_count,
-                "retries": ctx.retry_count,
-                "reason": reason,
-            })
+            ctx.step_details.append(
+                {
+                    "step_id": step_id,
+                    "step_index": ctx.current_step + 1,
+                    "commits": step["commit_count"],
+                    "end_commit": step["end_commit"][:12],
+                    "source_lines": step.get("source_changed_lines", 0),
+                    "conflict_files": len(ctx.conflict_files),
+                    "build_fixes": ctx.build_fix_count,
+                    "test_fixes": ctx.test_fix_count,
+                    "retries": ctx.retry_count,
+                    "reason": reason,
+                }
+            )
 
             # Advance to next step
             ctx = ctx.copy_with(current_step=ctx.current_step + 1)
             log.status(
                 True,
-                f"Step {step_id} completed "
-                f"({ctx.current_step}/{ctx.total_steps})",
+                f"Step {step_id} completed ({ctx.current_step}/{ctx.total_steps})",
             )
 
         # ── Phase 4: Finalize ───────────────────────────────────────
@@ -207,8 +209,11 @@ class TA_Main2MainFlow:
             self._push_pr(ctx)
 
         ctx.summary_rows.append(
-            ("Single-Step Sync", "PASS",
-             f"{ctx.total_steps} step(s), branch: {ctx.work_branch}")
+            (
+                "Single-Step Sync",
+                "PASS",
+                f"{ctx.total_steps} step(s), branch: {ctx.work_branch}",
+            )
         )
         log.table(ctx.summary_rows)
         log.elapsed(total_elapsed())

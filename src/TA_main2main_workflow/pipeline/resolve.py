@@ -38,7 +38,7 @@ def resolve_conflicts(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
         prev_summary_path = str(
             WORKSPACE_DIR / STEPS_DIR / prev_step_id / "step_summary.md"
         )
-    is_last_step = (ctx.current_step >= ctx.total_steps - 1)
+    is_last_step = ctx.current_step >= ctx.total_steps - 1
 
     log.header("AI Conflict Resolution")
     for attempt in range(1, config.max_retries + 1):

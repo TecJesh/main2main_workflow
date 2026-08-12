@@ -32,9 +32,7 @@ Environment variables:
 """
 
 import argparse
-import os
 import sys
-from pathlib import Path
 
 from TA_main2main_workflow.flow import TA_Main2MainFlow
 from TA_main2main_workflow.utils import UpgradeFailed
@@ -49,40 +47,47 @@ def kickoff():
         description="Triton-Ascend Main2Main Upstream Sync (Single-Step Mode)"
     )
     parser.add_argument(
-        "--triton-ascend-path", default=None,
-        help="Local path to the triton-ascend repository (default: TRITON_ASCEND_PATH env)"
+        "--triton-ascend-path",
+        default=None,
+        help="Local path to the triton-ascend repository (default: TRITON_ASCEND_PATH env)",
     )
     parser.add_argument(
-        "--triton-path", default=None,
-        help="Local path to the upstream triton repository (default: TRITON_PATH env)"
+        "--triton-path",
+        default=None,
+        help="Local path to the upstream triton repository (default: TRITON_PATH env)",
     )
     parser.add_argument(
-        "--target-commit", default=None,
-        help="Upstream triton commit SHA to merge (default: upstream HEAD)"
+        "--target-commit",
+        default=None,
+        help="Upstream triton commit SHA to merge (default: upstream HEAD)",
     )
     parser.add_argument(
-        "--llvm-prefix", default=None,
-        help="LLVM install prefix path for building"
+        "--llvm-prefix", default=None, help="LLVM install prefix path for building"
     )
     parser.add_argument(
-        "--conda-env", default=None,
-        help="Conda environment name (default: ta-upgrade)"
+        "--conda-env", default=None, help="Conda environment name (default: ta-upgrade)"
     )
     parser.add_argument(
-        "--build-procs", type=int, default=None,
-        help="Parallel build workers (default: 32)"
+        "--build-procs",
+        type=int,
+        default=None,
+        help="Parallel build workers (default: 32)",
     )
     parser.add_argument(
-        "--test-procs", type=int, default=None,
-        help="Parallel pytest workers (default: 8)"
+        "--test-procs",
+        type=int,
+        default=None,
+        help="Parallel pytest workers (default: 8)",
     )
     parser.add_argument(
-        "--extra-test-dirs", default=None,
-        help="Extra test directories (comma/space separated, appended to default pytest ut)"
+        "--extra-test-dirs",
+        default=None,
+        help="Extra test directories (comma/space separated, appended to default pytest ut)",
     )
     parser.add_argument(
-        "--test-command", default=None,
-        help="Additional custom test command (runs after pytest ut)"
+        "--test-command",
+        default=None,
+        help="Additional custom test command (runs after pytest ut)",
     )
     args = parser.parse_args()
 
@@ -117,6 +122,7 @@ def kickoff():
     except Exception as exc:
         log.error(f"WORKFLOW CRASHED: {exc}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

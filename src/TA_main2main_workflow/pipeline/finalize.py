@@ -76,7 +76,9 @@ def finalize(ctx: WorkflowContext, config: TAConfig | None = None) -> WorkflowCo
 
 
 def _generate_pr_description(
-    ctx: WorkflowContext, config: TAConfig, summary_path: Path,
+    ctx: WorkflowContext,
+    config: TAConfig,
+    summary_path: Path,
 ) -> None:
     """Invoke AI (report mode) to write the PR description."""
     step = ctx.steps[-1] if ctx.steps else {"id": "step-0"}
@@ -87,30 +89,32 @@ def _generate_pr_description(
     context = _build_report_context(ctx)
 
     log.section("AI PR Description (report mode)")
-    result = run_opencode_adapter({
-        "step_id": "finalize-report",
-        "previous_step_id": "",
-        "previous_step_summary_path": "",
-        "is_last_step": "true",
-        "step_dir": str(step_dir),
-        "fix_dir": str(step_dir),
-        "conflict_dir": str(WORKSPACE_DIR / "conflicts"),
-        "ascend_path": str(Path(ctx.triton_ascend_path)),
-        "triton_path": ctx.triton_ascend_path,
-        "reference_dir": _REF,
-        "mode": "report",
-        "error_logs": json.dumps(context, ensure_ascii=False, default=str),
-        "target_commit": ctx.target_commit,
-        "step_index": f"{ctx.total_steps}/{ctx.total_steps}",
-        "upstream_commits_count": str(ctx.upstream_commits_count),
-        "total_steps": str(ctx.total_steps),
-        "conflict_files_resolved": str(ctx.conflict_files_resolved),
-        "build_fix_count": str(ctx.build_fix_count),
-        "test_fix_count": str(ctx.test_fix_count),
-        "final_status": ctx.final_status or "Success",
-        "ascend_npu_ir_fix": "false",
-        "ascend_npu_ir_compat_ref": "",
-    })
+    result = run_opencode_adapter(
+        {
+            "step_id": "finalize-report",
+            "previous_step_id": "",
+            "previous_step_summary_path": "",
+            "is_last_step": "true",
+            "step_dir": str(step_dir),
+            "fix_dir": str(step_dir),
+            "conflict_dir": str(WORKSPACE_DIR / "conflicts"),
+            "ascend_path": str(Path(ctx.triton_ascend_path)),
+            "triton_path": ctx.triton_ascend_path,
+            "reference_dir": _REF,
+            "mode": "report",
+            "error_logs": json.dumps(context, ensure_ascii=False, default=str),
+            "target_commit": ctx.target_commit,
+            "step_index": f"{ctx.total_steps}/{ctx.total_steps}",
+            "upstream_commits_count": str(ctx.upstream_commits_count),
+            "total_steps": str(ctx.total_steps),
+            "conflict_files_resolved": str(ctx.conflict_files_resolved),
+            "build_fix_count": str(ctx.build_fix_count),
+            "test_fix_count": str(ctx.test_fix_count),
+            "final_status": ctx.final_status or "Success",
+            "ascend_npu_ir_fix": "false",
+            "ascend_npu_ir_compat_ref": "",
+        }
+    )
 
     # AI writes to step_dir/step_summary.md; copy to final location
     ai_summary = step_dir / "step_summary.md"
@@ -181,7 +185,7 @@ def _write_summary_fallback(ctx: WorkflowContext, summary_path: Path) -> None:
         f"- **Target**: `{ctx.target_commit[:12]}`",
         f"- **Steps**: {ctx.total_steps}",
         f"- **Upstream commits**: {ctx.upstream_commits_count}",
-        f"- **Status**: Success",
+        "- **Status**: Success",
         f"- **Date**: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- **Work branch**: `{ctx.work_branch}`",
     ]
@@ -208,16 +212,16 @@ def _write_sync_report(ctx: WorkflowContext) -> None:
     report_path = WORKSPACE_DIR / "SYNC_REPORT.md"
     try:
         parts = [
-            f"# Triton-Ascend 上游同步报告\n",
-            f"## 基本信息\n",
+            "# Triton-Ascend 上游同步报告\n",
+            "## 基本信息\n",
             f"- 目标提交: `{ctx.target_commit[:12]}`",
             f"- 步骤数: {ctx.total_steps}",
             f"- 上游提交数: {ctx.upstream_commits_count}",
             f"- 工作分支: `{ctx.work_branch}`",
-            f"- 状态: 成功",
+            "- 状态: 成功",
         ]
         if ctx.step_details:
-            parts.append(f"\n## 步骤详情\n")
+            parts.append("\n## 步骤详情\n")
             for d in ctx.step_details:
                 parts.append(
                     f"### {d['step_id']}\n"

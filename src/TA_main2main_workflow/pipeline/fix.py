@@ -16,8 +16,9 @@ log = get_logger(__name__)
 _REF = str(Path(__file__).parent.parent / "reference")
 
 
-def ai_fix(ctx: WorkflowContext, config: TAConfig, attempt: int = 1,
-           mode: str = "fix") -> WorkflowContext:
+def ai_fix(
+    ctx: WorkflowContext, config: TAConfig, attempt: int = 1, mode: str = "fix"
+) -> WorkflowContext:
     """Invoke AI to fix build or test failures.
 
     Args:
@@ -50,10 +51,12 @@ def ai_fix(ctx: WorkflowContext, config: TAConfig, attempt: int = 1,
         prev_step_id = prev["id"]
         prev_summary = WORKSPACE_DIR / STEPS_DIR / prev_step_id / "step_summary.md"
         prev_summary_path = str(prev_summary) if prev_summary.exists() else ""
-    is_last_step = (ctx.current_step >= ctx.total_steps - 1)
+    is_last_step = ctx.current_step >= ctx.total_steps - 1
     ascend_npu_ir_fix = _detect_ascend_npu_ir_errors(ascend_path, step_id)
     ascend_npu_ir_compat_ref = str(
-        Path(__file__).parent.parent / "reference" / "AscendNPU-IR_LLVM_VERSION_COMPAT.md"
+        Path(__file__).parent.parent
+        / "reference"
+        / "AscendNPU-IR_LLVM_VERSION_COMPAT.md"
     )
     conflict_dir = str(WORKSPACE_DIR / "conflicts")
 
@@ -84,9 +87,7 @@ def ai_fix(ctx: WorkflowContext, config: TAConfig, attempt: int = 1,
         )
 
         # ── Fix validation gate ────────────────────────────────────────
-        is_valid, reason = validate_fix(
-            ascend_path, pre_files, result.modified_files
-        )
+        is_valid, reason = validate_fix(ascend_path, pre_files, result.modified_files)
         if not is_valid:
             log.warning(f"Fix validation FAILED: {reason}")
             log.warning("Reverting invalid changes...")
@@ -169,8 +170,12 @@ def _detect_ascend_npu_ir_errors(ascend_path: Path, step_id: str) -> bool:
     try:
         content = build_log.read_text(encoding="utf-8", errors="replace").lower()
         indicators = [
-            "AscendNPU-IR".lower(), "ascendnpu-ir",
-            "llvm::", "mlir::", "fatal error", "undefined reference",
+            "AscendNPU-IR".lower(),
+            "ascendnpu-ir",
+            "llvm::",
+            "mlir::",
+            "fatal error",
+            "undefined reference",
         ]
         return any(ind in content for ind in indicators)
     except Exception:

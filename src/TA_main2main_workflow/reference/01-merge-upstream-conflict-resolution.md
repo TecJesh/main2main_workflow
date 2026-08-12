@@ -91,10 +91,10 @@ def program_id(axis: int, builder: ir.builder) -> tl.tensor:
 # 新代码（3.5.x）
 class TritonSemantic(Generic[TensorTy]):
     builder: ir.builder
-    
+
     def __init__(self, builder):
         self.builder = builder
-        
+
     def program_id(self, axis: int) -> TensorTy:
         return self.tensor(self.builder.create_get_program_id(axis), tl.int32)
 ```
