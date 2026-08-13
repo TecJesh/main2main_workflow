@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -339,22 +341,25 @@ def run_repo_tests(
     log.info(f"[{repo_cfg.name}] output: {output_log}")
 
     _start = time.time()
+    # Write header first, then tee pytest output: console (live) + log file
     with open(output_log, "w", encoding="utf-8") as fh:
         fh.write(f"=== External Test: {repo_cfg.name} ===\n")
         fh.write(f"cmd: {' '.join(cmd)}\n\n")
-        fh.flush()
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(repo_path),
-            stdout=fh,
-            stderr=subprocess.STDOUT,
-        )
-        try:
-            rc = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            rc = -1
-            log.warning(f"[{repo_cfg.name}] pytest timed out after {timeout}s")
+
+    full_cmd = " ".join(shlex.quote(c) for c in cmd)
+    full_cmd += f" 2>&1 | tee -a {shlex.quote(str(output_log))}"
+    proc = subprocess.Popen(
+        ["bash", "-c", full_cmd],
+        cwd=str(repo_path),
+        start_new_session=True,
+    )
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Kill the whole process group (bash + tee + pytest + xdist workers)
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        rc = -1
+        log.warning(f"[{repo_cfg.name}] pytest timed out after {timeout}s")
 
     elapsed = time.time() - _start
     log.info(f"[{repo_cfg.name}] pytest finished in {elapsed:.0f}s, returncode={rc}")
@@ -385,7 +390,11 @@ def run_repo_tests(
         except Exception:
             log.warning(f"Could not parse JUnit XML: {junit_xml}")
 
-    passed = pf == 0 and pe == 0
+    # PASS requires: pytest exited cleanly (rc=0), JUnit shows no
+    # failures/errors, AND at least one test was actually collected.
+    # rc=4 (usage/collection error) and rc=5 (nothing collected) with an
+    # empty JUnit would otherwise be misread as "all passed".
+    passed = rc == 0 and pf == 0 and pe == 0 and tp > 0
 
     # Write per-repo result file
     result_file = test_log_dir / f"test-result-external-{repo_cfg.name}.json"
@@ -408,7 +417,14 @@ def run_repo_tests(
     )
 
     if not passed:
-        log.error(f"[{repo_cfg.name}] Tests FAILED ({pf} failed, {pe} errors)")
+        if rc != 0:
+            log.error(
+                f"[{repo_cfg.name}] pytest exited with rc={rc} "
+                f"({tp} collected, {pf} failed, {pe} errors) "
+                f"— see {output_log}"
+            )
+        else:
+            log.error(f"[{repo_cfg.name}] Tests FAILED ({pf} failed, {pe} errors)")
     else:
         log.status(True, f"[{repo_cfg.name}] All tests passed ({tp} passed)")
 
