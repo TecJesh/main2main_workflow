@@ -344,7 +344,7 @@ tmp = tl.load(in_ptr + ((-NEG_INDEX) + offset), mask=(offset >= NEG_INDEX), othe
 
 **正确修复（pointer rebase）:**
 
-文件：`third_party/ascend/lib/TritonToLinalg/BlockPtrAnalysis.cpp`  
+文件：`third_party/ascend/lib/TritonToLinalg/BlockPtrAnalysis.cpp`
 函数：`BlockDataParser::rewriteAddPtr`（IntToPtr→`pointer_cast` 之后、`createCastOp` 之前）
 
 ```text
@@ -364,7 +364,7 @@ if linear 存在 && linear < 0:
 
 然后：`hivm.hir.pointer_cast(%addr) : memref<?xT>`（动态 `?` 基址；定长 tile 由后续 `reinterpret_cast sizes` 给出）。
 
-等价：`base + (i + S)`（`S<0`）≡ `(base advanced by S elems) + i`。  
+等价：`base + (i + S)`（`S<0`）≡ `(base advanced by S elems) + i`。
 有加有减但 **总和 ≥ 0**：**不要改**。
 
 **禁止的错误修复:**

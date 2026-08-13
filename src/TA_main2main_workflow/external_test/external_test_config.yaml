@@ -1,0 +1,74 @@
+# ── 全局开关：是否启用外部测试（默认 false，需用户主动开启）──
+enabled: false                  # 设为 true 启用外部测试
+
+# ── 运行模式：inline（阻塞主流程）| standalone（不阻塞）| off（禁用）──
+mode: inline                    # 仅在 enabled=true 时生效
+
+# ── 全局默认值 ────────────────────────────────────────────────────
+test_procs: 8                   # 每个外部算子仓 pytest 并行进程数
+max_retries: 5                  # 每仓最大 AI 修复重试次数
+timeout: 7200                   # 单仓测试超时（秒）
+
+# ── 外部算子仓列表（按配置顺序串行执行）───────────────────────────
+external_test_repos:
+  - name: "Liger-Kernel"
+    url: "https://github.com/linkedin/Liger-Kernel.git"
+    branch: "main"
+    # install_cmd: "pip install -e ."    # 可选，为空则跳过安装
+    test_cases:
+      - "test/transformers/test_attn_res.py"
+      - "test/transformers/test_auto_model.py"
+      - "test/transformers/test_cute_moe_autograd.py"
+      - "test/transformers/test_cutedsl_rms_norm.py"
+      - "test/transformers/test_cutedsl_rms_norm_fastpath.py"
+      - "test/transformers/test_cutedsl_rope.py"
+      - "test/transformers/test_cutile_backend.py"
+      - "test/transformers/test_dyt.py"
+      - "test/transformers/test_embedding.py"
+      - "test/transformers/test_flex_attention.py"
+      - "test/transformers/test_fused_add_rms_norm.py"
+      - "test/transformers/test_fused_linear_cross_entropy.py"
+      - "test/transformers/test_fused_linear_scaled_cross_entropy.py"
+      - "test/transformers/test_group_norm.py"
+      - "test/transformers/test_kl_div.py"
+      - "test/transformers/test_layer_norm.py"
+      - "test/transformers/test_llama4_rope.py"
+      - "test/transformers/test_mhc.py"
+      - "test/transformers/test_mm_int8int2.py"
+      - "test/transformers/test_modulated_rms_norm.py"
+      - "test/transformers/test_moe.py"
+      - "test/transformers/test_monkey_patch.py"
+      - "test/transformers/test_swiglu_cutedsl.py"
+
+  - name: "flash-linear-attention"
+    url: "https://github.com/fla-org/flash-linear-attention.git"
+    branch: "main"
+    test_cases:
+      - "tests/context_parallel/test_cp_conv.py"
+      - "tests/context_parallel/test_cp_dplr.py"
+      - "tests/context_parallel/test_cp_gdn.py"
+      - "tests/context_parallel/test_cp_kda.py"
+      - "tests/context_parallel/test_cp_rwkv7.py"
+      - "tests/context_parallel/test_cp_token_shift.py"
+      - "tests/layers/test_layer_cache_layer_idx.py"
+      - "tests/models/test_cache.py"
+      - "tests/models/test_generation_utils.py"
+      - "tests/models/test_hybrid_attention.py"
+      - "tests/models/test_modeling_bitnet.py"
+      - "tests/models/test_modeling_deltaformer.py"
+      - "tests/models/test_modeling_mla.py"
+      - "tests/models/test_modeling_moba.py"
+      - "tests/models/test_modeling_mom.py"
+      - "tests/models/test_modeling_nsa.py"
+      - "tests/models/test_modeling_rodimus.py"
+      - "tests/models/test_modeling_samba.py"
+      - "tests/models/test_modeling_transformer.py"
+      - "tests/modules/test_grpo.py"
+      - "tests/modules/test_l2norm.py"
+      - "tests/ops/test_cache.py"
+      - "tests/ops/test_forgetting_attn.py"
+      - "tests/ops/test_moba.py"
+      - "tests/ops/test_titans.py"
+      - "tests/test_public_api.py"
+      - "tests/test_split_package_release.py"
+      - "tests/utils/test_ascend_ub_manager.py"
