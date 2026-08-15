@@ -76,11 +76,14 @@ def commit_step(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     )
     try:
         step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
+        # No whitelist here: commit_files.txt belongs to a previous fix
+        # commit, not to the step commit.
         stage_changes(
             ascend_path,
             step_dir,
             ctx.ta_patch_touched_files,
             ctx.ta_patch_submodule_files,
+            use_whitelist=False,
         )
         if not run_git(ascend_path, "diff", "--cached", "--name-only").strip():
             log.info(f"[{step_id}] Nothing to commit after staging")
@@ -162,6 +165,7 @@ def stage_changes(
     step_dir: Path,
     touched_parent: list[str],
     touched_submodule: list[str],
+    use_whitelist: bool = True,
 ) -> bool:
     """Stage working-tree changes for a commit.
 
@@ -172,11 +176,15 @@ def stage_changes(
 
     Falls back to ``git add -A`` + exclusion when no whitelist exists.
 
+    *use_whitelist* must be False for the step commit: a whitelist
+    written by an earlier fix commit describes different files and
+    would wrongly limit what gets committed.
+
     Returns True when anything is staged.
     """
     touched_set = set(touched_parent)
 
-    whitelist = _read_commit_whitelist(step_dir)
+    whitelist = _read_commit_whitelist(step_dir) if use_whitelist else []
     if whitelist:
         filtered = [
             f for f in whitelist if f not in touched_set and f != SUBMODULE_DIR

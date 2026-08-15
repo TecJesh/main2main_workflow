@@ -112,7 +112,7 @@ def ai_fix(
                 encoding="utf-8",
             )
             _revert_illegal_changes(ascend_path)
-            return ctx
+            return ctx.copy_with(last_fix_modified_files=[])
 
         log.ai_result(
             bool(result.modified_files),
@@ -122,7 +122,7 @@ def ai_fix(
         return ctx.copy_with(last_fix_modified_files=list(result.modified_files))
     except Exception as e:
         log.error(f"AI fix failed: {e}")
-        return ctx
+        return ctx.copy_with(last_fix_modified_files=[])
 
 
 # Paths AI is allowed to modify when fixing test failures.
