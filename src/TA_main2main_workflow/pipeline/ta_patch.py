@@ -42,11 +42,13 @@ from TA_main2main_workflow.utils import STEPS_DIR, WORKSPACE_DIR
 log = get_logger(__name__)
 
 # Patch files to maintain, relative to the TA repo root.
-# llvm_patch_*.patch files are LLVM-project patches handled by build.py —
-# they are NOT managed here.
+# llvm_patch_*.patch files are LLVM-project patches handled only by the
+# IR patch flow (build.py / ir_patch.py) when the LLVM version changes —
+# they are NEVER managed here.
 _TA_PATCH_DIR = "third_party/ascend/patch"
 _TA_PATCH_GLOB = "triton-ascend-*.patch"
 _NPUIR_PATCH_PREFIX = "npuir"
+_LLVM_PATCH_PREFIX = "llvm_patch_"
 
 # Max AI adjustment attempts per patch file before giving up.
 _MAX_ADJUST_RETRIES = 3
@@ -81,10 +83,17 @@ def resolve_source_patches(ascend_path: Path, config: TAConfig) -> list[Path]:
         patches: list[Path] = []
         for name in config.source_patches:
             p = patch_dir / name
-            if p.is_file():
-                patches.append(p)
-            else:
+            if not p.is_file():
                 log.warning(f"Source patch not found, skipping: {name}")
+                continue
+            if p.name.startswith(_LLVM_PATCH_PREFIX):
+                # LLVM patches are managed exclusively by the IR patch
+                # flow (build.py / ir_patch.py) — never here.
+                log.warning(
+                    f"Skipping LLVM patch in TA_SOURCE_PATCHES: {name}"
+                )
+                continue
+            patches.append(p)
         return patches
 
     log.warning("TA_SOURCE_PATCHES empty — falling back to glob discovery")
@@ -151,6 +160,7 @@ def commit_patch_adjustments(
         for f in changed
         if (ascend_path / f).is_file()
         and (ascend_path / f).resolve().is_relative_to(patch_dir.resolve())
+        and not Path(f).name.startswith(_LLVM_PATCH_PREFIX)
     ]
     if not candidates:
         log.info("No patch-file adjustments to commit")

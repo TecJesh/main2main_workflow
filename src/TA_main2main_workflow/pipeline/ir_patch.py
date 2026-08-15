@@ -108,7 +108,7 @@ def build_baseline_llvm(ctx: WorkflowContext, config: TAConfig) -> WorkflowConte
 
     # Apply existing Ascend patch
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
     if patch_files:
         patch_file = patch_files[0]
         log.info(f"Applying existing patch: {patch_file.name}")
@@ -204,7 +204,7 @@ def _do_apply_existing_patch(
     _ = step["id"]
 
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
 
     if not patch_files:
         log.info("No existing patch — building LLVM directly")
@@ -561,7 +561,7 @@ def _run_ir_generate_patches(
 
     ascend_path = Path(ctx.triton_ascend_path)
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
 
     run_opencode_adapter(
@@ -606,7 +606,7 @@ def _ai_adjust_patch_for_failure(
 
     ascend_path = Path(ctx.triton_ascend_path)
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
     target_llvm_hash = _get_current_llvm_hash(ascend_path)
 
@@ -821,7 +821,7 @@ def _ir_supplement_patch(
 
     ascend_path = Path(ctx.triton_ascend_path)
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
 
     # Collect actual test failure logs
@@ -1075,7 +1075,7 @@ def _clean_checkout_apply_patch(
     run_git(llvm_project, "clean", "-fd")
 
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
     if not patch_files:
         log.info("No Ascend patch found — building clean LLVM")
         return False

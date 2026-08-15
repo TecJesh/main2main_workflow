@@ -105,7 +105,11 @@ def llvm_setup(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     run_git(llvm_project, "checkout", "-f", required_hash)
 
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("*.patch")) if patch_dir.exists() else []
+    # LLVM patches only — triton-ascend-*.patch / npuir_*.patch are
+    # source patches managed by ta_patch.py and must not be touched.
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    )
     if patch_files:
         if required_hash[:7] in patch_files[0].name:
             log.info(f"Applying patch: {patch_files[0].name}")
@@ -202,9 +206,10 @@ def build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
         new_patch_file = patch_dir / f"llvm_patch_{required_hash[:7]}.patch"
         new_patch = run_git(llvm_project, "diff", "HEAD")
         new_patch_file.write_text(new_patch, encoding="utf-8")
-        for old in patch_dir.glob("*.patch"):
-            if old.name != new_patch_file.name:
-                old.unlink()
+        # Write-only: the LLVM patch is the version-adaptation artifact —
+        # it is adapted in place for LLVM version changes (see the IR
+        # patch flow) and must never be deleted here.  Source patches
+        # (triton-ascend-*.patch, npuir_*.patch) are never touched.
         log.info(f"Updated patch: {new_patch_file.name} ({len(new_patch)} bytes)")
 
     log.status(True, "LLVM build passed")
