@@ -15,6 +15,7 @@ from TA_main2main_workflow.utils.logging import get_logger
 log = get_logger(__name__)
 
 _SUBMODULE_DIR = "third_party/ascend/AscendNPU-IR"
+SUBMODULE_DIR = _SUBMODULE_DIR  # public alias for other pipeline modules
 _NPUIR_REMOTE = "npuir-push"
 
 

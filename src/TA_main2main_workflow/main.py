@@ -35,6 +35,11 @@ Environment variables:
                          third_party/ascend/patch/triton-ascend-*.patch files
                          are adjusted and applied for build/test)
   TA_MAIN_BRANCH       — branch on origin merged in ta_main mode (default: main)
+  TA_SOURCE_PATCHES    — comma/space separated patch files under
+                         third_party/ascend/patch/ managed by the workflow
+                         (default: triton-ascend-3.7.0.patch,
+                          triton-ascend-dev-3.7.0.patch,
+                          npuir_adapter_to_llvm_23.patch)
 """
 
 import argparse

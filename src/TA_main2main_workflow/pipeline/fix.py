@@ -83,11 +83,23 @@ def ai_fix(
                 "step_index": f"{ctx.current_step + 1}/{ctx.total_steps}",
                 "ascend_npu_ir_fix": str(ascend_npu_ir_fix).lower(),
                 "ascend_npu_ir_compat_ref": ascend_npu_ir_compat_ref,
+                "patch_touched_parent": json.dumps(
+                    ctx.ta_patch_touched_files, ensure_ascii=False
+                ),
+                "patch_touched_submodule": json.dumps(
+                    ctx.ta_patch_submodule_files, ensure_ascii=False
+                ),
             }
         )
 
         # ── Fix validation gate ────────────────────────────────────────
-        is_valid, reason = validate_fix(ascend_path, pre_files, result.modified_files)
+        # Patch-touched files are allowed as fix targets even outside the
+        # usual prefixes — their changes are regenerated into the .patch
+        # files instead of being committed as source.
+        patch_touched = _patch_touched_as_repo_paths(ctx)
+        is_valid, reason = validate_fix(
+            ascend_path, pre_files, result.modified_files, patch_touched
+        )
         if not is_valid:
             log.warning(f"Fix validation FAILED: {reason}")
             log.warning("Reverting invalid changes...")
@@ -107,7 +119,7 @@ def ai_fix(
             result.modified_files,
             (result.step_summary or "")[:500],
         )
-        return ctx
+        return ctx.copy_with(last_fix_modified_files=list(result.modified_files))
     except Exception as e:
         log.error(f"AI fix failed: {e}")
         return ctx
@@ -126,15 +138,23 @@ def validate_fix(
     ascend_path: Path,
     pre_fix_files: set[str],
     modified_files: list[str],
+    patch_touched: set[str] | None = None,
 ) -> tuple[bool, str]:
     """Validate that AI fixes only touch allowed paths.
+
+    Files in *patch_touched* (repo-root relative paths of patch-touched
+    files) are always allowed: fixes there are regenerated into the
+    ``.patch`` files, never committed as source.
 
     Returns (is_valid, reason).
     """
     if not modified_files:
         return False, "No files were modified"
 
+    touched = patch_touched or set()
     for f in modified_files:
+        if f in touched:
+            continue
         if not any(f.startswith(p) for p in _ALLOWED_FIX_PREFIXES):
             return False, (
                 f"File '{f}' is outside allowed paths. "
@@ -142,6 +162,16 @@ def validate_fix(
             )
 
     return True, "all changes within allowed paths"
+
+
+def _patch_touched_as_repo_paths(ctx: WorkflowContext) -> set[str]:
+    """Patch-touched files as repo-root relative paths (for validation)."""
+    from TA_main2main_workflow.utils.submodule import SUBMODULE_DIR
+
+    sub_prefix = SUBMODULE_DIR + "/"
+    return set(ctx.ta_patch_touched_files) | {
+        sub_prefix + f for f in ctx.ta_patch_submodule_files
+    }
 
 
 def _list_tracked_files(repo: Path) -> set[str]:

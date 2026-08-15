@@ -3,21 +3,26 @@
 Assembles pipeline steps for single-step mode::
 
     prepare → detect → plan → [build_baseline_llvm] → for each step:
-      merge → [resolve] → [ta_patch (ta_main mode only)] →
+      merge → [resolve] → adjust_patches → commit_patch_adjustments →
+        parse_patches →
         if LLVM hash changed: per_step_ir_patch (apply existing → build LLVM →
           build TA → test → supplement IR → loop)
         else: build_and_fix_loop → test_and_fix_loop
-      → commit → [revert ta_patch]
+      → restore_workspace → commit
     → finalize → [push_pr]
+
+Source patches (``third_party/ascend/patch/``) are applied by the
+triton-ascend build itself (setup.py), in ALL merge modes.  The
+workflow adjusts them after every merge (line drift), commits the
+adjustment immediately, parses the files they touch, regenerates them
+from AI fixes, and restores the touched files so the committed tree
+stays clean.
 
 Merge modes (``TA_MERGE_MODE``):
     ``upstream`` (default) — merge triton-upstream/main into the work branch.
     ``ta_main``             — merge TA origin/main evolution back into the
                              work branch; conflicts favor the incoming TA
-                             code (-X theirs); third_party/ascend/patch/
-                             triton-ascend-*.patch files are adjusted and
-                             applied for build/test, then reverted so the
-                             committed tree stays clean.
+                             code (-X theirs).
 """
 
 from __future__ import annotations
@@ -42,7 +47,13 @@ from TA_main2main_workflow.pipeline.resolve import resolve_conflicts
 from TA_main2main_workflow.pipeline.build import build_and_fix_loop
 from TA_main2main_workflow.pipeline.test import test_and_fix_loop
 from TA_main2main_workflow.pipeline.commit import commit_step
-from TA_main2main_workflow.pipeline.ta_patch import adjust_and_apply_patches
+from TA_main2main_workflow.pipeline.ta_patch import (
+    adjust_patches,
+    commit_patch_adjustments,
+    parse_patches,
+    resolve_source_patches,
+    restore_workspace,
+)
 from TA_main2main_workflow.pipeline.finalize import finalize
 from TA_main2main_workflow.pipeline.ir_patch import (
     build_baseline_llvm,
@@ -137,22 +148,32 @@ class TA_Main2MainFlow:
                     return UpgradeFailed
                 log.status(True, "Conflicts resolved")
 
-            # ── Step C: TA source patches (ta_main mode only) ───
-            # Adjust/apply third_party/ascend/patch/triton-ascend-*.patch
-            # until apply succeeds, then clean the work area.  The applied
-            # source changes are excluded from commits and reverted after
-            # the step.  If a patch cannot be applied, the step FAILS —
-            # build/test must never run without the required patches.
-            if ctx.merge_mode == "ta_main":
+            # ── Step C: Source patches (all merge modes) ─────────
+            # The build applies third_party/ascend/patch/*.patch itself,
+            # so the workflow only adjusts them after the merge (line
+            # drift), commits the adjustment right away, and parses the
+            # files they touch (for commit exclusion + regeneration).
+            # If a patch cannot be adjusted, the step FAILS — the build
+            # would fail applying it.
+            patch_files = resolve_source_patches(ascend_path, self.config)
+            if patch_files:
                 with timed("ta-patch"):
-                    ctx = adjust_and_apply_patches(ctx, self.config)
+                    ctx = adjust_patches(ctx, self.config, patch_files)
                 if not ctx.ta_patch_ok:
                     log.error(
-                        f"TA source patch failed to apply for {step_id} "
+                        f"Source patch failed to apply for {step_id} "
                         "— cannot proceed to build/test"
                     )
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
+                commit_patch_adjustments(
+                    ascend_path, step_id, ctx.target_commit
+                )
+                touched = parse_patches(patch_files)
+                ctx = ctx.copy_with(
+                    ta_patch_touched_files=touched.parent,
+                    ta_patch_submodule_files=touched.submodule,
+                )
 
             # ── Step D: Build/Test — IR patch or standard ───────
             llvm_hash_changed = reason == "llvm_version"
@@ -190,21 +211,19 @@ class TA_Main2MainFlow:
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
 
-            # ── Step E: Commit ──────────────────────────────────
+            # ── Step E: Restore workspace, then commit ──────────
+            # Drop the build-applied patch content (parent + submodule)
+            # so the step commit contains only the merge result, the
+            # patch-file adjustments, and AI fixes.  The next build
+            # re-applies the patches automatically.
+            if ctx.ta_patch_touched_files or ctx.ta_patch_submodule_files:
+                restore_workspace(
+                    ascend_path,
+                    ctx.ta_patch_touched_files,
+                    ctx.ta_patch_submodule_files,
+                )
             with timed("commit"):
                 ctx = commit_step(ctx, self.config)
-
-            # ── Step F: Revert applied TA patches (ta_main only) ─
-            # The committed tree must stay clean — intrusive
-            # modifications live only in third_party/ascend/patch/*.patch.
-            if ctx.merge_mode == "ta_main" and ctx.ta_patch_touched_files:
-                from TA_main2main_workflow.pipeline.ta_patch import (
-                    revert_applied_patches,
-                )
-
-                revert_applied_patches(
-                    Path(ctx.triton_ascend_path), ctx.ta_patch_touched_files
-                )
 
             # Record step description for PR body
             desc = (

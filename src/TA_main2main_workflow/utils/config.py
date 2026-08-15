@@ -67,6 +67,19 @@ class TAConfig:
     merge_mode: str = "upstream"
     ta_main_branch: str = "main"  # branch on origin merged in ta_main mode
 
+    # ── Source patches (auto-applied by the build) ─────────────────────────
+    # Intrusive source modifications live in patch files under
+    # third_party/ascend/patch/ and are applied by setup.py at build time.
+    # The workflow adjusts these patches after every merge (line drift),
+    # parses the files they touch, and flows AI fixes back into them.
+    source_patches: list[str] = field(
+        default_factory=lambda: [
+            "triton-ascend-3.7.0.patch",
+            "triton-ascend-dev-3.7.0.patch",
+            "npuir_adapter_to_llvm_23.patch",
+        ]
+    )
+
     # ── PR / Push ─────────────────────────────────────────────────────────
     push_to_github: bool = False
     github_repo: str = "triton-lang/triton-ascend"
@@ -130,6 +143,7 @@ class TAConfig:
                 "TA_MERGE_MODE", ["upstream", "ta_main"], "upstream"
             ),
             ta_main_branch=os.getenv("TA_MAIN_BRANCH", "main"),
+            source_patches=_resolve_source_patches(),
             push_to_github=_env_bool("PUSH_TO_GITHUB", False),
             github_repo=os.getenv("GITHUB_REPO", "triton-lang/triton-ascend"),
             llvm_project_path=os.getenv("LLVM_PROJECT_PATH", "~/llvm-project"),
@@ -225,3 +239,21 @@ def _resolve_test_dirs(primary: str = "", extra: str = "") -> list[str]:
 def _env_choice(name: str, choices: list[str], default: str) -> str:
     val = os.getenv(name, default).lower()
     return val if val in choices else default
+
+
+_DEFAULT_SOURCE_PATCHES = [
+    "triton-ascend-3.7.0.patch",
+    "triton-ascend-dev-3.7.0.patch",
+    "npuir_adapter_to_llvm_23.patch",
+]
+
+
+def _resolve_source_patches() -> list[str]:
+    """Parse TA_SOURCE_PATCHES (comma/space separated, relative to the
+    patch dir) or fall back to the known default list."""
+    raw = os.getenv("TA_SOURCE_PATCHES", "")
+    if raw:
+        parts = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
+        if parts:
+            return parts
+    return list(_DEFAULT_SOURCE_PATCHES)
