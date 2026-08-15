@@ -121,6 +121,22 @@ def adjust_patches(
     ascend_path = Path(ctx.triton_ascend_path)
     log.section(f"Adjust Source Patches ({len(patch_files)} file(s))")
 
+    # A previous build leaves patch-applied content in the working tree
+    # (setup.py applies the patches in place; old runs never reverted
+    # it).  Restore the touched files to HEAD BEFORE checking — parsing
+    # is static so it can run first — otherwise every hunk fails
+    # spuriously against already-patched files and the AI "adjusts" a
+    # patch that is actually fine.
+    touched = parse_patches(patch_files)
+    if touched.parent:
+        run_git_no_check(ascend_path, "checkout", "-f", "--", *touched.parent)
+        log.info(
+            f"Restored {len(touched.parent)} patch-touched file(s) to HEAD "
+            "before patch checks"
+        )
+    if touched.submodule:
+        _sync_submodule(ascend_path)
+
     all_ok = True
     ready: list[str] = []
     for patch_file in patch_files:
@@ -134,13 +150,25 @@ def adjust_patches(
             log.status(True, f"{patch_file.name} applies after adjustment")
             ready.append(str(patch_file))
         else:
+            check = run_git_no_check(
+                ascend_path, "apply", "--check", *_check_args(patch_file)
+            )
             log.error(
                 f"Patch {patch_file.name} still does not apply after "
                 "AI adjustment — build will fail to apply it"
             )
+            log.error(
+                "Last check error: "
+                f"{(check.stderr or check.stdout or '').strip()[-400:]}"
+            )
             all_ok = False
 
-    return ctx.copy_with(ta_patch_ok=all_ok, ta_patch_applied=ready)
+    return ctx.copy_with(
+        ta_patch_ok=all_ok,
+        ta_patch_applied=ready,
+        ta_patch_touched_files=touched.parent,
+        ta_patch_submodule_files=touched.submodule,
+    )
 
 
 def commit_patch_adjustments(
@@ -376,13 +404,18 @@ def exclude_patch_files_from_index(
     Defensive fallback for commits that use ``git add -A``: the
     working tree may carry applied patch content, which must never
     enter a commit.
+
+    NOTE: the parent-index gitlink entry for the submodule is NOT
+    unstaged here — a merge may legitimately move the submodule
+    pointer and that change must reach the commit.  ``git add -A``
+    does not stage submodule worktree dirt anyway (only pointer
+    changes), so leaving the gitlink staged is always safe.
     """
     if touched_parent:
         run_git_no_check(ascend_path, "restore", "--staged", "--", *touched_parent)
     if touched_submodule:
-        # Unstage the submodule pointer change in the parent index...
-        run_git_no_check(ascend_path, "restore", "--staged", "--", SUBMODULE_DIR)
-        # ...and any staged files inside the submodule itself.
+        # Only the submodule's own index needs defense — for the
+        # (removed) commit_submodule path.
         sub_path = ascend_path / SUBMODULE_DIR
         if sub_path.is_dir():
             run_git_no_check(sub_path, "restore", "--staged", "--", *touched_submodule)
@@ -403,6 +436,42 @@ def _check_applies(ascend_path: Path, patch_file: Path) -> bool:
     args.append(str(patch_file))
     result = run_git_no_check(ascend_path, *args)
     return result.returncode == 0
+
+
+def _sync_submodule(ascend_path: Path) -> bool:
+    """Restore the AscendNPU-IR submodule working tree to its HEAD.
+
+    The build (setup.py) applies the npuir patch directly into the
+    submodule working tree; older runs never reverted it, so a fresh
+    run can start with stale patch content.  Patch checks must run
+    against the pristine submodule content (the recorded gitlink) —
+    otherwise every hunk fails spuriously and the AI "adjusts" a
+    patch that is actually fine.
+
+    Returns True when the submodule is usable afterwards.
+    """
+    sub = ascend_path / SUBMODULE_DIR
+    if not sub.is_dir():
+        log.warning("AscendNPU-IR submodule directory missing")
+        return False
+    if not (sub / ".git").exists():
+        log.info("AscendNPU-IR submodule not initialized — trying init")
+        run_git_no_check(
+            ascend_path, "submodule", "update", "--init", "--", SUBMODULE_DIR
+        )
+    if not (sub / ".git").exists():
+        log.error(
+            "AscendNPU-IR submodule unavailable — npuir patch checks will fail"
+        )
+        return False
+    status = run_git_no_check(sub, "status", "--porcelain")
+    if status.stdout.strip():
+        log.warning(
+            "AscendNPU-IR working tree is dirty (stale build-applied patch "
+            "content?) — restoring to HEAD before patch checks"
+        )
+        run_git_no_check(sub, "checkout", "-f", "HEAD")
+    return True
 
 
 def _diff_names(ascend_path: Path) -> set[str]:

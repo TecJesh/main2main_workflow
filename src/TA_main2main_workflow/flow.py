@@ -50,7 +50,6 @@ from TA_main2main_workflow.pipeline.commit import commit_step
 from TA_main2main_workflow.pipeline.ta_patch import (
     adjust_patches,
     commit_patch_adjustments,
-    parse_patches,
     resolve_source_patches,
     restore_workspace,
 )
@@ -168,11 +167,6 @@ class TA_Main2MainFlow:
                     return UpgradeFailed
                 commit_patch_adjustments(
                     ascend_path, step_id, ctx.target_commit
-                )
-                touched = parse_patches(patch_files)
-                ctx = ctx.copy_with(
-                    ta_patch_touched_files=touched.parent,
-                    ta_patch_submodule_files=touched.submodule,
                 )
 
             # ── Step D: Build/Test — IR patch or standard ───────
