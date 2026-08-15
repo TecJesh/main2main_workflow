@@ -1,14 +1,23 @@
-"""TA Main2Main Workflow — Triton-Ascend upstream sync orchestrator.
+"""TA Main2Main Workflow — Triton-Ascend sync orchestrator.
 
 Assembles pipeline steps for single-step mode::
 
     prepare → detect → plan → [build_baseline_llvm] → for each step:
-      merge → [resolve] →
+      merge → [resolve] → [ta_patch (ta_main mode only)] →
         if LLVM hash changed: per_step_ir_patch (apply existing → build LLVM →
           build TA → test → supplement IR → loop)
         else: build_and_fix_loop → test_and_fix_loop
-      → commit
+      → commit → [revert ta_patch]
     → finalize → [push_pr]
+
+Merge modes (``TA_MERGE_MODE``):
+    ``upstream`` (default) — merge triton-upstream/main into the work branch.
+    ``ta_main``             — merge TA origin/main evolution back into the
+                             work branch; conflicts favor the incoming TA
+                             code (-X theirs); third_party/ascend/patch/
+                             triton-ascend-*.patch files are adjusted and
+                             applied for build/test, then reverted so the
+                             committed tree stays clean.
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ from TA_main2main_workflow.pipeline.resolve import resolve_conflicts
 from TA_main2main_workflow.pipeline.build import build_and_fix_loop
 from TA_main2main_workflow.pipeline.test import test_and_fix_loop
 from TA_main2main_workflow.pipeline.commit import commit_step
+from TA_main2main_workflow.pipeline.ta_patch import adjust_and_apply_patches
 from TA_main2main_workflow.pipeline.finalize import finalize
 from TA_main2main_workflow.pipeline.ir_patch import (
     build_baseline_llvm,
@@ -127,7 +137,24 @@ class TA_Main2MainFlow:
                     return UpgradeFailed
                 log.status(True, "Conflicts resolved")
 
-            # ── Step C: Build/Test — IR patch or standard ───────
+            # ── Step C: TA source patches (ta_main mode only) ───
+            # Adjust/apply third_party/ascend/patch/triton-ascend-*.patch
+            # until apply succeeds, then clean the work area.  The applied
+            # source changes are excluded from commits and reverted after
+            # the step.  If a patch cannot be applied, the step FAILS —
+            # build/test must never run without the required patches.
+            if ctx.merge_mode == "ta_main":
+                with timed("ta-patch"):
+                    ctx = adjust_and_apply_patches(ctx, self.config)
+                if not ctx.ta_patch_ok:
+                    log.error(
+                        f"TA source patch failed to apply for {step_id} "
+                        "— cannot proceed to build/test"
+                    )
+                    ctx = ctx.copy_with(final_status=UpgradeFailed)
+                    return UpgradeFailed
+
+            # ── Step D: Build/Test — IR patch or standard ───────
             llvm_hash_changed = reason == "llvm_version"
             if not llvm_hash_changed:
                 llvm_hash_changed = llvm_hash_changed_after_merge(ctx)
@@ -163,9 +190,21 @@ class TA_Main2MainFlow:
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
 
-            # ── Step D: Commit ──────────────────────────────────
+            # ── Step E: Commit ──────────────────────────────────
             with timed("commit"):
                 ctx = commit_step(ctx, self.config)
+
+            # ── Step F: Revert applied TA patches (ta_main only) ─
+            # The committed tree must stay clean — intrusive
+            # modifications live only in third_party/ascend/patch/*.patch.
+            if ctx.merge_mode == "ta_main" and ctx.ta_patch_touched_files:
+                from TA_main2main_workflow.pipeline.ta_patch import (
+                    revert_applied_patches,
+                )
+
+                revert_applied_patches(
+                    Path(ctx.triton_ascend_path), ctx.ta_patch_touched_files
+                )
 
             # Record step description for PR body
             desc = (

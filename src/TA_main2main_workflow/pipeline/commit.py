@@ -65,6 +65,16 @@ def commit_step(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     )
     try:
         run_git(ascend_path, "add", "-A")
+        # ta_main mode: keep patch-applied source changes out of commits —
+        # they live only in third_party/ascend/patch/*.patch files
+        if ctx.merge_mode == "ta_main" and ctx.ta_patch_touched_files:
+            from TA_main2main_workflow.pipeline.ta_patch import (
+                exclude_patch_files_from_index,
+            )
+
+            exclude_patch_files_from_index(
+                ascend_path, ctx.ta_patch_touched_files
+            )
         run_git(ascend_path, "commit", "-s", "-m", msg)
         log.status(True, f"Committed step {step_id}")
     except Exception as e:

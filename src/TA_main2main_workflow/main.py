@@ -29,6 +29,12 @@ Environment variables:
   TA_SINGLE_STEP_MODE  — set to "true" for single-step mode (default: true)
   TA_WORK_BRANCH_BASE  — remote name for work branch base (default: upstream-ascend)
   TA_RESUME            — set to "true" to resume from cached step outputs
+  TA_MERGE_MODE        — "upstream" (default) merges triton-upstream/main;
+                         "ta_main" merges TA origin/main evolution back into
+                         the work branch (conflicts favor incoming TA code,
+                         third_party/ascend/patch/triton-ascend-*.patch files
+                         are adjusted and applied for build/test)
+  TA_MAIN_BRANCH       — branch on origin merged in ta_main mode (default: main)
 """
 
 import argparse
@@ -85,6 +91,12 @@ def kickoff():
         help="Extra test directories (comma/space separated, appended to default pytest ut)",
     )
     parser.add_argument(
+        "--merge-mode",
+        choices=["upstream", "ta_main"],
+        default=None,
+        help="Merge mode: upstream (default) or ta_main (merge TA main evolution)",
+    )
+    parser.add_argument(
         "--test-command",
         default=None,
         help="Additional custom test command (runs after pytest ut)",
@@ -113,6 +125,8 @@ def kickoff():
         )
     if args.test_command is not None:
         config.test_command = args.test_command
+    if args.merge_mode:
+        config.merge_mode = args.merge_mode
 
     _print_banner(config)
 

@@ -12,8 +12,9 @@ is ready before any detection or merge work begins:
 Output context fields set:
   - ``origin_remote``, ``upstream_remote`` — remote names
   - ``triton_ascend_path`` — absolute path to the triton-ascend repo
-  - ``target_commit`` — the upstream commit to sync to (HEAD of
-    triton-upstream/main when not explicitly given)
+  - ``target_commit`` — the commit to sync to: HEAD of
+    triton-upstream/main (upstream mode) or origin/{ta_main_branch}
+    (ta_main mode) when not explicitly given
   - ``ascend_head`` — the HEAD of the configured base branch
   - ``original_branch`` — the base branch name
 """
@@ -80,22 +81,28 @@ def prepare(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
             f"  cd {ascend_path} && git fetch {ORIGIN_REMOTE} {base_branch}"
         )
 
-    # ── 7. Resolve target commit (default: triton-upstream/main HEAD) ──
+    # ── 7. Resolve target commit ────────────────────────────────────────
+    # upstream mode: triton-upstream/main HEAD
+    # ta_main mode:  origin/{ta_main_branch} HEAD (TA main evolution)
     target_commit = config.target_commit
     if not target_commit:
-        upstream_ref = f"{UPSTREAM_REMOTE}/main"
+        if config.merge_mode == "ta_main":
+            target_ref = f"{ORIGIN_REMOTE}/{config.ta_main_branch}"
+        else:
+            target_ref = f"{UPSTREAM_REMOTE}/main"
         try:
-            target_commit = run_git(ascend_path, "rev-parse", upstream_ref).strip()
+            target_commit = run_git(ascend_path, "rev-parse", target_ref).strip()
         except Exception:
             raise RuntimeError(
-                f"Cannot resolve upstream HEAD from '{upstream_ref}'. "
-                f"Specify --target-commit or ensure '{upstream_ref}' exists. "
-                f"Try: cd {ascend_path} && git fetch {UPSTREAM_REMOTE}"
+                f"Cannot resolve target HEAD from '{target_ref}'. "
+                f"Specify --target-commit or ensure '{target_ref}' exists. "
+                f"Try: cd {ascend_path} && git fetch {target_ref.split('/')[0]}"
             )
 
     log.section("Workspace ready")
     log.key_value("triton-ascend", str(ascend_path))
     log.key_value("base branch", base_branch)
+    log.key_value("merge mode", config.merge_mode)
     log.key_value("ascend HEAD", ascend_head[:12])
     log.key_value("target commit", target_commit[:12])
 
@@ -106,6 +113,7 @@ def prepare(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         original_branch=base_branch,
         origin_remote=ORIGIN_REMOTE,
         upstream_remote=UPSTREAM_REMOTE,
+        merge_mode=config.merge_mode,
     )
 
 

@@ -66,6 +66,7 @@ def resolve_conflicts(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
                     "triton_path": ctx.triton_ascend_path,
                     "reference_dir": _REF,
                     "mode": "conflict",
+                    "merge_mode": ctx.merge_mode,
                     "error_logs": json.dumps(cf, ensure_ascii=False),
                     "target_commit": ctx.target_commit,
                     "step_index": f"{ctx.current_step + 1}/{ctx.total_steps}",

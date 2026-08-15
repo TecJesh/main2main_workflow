@@ -64,7 +64,7 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
         steps = _plan_steps_inner(
             commits, lines_per_commit, base, line_budget, llvm_commits
         )
-        _enrich_steps(triton_path, steps)
+        _enrich_steps(triton_path, steps, merge_mode=ctx.merge_mode)
 
         # Print per-step detail (matching pre-refactor output)
         for s in steps:
@@ -321,10 +321,17 @@ def _plan_steps_inner(
     return steps
 
 
-def _enrich_steps(repo: Path, steps: list[dict[str, Any]]) -> None:
+def _enrich_steps(
+    repo: Path, steps: list[dict[str, Any]], merge_mode: str = "upstream"
+) -> None:
     for step in steps:
-        # Build pathspec args for SOURCE_DIRS filtering
-        pathspecs = [f":(top){d}" for d in SOURCE_DIRS]
+        # Build pathspec args for SOURCE_DIRS filtering.
+        # ta_main mode also includes Ascend-specific dirs — TA main commits
+        # commonly touch third_party/ascend/ and python/triton_ascend/.
+        dirs = list(SOURCE_DIRS)
+        if merge_mode == "ta_main":
+            dirs += ["third_party/ascend/", "python/triton_ascend/"]
+        pathspecs = [f":(top){d}" for d in dirs]
         step["upstream_patch"] = run_git(
             repo,
             "diff",

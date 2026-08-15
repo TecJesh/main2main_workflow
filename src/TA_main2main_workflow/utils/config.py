@@ -60,6 +60,13 @@ class TAConfig:
     work_branch_base: str = "upstream-ascend"
     progressive_merge: bool = True
 
+    # ── Merge mode ────────────────────────────────────────────────────────
+    # "upstream": merge triton-upstream/main into the work branch (default)
+    # "ta_main":  merge TA origin/main evolution into the work branch,
+    #             conflicts resolved in favor of the incoming TA code
+    merge_mode: str = "upstream"
+    ta_main_branch: str = "main"  # branch on origin merged in ta_main mode
+
     # ── PR / Push ─────────────────────────────────────────────────────────
     push_to_github: bool = False
     github_repo: str = "triton-lang/triton-ascend"
@@ -119,6 +126,10 @@ class TAConfig:
             base_branch=os.getenv("TA_BASE_BRANCH", "upstream_sync"),
             work_branch_base=os.getenv("TA_WORK_BRANCH_BASE", "upstream-ascend"),
             progressive_merge=_env_bool("TA_PROGRESSIVE_MERGE", True),
+            merge_mode=_env_choice(
+                "TA_MERGE_MODE", ["upstream", "ta_main"], "upstream"
+            ),
+            ta_main_branch=os.getenv("TA_MAIN_BRANCH", "main"),
             push_to_github=_env_bool("PUSH_TO_GITHUB", False),
             github_repo=os.getenv("GITHUB_REPO", "triton-lang/triton-ascend"),
             llvm_project_path=os.getenv("LLVM_PROJECT_PATH", "~/llvm-project"),
