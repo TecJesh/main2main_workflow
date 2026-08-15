@@ -38,12 +38,17 @@ class WorkflowContext:
     # ── Merge mode ─────────────────────────────────────────────────────────
     merge_mode: str = "upstream"  # "upstream" | "ta_main"
 
-    # ── TA source patches (ta_main mode only) ──────────────────────────────
-    ta_patch_ok: bool = True  # False when a patch could not be applied
+    # ── TA source patches (build auto-applies them; all merge modes) ──────
+    ta_patch_ok: bool = True  # False when a patch could not be adjusted/verified
+    # Patch files that passed `git apply --check` for this step.
     ta_patch_applied: list[str] = field(default_factory=list)
-    # Source files touched by the applied triton-ascend-*.patch files.
-    # Excluded from commits; reverted after the step to keep the tree clean.
+    # Parent-repo source files touched by the managed patches (parsed
+    # statically from patch headers).  Excluded from commits; restored
+    # to HEAD so the committed tree stays clean.
     ta_patch_touched_files: list[str] = field(default_factory=list)
+    # Submodule-internal files touched by the npuir patch (paths relative
+    # to the AscendNPU-IR submodule root).
+    ta_patch_submodule_files: list[str] = field(default_factory=list)
 
     # ── Detection results (produced by detect step) ───────────────────────
     upstream_commits: list[dict] = field(default_factory=list)
@@ -72,6 +77,9 @@ class WorkflowContext:
 
     # ── Fix tracking ──────────────────────────────────────────────────────
     build_fix_count: int = 0
+    # Files modified by the most recent successful ai_fix call (repo-root
+    # relative).  Used to decide which touched files need patch regeneration.
+    last_fix_modified_files: list[str] = field(default_factory=list)
     test_fix_count: int = 0
     conflict_files_resolved: int = 0
     retry_count: int = 0

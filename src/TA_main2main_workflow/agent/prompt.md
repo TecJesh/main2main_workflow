@@ -160,6 +160,34 @@ The active mode is: {mode}
     - Only edit {patch_file}.  Do NOT touch source files.
     - Do not merge or split hunks; do not change the changed lines.
 
+── commit_plan mode ────────────────────────────────────────────────
+
+  Trigger: {mode} is "commit_plan" (AI fixes exist in the working tree
+  and must be committed separately from build-applied patch changes).
+
+  Input (in {error_logs} as JSON):
+    - "status": git status --porcelain output
+    - "diff_stat": git diff --stat summary
+    - "patch_touched_parent" / "patch_touched_submodule": files managed
+      by the build-applied patches.  Their working-tree changes are
+      PATCH content, not fixes — they must NOT be committed.
+
+  Your task:
+    1. Analyze which working-tree changes are YOUR fixes (vs.
+       patch-applied content vs. build artifacts).
+    2. Write {step_dir}/commit_files.txt — one repo-root relative
+       path per line, ONLY the files to commit:
+       - source files you fixed that are NOT in the patch-touched lists
+       - third_party/ascend/patch/*.patch files (regenerated patches)
+       - EXCLUDE every file listed in patch_touched_parent /
+         patch_touched_submodule — even if it contains your edits
+         (those edits live in the regenerated .patch files)
+       - EXCLUDE build/test artifacts, logs, and temp files
+    3. Write {step_dir}/commit_message.txt — a ONE-LINE commit
+       subject describing the fixes (under 72 characters, no "fix:"
+       prefix; the workflow wraps it as [Sync](fix)).
+    4. If nothing should be committed, write an empty commit_files.txt.
+
 ── fix mode ───────────────────────────────────────────────────────
 
   Trigger: {mode} is "fix" (build or tests failed).
@@ -186,6 +214,29 @@ The active mode is: {mode}
     - DO NOT modify third_party LLVM source directly — use compat macros
     - If the error is NOT in the catalog, apply the general LLVM API
       adaptation patterns from (2)
+
+  ═══════════════════════════════════════════════════════════════════════
+
+  ═══ Patch-touched files (build auto-applies patches) ═══════════════
+
+  These source files are managed by patch files under
+  third_party/ascend/patch/ and are applied automatically at build
+  time (setup.py restores them to HEAD before applying):
+
+    Parent repo:              {patch_touched_parent}
+    AscendNPU-IR submodule:   {patch_touched_submodule}
+
+  Rules:
+    - You MAY fix these files directly (compiling them is the only
+      way to verify).  After the build passes, the workflow moves
+      your edits into the corresponding .patch files and restores
+      the source files — the source edits themselves are NEVER
+      committed directly.
+    - Keep such fixes minimal and localized so they regenerate
+      cleanly into the patch.
+    - Note in your summary which patch-touched files you edited.
+    - Do NOT edit the .patch files themselves in this mode (merge
+      drift adjustment is handled separately in patch_fix mode).
 
   ═══════════════════════════════════════════════════════════════════════
 

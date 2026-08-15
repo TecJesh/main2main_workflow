@@ -30,10 +30,8 @@ from TA_main2main_workflow.utils import (
 )
 from TA_main2main_workflow.pipeline.fix import ai_fix
 from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
-from TA_main2main_workflow.utils.submodule import (
-    commit_submodule,
-    submodule_has_changes,
-)
+from TA_main2main_workflow.pipeline.commit import run_commit_plan, stage_changes
+from TA_main2main_workflow.pipeline.ta_patch import regen_ai_fixes
 
 log = get_logger(__name__)
 
@@ -55,6 +53,11 @@ def build_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContex
         if attempt > 0:
             log.header(f"Build Fix Attempt {attempt}/{config.max_retries}")
             ctx = ai_fix(ctx, config, attempt=attempt, mode="fix")
+            # Fixes on patch-touched files must flow into the .patch
+            # files BEFORE the rebuild — setup.py checks the touched
+            # files out to HEAD before applying patches, which would
+            # wipe any fix left in the source tree.
+            regen_ai_fixes(ctx, config)
 
         with timed("build-triton"):
             ctx = build_triton(ctx, config, clean=(attempt == 0))
@@ -286,12 +289,15 @@ def build_triton(
 def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
     """Commit AI build/test fixes with AI-authored commit message.
 
+    Patch-touched files never enter the commit — their fixes were
+    regenerated into the ``.patch`` files by ``regen_ai_fixes`` in the
+    fix loops.  Staging uses the AI whitelist (commit_plan) when
+    available and falls back to ``git add -A`` + exclusion.
+
     Commit message priority:
       1. ``commit_message.txt`` written by AI (one-line subject)
       2. First line of ``step_summary.md`` written by AI
       3. Default generic message
-
-    Commits submodule changes first (AscendNPU-IR), then parent repo.
     """
     ascend_path = Path(ctx.triton_ascend_path)
     step = ctx.steps[ctx.current_step] if ctx.current_step < len(ctx.steps) else None
@@ -299,21 +305,17 @@ def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
     target_short = ctx.target_commit[:12]
 
-    # ── 1. Commit submodule changes first ──────────────────────────────
-    if submodule_has_changes(ascend_path):
-        commit_submodule(
-            ascend_path,
-            f"[Sync](fix) AI fix for {target_short}\n",
-        )
-
-    # ── 2. Clean temp files before staging ─────────────────────────────
+    # ── 1. Clean temp files before staging ─────────────────────────────
     cleanup_temp_files(ascend_path)
 
-    # ── 3. Check if there's anything to commit ─────────────────────────
+    # ── 2. Check if there's anything to commit ─────────────────────────
     status = run_git(ascend_path, "status", "--porcelain").strip()
     if not status:
         log.info("No uncommitted fix changes — nothing to commit")
         return
+
+    # ── 3. Ask the AI for the file whitelist + commit subject ──────────
+    run_commit_plan(ctx, config)
 
     # ── 4. Build commit message (AI-authored priority) ─────────────────
     commit_subject = _read_ai_commit_subject(step_dir, target_short)
@@ -324,29 +326,25 @@ def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
         f"Work branch: {ctx.work_branch}\n"
     )
 
-    # ── 5. Stage and commit ────────────────────────────────────────────
+    # ── 5. Stage (whitelist, patch-touched hard-gated) and commit ──────
     log.section("Commit AI Fixes")
     try:
-        _ = run_git(ascend_path, "diff", "--name-only", "HEAD").strip()
-        run_git(ascend_path, "add", "-A")
-        # ta_main mode: keep patch-applied source changes out of commits —
-        # they live only in third_party/ascend/patch/*.patch files
-        if ctx.merge_mode == "ta_main" and ctx.ta_patch_touched_files:
-            from TA_main2main_workflow.pipeline.ta_patch import (
-                exclude_patch_files_from_index,
-            )
-
-            exclude_patch_files_from_index(
-                ascend_path, ctx.ta_patch_touched_files
-            )
+        stage_changes(
+            ascend_path,
+            step_dir,
+            ctx.ta_patch_touched_files,
+            ctx.ta_patch_submodule_files,
+        )
         staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
-        if staged:
-            files = staged.splitlines()
-            log.info(f"Files staged ({len(files)}):")
-            for f in files[:20]:
-                log.info(f"  {f}")
-            if len(files) > 20:
-                log.info(f"  ... and {len(files) - 20} more")
+        if not staged:
+            log.info("Nothing to commit after staging")
+            return
+        files = staged.splitlines()
+        log.info(f"Files staged ({len(files)}):")
+        for f in files[:20]:
+            log.info(f"  {f}")
+        if len(files) > 20:
+            log.info(f"  ... and {len(files) - 20} more")
         run_git(ascend_path, "commit", "-s", "-m", commit_msg)
         log.status(True, f"Committed: {commit_subject[:60]}")
     except Exception as e:

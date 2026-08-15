@@ -20,6 +20,7 @@ from TA_main2main_workflow.utils.tracker import timed
 from TA_main2main_workflow.utils import WORKSPACE_DIR
 from TA_main2main_workflow.pipeline.build import build_triton, commit_fixes
 from TA_main2main_workflow.pipeline.fix import ai_fix
+from TA_main2main_workflow.pipeline.ta_patch import regen_ai_fixes
 
 log = get_logger(__name__)
 
@@ -64,6 +65,10 @@ def test_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
 
             log.header(f"Test Fix Attempt {attempt}/{config.max_retries}")
             ctx = ai_fix(ctx, config, attempt=attempt, mode="fix")
+            # Fixes on patch-touched files must flow into the .patch
+            # files before the rebuild (setup.py restores touched files
+            # to HEAD before applying patches).
+            regen_ai_fixes(ctx, config)
 
             # Rebuild TA after AI fix (old behavior: rebuild before retest)
             with timed("test-fix-rebuild"):
@@ -125,6 +130,7 @@ def _run_pretest_and_fix(
 
             log.header(f"Pre-Test Fix {pretest_attempt}/{config.max_retries}")
             ctx = ai_fix(ctx, config, attempt=pretest_attempt, mode="fix")
+            regen_ai_fixes(ctx, config)
             with timed("pretest-fix-rebuild"):
                 ctx = build_triton(ctx, config, clean=False)
             if not ctx.build_passed:
