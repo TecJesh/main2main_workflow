@@ -329,6 +329,16 @@ def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
     try:
         _ = run_git(ascend_path, "diff", "--name-only", "HEAD").strip()
         run_git(ascend_path, "add", "-A")
+        # ta_main mode: keep patch-applied source changes out of commits —
+        # they live only in third_party/ascend/patch/*.patch files
+        if ctx.merge_mode == "ta_main" and ctx.ta_patch_touched_files:
+            from TA_main2main_workflow.pipeline.ta_patch import (
+                exclude_patch_files_from_index,
+            )
+
+            exclude_patch_files_from_index(
+                ascend_path, ctx.ta_patch_touched_files
+            )
         staged = run_git(ascend_path, "diff", "--cached", "--name-only").strip()
         if staged:
             files = staged.splitlines()

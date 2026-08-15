@@ -67,10 +67,24 @@ def merge_upstream_commit(ctx: WorkflowContext, config: TAConfig) -> WorkflowCon
             run_git(ascend_path, "checkout", ctx.work_branch)
 
     # ── Do the merge ────────────────────────────────────────────────
+    # ta_main mode: resolve text conflicts in favor of the incoming
+    # TA main code (the merged-in side) via -X theirs.  Remaining
+    # conflicts (e.g. modify/delete) are handled by the AI resolve step.
     log.info(f"Merging {step['end_commit'][:12]} ...")
-    merge_proc = run_git_no_check(
-        ascend_path, "merge", "--no-ff", "--no-edit", step["end_commit"]
-    )
+    if ctx.merge_mode == "ta_main":
+        merge_proc = run_git_no_check(
+            ascend_path,
+            "merge",
+            "-X",
+            "theirs",
+            "--no-ff",
+            "--no-edit",
+            step["end_commit"],
+        )
+    else:
+        merge_proc = run_git_no_check(
+            ascend_path, "merge", "--no-ff", "--no-edit", step["end_commit"]
+        )
 
     conflict_raw = run_git(
         ascend_path, "diff", "--name-only", "--diff-filter=U"

@@ -35,6 +35,16 @@ class WorkflowContext:
     work_branch: str = ""
     original_branch: str = ""
 
+    # ── Merge mode ─────────────────────────────────────────────────────────
+    merge_mode: str = "upstream"  # "upstream" | "ta_main"
+
+    # ── TA source patches (ta_main mode only) ──────────────────────────────
+    ta_patch_ok: bool = True  # False when a patch could not be applied
+    ta_patch_applied: list[str] = field(default_factory=list)
+    # Source files touched by the applied triton-ascend-*.patch files.
+    # Excluded from commits; reverted after the step to keep the tree clean.
+    ta_patch_touched_files: list[str] = field(default_factory=list)
+
     # ── Detection results (produced by detect step) ───────────────────────
     upstream_commits: list[dict] = field(default_factory=list)
     upstream_commits_count: int = 0

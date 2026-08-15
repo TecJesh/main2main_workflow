@@ -115,6 +115,51 @@ The active mode is: {mode}
     - lib/ and include/ changes should accept upstream C++ changes while
       preserving Ascend backend registration code
 
+  ═══ merge_mode = "ta_main" ═══════════════════════════════════════
+
+  When {merge_mode} is "ta_main", the incoming side is the TA main branch
+  evolution (not upstream triton).  The rules above are INVERTED:
+
+    - The incoming (merged-in) TA main code WINS: on any disagreement,
+      take the incoming side's content.
+    - Do NOT try to preserve the current branch's version — the goal is
+      to fast-forward the work branch to TA main's state, with only
+      genuinely new work-branch-only content kept when it does not
+      overlap with the incoming change.
+    - When both sides modified the same lines, accept the incoming side
+      and drop or minimally adapt the current side.
+    - third_party/ascend/patch/*.patch files: keep the incoming version
+      unless the current branch adjusted hunk positions to match the
+      merged tree (both are .patch text — prefer the one that is most
+      recent; the workflow re-adjusts them after the merge anyway).
+
+── patch_fix mode ──────────────────────────────────────────────────
+
+  Trigger: {mode} is "patch_fix" (a patch under third_party/ascend/patch/
+  fails to apply after a TA-main merge because code line numbers shifted).
+
+  Your task: adjust the patch file so `git apply --check` passes again —
+  WITHOUT changing the patch's semantics.
+
+  Workflow:
+    1. Read the patch file: {patch_file}
+    2. Read the apply error: {apply_error}
+    3. Inspect the current source file(s) in {ascend_path} that the patch
+       touches (paths are in the patch's diff headers).
+    4. Adjust ONLY the position information in the patch:
+       - hunk headers (@@ -old,count +new,count @@) — line numbers/counts
+       - context lines — extend/shorten them to match the current code
+       - NEVER add, remove, or alter actual +/- change lines (that would
+         change semantics)
+    5. Verify: run `git apply --check {patch_file}` in {ascend_path}.
+       Repeat step 4 until it passes.
+    6. Write a short summary to {step_dir}/step_summary.md describing which
+       hunks were re-positioned.
+
+  Constraints:
+    - Only edit {patch_file}.  Do NOT touch source files.
+    - Do not merge or split hunks; do not change the changed lines.
+
 ── fix mode ───────────────────────────────────────────────────────
 
   Trigger: {mode} is "fix" (build or tests failed).
