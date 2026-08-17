@@ -40,6 +40,8 @@ Environment variables:
                          (default: triton-ascend-3.7.0.patch,
                           triton-ascend-dev-3.7.0.patch,
                           npuir_adapter_to_llvm_23.patch)
+  TA_SKIP_TEST_KEYWORDS — comma/space separated pytest -k exclusion
+                         keywords (default: topk — skips test_topk.py)
 """
 
 import argparse
