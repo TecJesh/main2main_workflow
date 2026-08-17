@@ -366,6 +366,10 @@ def _run_pytest(
     cmd = [pytest_bin] if pytest_bin else [python_exe, "-m", "pytest"]
     cmd += [str(p) for p in test_paths]
     cmd += ["-n", str(procs), f"--junitxml={junit_xml}"]
+    if config.skip_test_keywords:
+        k_expr = " and ".join(f"not {kw}" for kw in config.skip_test_keywords)
+        cmd += ["-k", k_expr]
+        log.key_value(f"[{label}] pytest -k", k_expr)
 
     log.key_value(
         f"[{label}] test dirs",

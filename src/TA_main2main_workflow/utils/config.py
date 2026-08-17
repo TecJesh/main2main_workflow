@@ -94,6 +94,9 @@ class TAConfig:
     test_dirs: list[str] = field(default_factory=list)  # resolved from env
     test_command: str = ""  # full shell command override (TA_TEST_COMMAND)
     python_exe: str = ""
+    # pytest -k exclusion keywords (node-id substrings) — default skips
+    # the topk UT (test_topk.py), per TA_SKIP_TEST_KEYWORDS.
+    skip_test_keywords: list[str] = field(default_factory=lambda: ["topk"])
 
     # ── Single-step mode (always enabled) ─────────────────────────────────
     single_step_mode: bool = True
@@ -155,6 +158,7 @@ class TAConfig:
             test_dirs=_resolve_test_dirs(),
             test_command=os.getenv("TA_TEST_COMMAND", ""),
             python_exe=os.getenv("PYTHON", ""),
+            skip_test_keywords=_resolve_skip_test_keywords(),
             single_step_mode=_env_bool("TA_SINGLE_STEP_MODE", True),
             ir_max_iterations=_env_int("TA_IR_MAX_ITERATIONS", 3),
         )
@@ -239,6 +243,15 @@ def _resolve_test_dirs(primary: str = "", extra: str = "") -> list[str]:
 def _env_choice(name: str, choices: list[str], default: str) -> str:
     val = os.getenv(name, default).lower()
     return val if val in choices else default
+
+
+def _resolve_skip_test_keywords() -> list[str]:
+    """Parse TA_SKIP_TEST_KEYWORDS (comma/space separated).
+
+    Defaults to ["topk"] — the topk UT is skipped in workflow runs.
+    """
+    raw = os.getenv("TA_SKIP_TEST_KEYWORDS", "topk")
+    return [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
 
 
 _DEFAULT_SOURCE_PATCHES = [
