@@ -206,8 +206,10 @@ def stage_changes(
             run_git(ascend_path, "diff", "--cached", "--name-only").strip()
         )
 
-    # Fallback: stage everything, then unstage patch-touched changes.
-    run_git(ascend_path, "add", "-A")
+    # Fallback: stage tracked changes only (never untracked files —
+    # runtime artifacts like fusion_result.json must not enter commits),
+    # then unstage patch-touched changes.
+    run_git(ascend_path, "add", "-u")
     exclude_patch_files_from_index(
         ascend_path, touched_parent, touched_submodule
     )

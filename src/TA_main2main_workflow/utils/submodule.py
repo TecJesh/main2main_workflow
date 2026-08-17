@@ -48,7 +48,9 @@ def commit_submodule(repo: Path, commit_msg: str) -> bool:
 
     log.info("Committing AscendNPU-IR submodule changes...")
     try:
-        run_git(sp, "add", "-A")
+        # -u: stage tracked changes only — submodule runtime artifacts
+        # must not enter commits.
+        run_git(sp, "add", "-u")
         run_git(sp, "commit", "-s", "-m", commit_msg)
         log.status(True, "AscendNPU-IR submodule committed")
         return True

@@ -94,7 +94,9 @@ def resolve_conflicts(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
 
     cleanup_temp_files(ascend_path)
     try:
-        run_git(ascend_path, "add", "-A")
+        # -u stages only tracked files — runtime artifacts (e.g.
+        # fusion_result.json) left by previous runs stay untracked.
+        run_git(ascend_path, "add", "-u")
         run_git(ascend_path, "commit", "--no-edit", "-s")
         log.status(True, "Committed resolution")
     except Exception:
