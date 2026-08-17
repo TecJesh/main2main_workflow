@@ -57,7 +57,7 @@ def build_and_fix_loop(ctx: WorkflowContext, config: TAConfig) -> WorkflowContex
             # files BEFORE the rebuild — setup.py checks the touched
             # files out to HEAD before applying patches, which would
             # wipe any fix left in the source tree.
-            regen_ai_fixes(ctx, config)
+            ctx = regen_ai_fixes(ctx, config)
 
         with timed("build-triton"):
             ctx = build_triton(ctx, config, clean=(attempt == 0))

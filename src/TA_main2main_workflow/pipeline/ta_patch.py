@@ -238,69 +238,107 @@ def parse_patches(patch_files: list[Path]) -> PatchTouchInfo:
 def regenerate_and_reapply(
     ascend_path: Path,
     patch_files: list[Path],
-    touched_parent: list[str],
-    touched_submodule: list[str],
+    ctx: WorkflowContext,
     ai_modified_files: list[str],
-) -> bool:
-    """fix-then-regenerate: flow AI fixes on touched files into patches.
+) -> WorkflowContext:
+    """fix-then-regenerate: flow AI fixes on AscendNPU-IR files into
+    the npuir patch.
+
+    ALL submodule (AscendNPU-IR) files the AI modified are
+    regenerated — npu-ir modifications live in
+    ``npuir_adapter_to_llvm_23.patch`` per the project's scheme,
+    whether or not the patch covered them before.  Files the npuir
+    patch did not touch get a new section appended.  Fixes everywhere
+    else (Ascend backend code etc.) are committed normally and never
+    touch a patch file.
 
     Only files the AI actually modified (``ai_modified_files``) are
-    considered — the working tree also carries patch-applied changes,
-    which must NOT be re-generated.  For each such file:
+    considered — the submodule working tree also carries the
+    build-applied npuir patch content, which must NOT be regenerated.
+    For each hit:
 
-    1. its ``git diff HEAD`` is captured and merged into the owning
-       patch file (the diff naturally contains old patch content +
-       the AI fix),
-    2. touched files are restored to HEAD,
-    3. the updated patch set is re-checked and re-applied so build/
+    1. its ``git diff HEAD`` is captured in the submodule repo and
+       merged into the npuir patch (the diff naturally contains old
+       patch content + the AI fix),
+    2. the hit files are restored to HEAD,
+    3. the updated npuir patch is re-checked and re-applied so build/
        test continue to see the patched code.
 
-    Returns True on success (including the no-op case).  On failure
-    the patch-file edits are reverted and the tree is restored.
+    Returns the context with ``ta_patch_submodule_files`` extended by
+    any newly covered files (so later restore/exclusion covers them).
+    On failure the patch-file edits are reverted, the tree is restored,
+    and the context is returned unchanged.
     """
     if not patch_files:
-        return True
+        return ctx
 
-    hits_parent = [f for f in touched_parent if f in ai_modified_files]
     sub_prefix = f"{SUBMODULE_DIR}/"
     hits_submodule = [
         f[len(sub_prefix):]
         for f in ai_modified_files
-        if f.startswith(sub_prefix) and f[len(sub_prefix):] in touched_submodule
+        if f.startswith(sub_prefix)
     ]
-    if not hits_parent and not hits_submodule:
-        return True
+    if not hits_submodule:
+        return ctx
 
-    log.section("Regenerate Patches From AI Fixes")
-    updated: list[Path] = []
-    for patch_file in patch_files:
-        in_submodule = patch_file.name.startswith(_NPUIR_PATCH_PREFIX)
-        hits = hits_submodule if in_submodule else hits_parent
-        if not hits:
-            continue
-        if in_submodule:
-            sub_path = ascend_path / SUBMODULE_DIR
-            sections = {
-                f: run_git(sub_path, "diff", "HEAD", "--", f) for f in hits
-            }
-        else:
-            sections = {f: run_git(ascend_path, "diff", "HEAD", "--", f) for f in hits}
+    npuir_patches = [
+        p for p in patch_files if p.name.startswith(_NPUIR_PATCH_PREFIX)
+    ]
+    if not npuir_patches:
+        log.warning(
+            "AI modified AscendNPU-IR files but no npuir patch is managed — "
+            "the build will restore those files and the fixes will be lost"
+        )
+        return ctx
+
+    log.section("Regenerate npuir Patch From AI Fixes")
+    sub_path = ascend_path / SUBMODULE_DIR
+    untracked_new: list[str] = []
+    for patch_file in npuir_patches:
+        sections: dict[str, str] = {}
+        for f in hits_submodule:
+            diff = run_git_no_check(sub_path, "diff", "HEAD", "--", f).stdout
+            if not diff.strip():
+                # Likely a brand-new (untracked) file: intent-to-add so
+                # the diff shows it as a new-file section.
+                run_git_no_check(sub_path, "add", "-N", "--", f)
+                diff = run_git_no_check(sub_path, "diff", "HEAD", "--", f).stdout
+                if diff.strip():
+                    untracked_new.append(f)
+            if diff.strip():
+                sections[f] = diff
         _replace_patch_sections(patch_file, sections)
-        updated.append(patch_file)
         log.info(
-            f"Regenerated {patch_file.name} from {len(hits)} touched file(s)"
+            f"Regenerated {patch_file.name} from {len(sections)} "
+            "AscendNPU-IR file(s)"
         )
 
-    restore_workspace(ascend_path, touched_parent, touched_submodule)
-    if not apply_patches(ascend_path, patch_files):
+    # The whole npuir patch is re-applied, so EVERY file it touches must
+    # be restored first — not just the AI's hits — otherwise sections
+    # for already-patched files fail the check spuriously.
+    to_restore = list(dict.fromkeys(ctx.ta_patch_submodule_files + hits_submodule))
+    restore_workspace(ascend_path, [], to_restore)
+    if untracked_new:
+        # New-file sections cannot apply while the untracked file still
+        # exists — drop the file and its intent-to-add index entry so
+        # `git apply` can create it fresh from the patch.
+        for f in untracked_new:
+            (sub_path / f).unlink(missing_ok=True)
+        run_git_no_check(sub_path, "reset", "--", *untracked_new)
+    if not apply_patches(ascend_path, npuir_patches):
         log.error(
-            "Patch check/apply failed after regeneration — discarding the fix"
+            "npuir patch check/apply failed after regeneration — "
+            "discarding the fix"
         )
-        revert_patch_files(ascend_path, updated)
-        restore_workspace(ascend_path, touched_parent, touched_submodule)
-        return False
-    log.status(True, f"Regenerated {len(updated)} patch file(s) and re-applied")
-    return True
+        revert_patch_files(ascend_path, npuir_patches)
+        restore_workspace(ascend_path, [], to_restore)
+        return ctx
+    log.status(
+        True, f"Regenerated {len(npuir_patches)} npuir patch file(s) and re-applied"
+    )
+    # Extend the touched list so the step-end restore and commit
+    # exclusion also cover files the npuir patch did not cover before.
+    return ctx.copy_with(ta_patch_submodule_files=to_restore)
 
 
 def apply_patches(ascend_path: Path, patch_files: list[Path]) -> bool:
@@ -332,25 +370,27 @@ def apply_patches(ascend_path: Path, patch_files: list[Path]) -> bool:
     return True
 
 
-def regen_ai_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
-    """Flow the latest AI fixes on patch-touched files into the patches.
+def regen_ai_fixes(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
+    """Flow the latest AI fixes on AscendNPU-IR files into the npuir patch.
 
-    No-op when the last ai_fix did not touch any patch-touched file.
-    Must run BEFORE the next build — setup.py checks touched files out
-    to HEAD before applying patches, which wipes fixes left in source.
+    Per the project's scheme, npu-ir modifications live in
+    ``npuir_adapter_to_llvm_23.patch``; fixes anywhere else are
+    committed normally.  No-op when the last ai_fix did not modify an
+    AscendNPU-IR file.  Must run BEFORE the next build — setup.py
+    checks those files out to HEAD before applying the patch, which
+    wipes fixes left in the source tree.
+
+    Returns the context with the npuir touched list extended when the
+    AI fixed submodule files the npuir patch did not cover before.
     """
     if not ctx.last_fix_modified_files:
-        return
+        return ctx
     ascend_path = Path(ctx.triton_ascend_path)
     patch_files = resolve_source_patches(ascend_path, config)
     if not patch_files:
-        return
-    regenerate_and_reapply(
-        ascend_path,
-        patch_files,
-        ctx.ta_patch_touched_files,
-        ctx.ta_patch_submodule_files,
-        ctx.last_fix_modified_files,
+        return ctx
+    return regenerate_and_reapply(
+        ascend_path, patch_files, ctx, ctx.last_fix_modified_files
     )
 
 
@@ -370,7 +410,22 @@ def restore_workspace(
     if touched_submodule:
         sub_path = ascend_path / SUBMODULE_DIR
         if sub_path.is_dir():
-            run_git_no_check(sub_path, "checkout", "--", *touched_submodule)
+            tracked = set(
+                run_git_no_check(sub_path, "ls-files").stdout.split()
+            )
+            tracked_hits = [f for f in touched_submodule if f in tracked]
+            untracked_hits = [f for f in touched_submodule if f not in tracked]
+            # A pathspec that is not in HEAD (e.g. a file that exists
+            # only via a new-file patch section) makes `git checkout`
+            # abort for the whole command — restore tracked files only.
+            if tracked_hits:
+                run_git_no_check(sub_path, "checkout", "--", *tracked_hits)
+            # Files that exist only via the applied patch are removed
+            # so the tree truly returns to HEAD.
+            for f in untracked_hits:
+                (sub_path / f).unlink(missing_ok=True)
+            # Drop any intent-to-add index entries left by regeneration.
+            run_git_no_check(sub_path, "reset", "-q", "--", *touched_submodule)
             log.info(
                 f"Restored {len(touched_submodule)} patch-touched "
                 "file(s) in submodule"

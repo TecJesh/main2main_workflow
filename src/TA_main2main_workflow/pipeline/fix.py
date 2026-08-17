@@ -9,7 +9,7 @@ from TA_main2main_workflow.agent.opencode_adapter import run_opencode_adapter
 from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
-from TA_main2main_workflow.utils.git import run_git
+from TA_main2main_workflow.utils.git import run_git, run_git_no_check
 from TA_main2main_workflow.utils import FIX_LOG_DIR, STEPS_DIR, WORKSPACE_DIR
 
 log = get_logger(__name__)
@@ -64,6 +64,10 @@ def ai_fix(
     try:
         # Record pre-fix file list for validation
         pre_files = _list_tracked_files(ascend_path)
+        # Snapshot dirty submodule files so the AI's AscendNPU-IR edits
+        # can be identified precisely afterwards (the adapter reports the
+        # submodule only as the gitlink entry, not its individual files).
+        pre_submodule_snapshot = _snapshot_submodule_dirty(ascend_path)
 
         result = run_opencode_adapter(
             {
@@ -93,12 +97,10 @@ def ai_fix(
         )
 
         # ── Fix validation gate ────────────────────────────────────────
-        # Patch-touched files are allowed as fix targets even outside the
-        # usual prefixes — their changes are regenerated into the .patch
-        # files instead of being committed as source.
-        patch_touched = _patch_touched_as_repo_paths(ctx)
+        # AscendNPU-IR files pass the third_party/ascend/ prefix naturally;
+        # their fixes are regenerated into the npuir patch afterwards.
         is_valid, reason = validate_fix(
-            ascend_path, pre_files, result.modified_files, patch_touched
+            ascend_path, pre_files, result.modified_files
         )
         if not is_valid:
             log.warning(f"Fix validation FAILED: {reason}")
@@ -119,7 +121,13 @@ def ai_fix(
             result.modified_files,
             (result.step_summary or "")[:500],
         )
-        return ctx.copy_with(last_fix_modified_files=list(result.modified_files))
+        # Expand the gitlink entry (real submodule) into the individual
+        # AscendNPU-IR files the AI actually changed.
+        sub_changed = _submodule_files_changed(
+            ascend_path, pre_submodule_snapshot
+        )
+        expanded = _expand_modified_files(result.modified_files, sub_changed)
+        return ctx.copy_with(last_fix_modified_files=expanded)
     except Exception as e:
         log.error(f"AI fix failed: {e}")
         return ctx.copy_with(last_fix_modified_files=[])
@@ -138,23 +146,15 @@ def validate_fix(
     ascend_path: Path,
     pre_fix_files: set[str],
     modified_files: list[str],
-    patch_touched: set[str] | None = None,
 ) -> tuple[bool, str]:
     """Validate that AI fixes only touch allowed paths.
-
-    Files in *patch_touched* (repo-root relative paths of patch-touched
-    files) are always allowed: fixes there are regenerated into the
-    ``.patch`` files, never committed as source.
 
     Returns (is_valid, reason).
     """
     if not modified_files:
         return False, "No files were modified"
 
-    touched = patch_touched or set()
     for f in modified_files:
-        if f in touched:
-            continue
         if not any(f.startswith(p) for p in _ALLOWED_FIX_PREFIXES):
             return False, (
                 f"File '{f}' is outside allowed paths. "
@@ -164,16 +164,6 @@ def validate_fix(
     return True, "all changes within allowed paths"
 
 
-def _patch_touched_as_repo_paths(ctx: WorkflowContext) -> set[str]:
-    """Patch-touched files as repo-root relative paths (for validation)."""
-    from TA_main2main_workflow.utils.submodule import SUBMODULE_DIR
-
-    sub_prefix = SUBMODULE_DIR + "/"
-    return set(ctx.ta_patch_touched_files) | {
-        sub_prefix + f for f in ctx.ta_patch_submodule_files
-    }
-
-
 def _list_tracked_files(repo: Path) -> set[str]:
     """Return the set of all tracked files in the repo."""
     try:
@@ -181,6 +171,82 @@ def _list_tracked_files(repo: Path) -> set[str]:
         return set(output.strip().splitlines())
     except Exception:
         return set()
+
+
+def _submodule_path(ascend_path: Path) -> Path:
+    from TA_main2main_workflow.utils.submodule import SUBMODULE_DIR
+
+    return ascend_path / SUBMODULE_DIR
+
+
+def _submodule_dirty_paths(sub_path: Path) -> list[str]:
+    """Submodule-internal paths with uncommitted changes (porcelain)."""
+    if not (sub_path / ".git").exists():
+        return []
+    raw = run_git_no_check(sub_path, "status", "--porcelain")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in raw.stdout.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:].strip()
+        if " -> " in path:  # rename: "old -> new"
+            path = path.split(" -> ", 1)[1].strip()
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _snapshot_submodule_dirty(
+    ascend_path: Path,
+) -> dict[str, bytes | None]:
+    """Snapshot the content of every dirty file inside the submodule.
+
+    ``None`` marks a file that does not exist (untracked/new).  Used to
+    detect exactly which AscendNPU-IR files the AI changed — the
+    adapter reports the submodule only as its gitlink entry.
+    """
+    sub_path = _submodule_path(ascend_path)
+    snapshot: dict[str, bytes | None] = {}
+    for path in _submodule_dirty_paths(sub_path):
+        p = sub_path / path
+        snapshot[path] = p.read_bytes() if p.is_file() else None
+    return snapshot
+
+
+def _submodule_files_changed(
+    ascend_path: Path, snapshot: dict[str, bytes | None]
+) -> list[str]:
+    """Submodule-internal paths whose content differs from *snapshot*."""
+    sub_path = _submodule_path(ascend_path)
+    changed: list[str] = []
+    for path in _submodule_dirty_paths(sub_path):
+        p = sub_path / path
+        current = p.read_bytes() if p.is_file() else None
+        if path not in snapshot or snapshot[path] != current:
+            changed.append(path)
+    return changed
+
+
+def _expand_modified_files(
+    modified_files: list[str], sub_changed: list[str]
+) -> list[str]:
+    """Expand the submodule gitlink entry into individual file paths.
+
+    The adapter's ``git diff --name-only HEAD`` in the parent repo
+    reports a real (gitlink) submodule as a single ``<dir>`` entry —
+    patch regeneration needs the individual files instead.
+    """
+    from TA_main2main_workflow.utils.submodule import SUBMODULE_DIR
+
+    expanded: list[str] = []
+    for f in modified_files:
+        if f == SUBMODULE_DIR:
+            expanded.extend(f"{SUBMODULE_DIR}/{p}" for p in sub_changed)
+        else:
+            expanded.append(f)
+    return list(dict.fromkeys(expanded))
 
 
 def _revert_illegal_changes(repo: Path) -> None:
