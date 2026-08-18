@@ -37,6 +37,8 @@ to likely triton-ascend files.
 | Ascend backend registration | `python/triton_ascend/__init__.py` |
 | Ascend runtime | `python/triton_ascend/runtime.py` |
 | Ascend device utils | `python/triton_ascend/utils.py` |
+| Ascend C extension bindings | `python/triton/extension/` |
+| Ascend runtime entry glue | `python/triton/runtime/libentry.py` |
 | Ascend target implementation | `lib/Target/Ascend/` |
 | Ascend NPU backend (C++) | `third_party/ascend/` |
 | Ascend kernel library | `third_party/ascend/kernels/` |
@@ -50,6 +52,7 @@ to likely triton-ascend files.
 
 | Upstream Triton path | Triton-Ascend path(s) | What to check |
 |:---|:---|:---|
+| `python/triton/runtime/jit.py` (kernel launch, cache, autotuning) | `python/triton/extension/`, `python/triton/runtime/libentry.py` | Kernel launch, device binding, runtime cache |
 | `python/triton/__init__.py` | `python/triton_ascend/__init__.py` | Backend registration |
 | `python/triton/runtime/` | `python/triton_ascend/runtime.py` | Device driver, memory |
 | `python/triton/compiler/` | `python/triton_ascend/` | Compilation flags |

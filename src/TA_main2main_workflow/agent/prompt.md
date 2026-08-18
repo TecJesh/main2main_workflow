@@ -280,6 +280,10 @@ The active mode is: {mode}
            - {ascend_path}/third_party/ascend/
            - {ascend_path}/python/triton/extension/
            - {ascend_path}/python/triton/runtime/libentry.py
+         For runtime / kernel-launch / binding / cache failures the fix
+         usually belongs in python/triton/extension/ (Ascend C extension
+         bindings) or python/triton/runtime/libentry.py — check those
+         before patching unittest-side code.
          Most test failures can be resolved by adapting the Ascend backend
          without touching upstream code.  If — and only if — root cause
          analysis shows the issue is inherently in upstream code with no
