@@ -302,8 +302,15 @@ The active mode is: {mode}
          BEFORE returning — the fix will be rejected by the workflow.
        - Confirm the fix directly addresses the root cause, not just
          silences the error.
-    7. Write fix summary to {step_dir}/step_summary.md
-    8. Write a ONE-LINE commit subject to {step_dir}/commit_message.txt
+    7. Write the list of files you modified to
+       {step_dir}/modified_files.txt — one repo-root relative path per
+       line (e.g. python/triton/extension/build.py).  The workflow uses
+       this list to validate that your changes stay within the allowed
+       paths.  List ONLY the files YOU changed — do NOT include
+       pre-existing working-tree changes such as the build-applied
+       patch content.
+    8. Write fix summary to {step_dir}/step_summary.md
+    9. Write a ONE-LINE commit subject to {step_dir}/commit_message.txt
        - Describe WHAT was fixed, be specific (file/module and change)
        - Keep under 72 characters
        - Do NOT add a type prefix like "fix:" or "build:" — the workflow
