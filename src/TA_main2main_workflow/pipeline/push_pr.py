@@ -17,7 +17,12 @@ from pathlib import Path
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check
 from TA_main2main_workflow.utils.submodule import push_submodule
-from TA_main2main_workflow.utils import WORKSPACE_DIR, FINAL_SUMMARY_FILE
+from TA_main2main_workflow.utils import (
+    WORKSPACE_DIR,
+    FINAL_SUMMARY_FILE,
+    get_base_branch_ref,
+)
+from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
 
 log = get_logger(__name__)
 
@@ -65,6 +70,12 @@ def push_and_create_pr(
     # ── 4. Ensure gh auth ──────────────────────────────────────────
     _ensure_gh_auth(ascend_path)
 
+    # ── 4.5 Pre-commit check + amend before pushing ────────────────
+    _run_pre_commit_and_amend(ascend_path)
+
+    # ── 4.6 Commit any remaining uncommitted changes ───────────────
+    _commit_remaining_changes(ascend_path)
+
     # ── 5. Push to fork through proxy ──────────────────────────────
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
     _push_to_fork(ascend_path, branch, fork_owner, token)
@@ -86,6 +97,87 @@ def push_and_create_pr(
 # ═══════════════════════════════════════════════════════════════════════════
 # Internal
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def _run_pre_commit_and_amend(repo: Path) -> None:
+    """Run pre-commit and amend the latest commit if auto-fixes were applied.
+
+    Ported from the pre-refactor push flow (scripts/push_to_github.py):
+
+    1. Clean temp files first
+    2. Run: pre-commit run --from-ref <base_ref> --to-ref HEAD
+    3. If pre-commit modified files → git add -u && git commit --amend --no-edit
+    4. Re-clean temp files after amend
+
+    Never raises — pre-commit issues are logged and the push continues.
+    """
+    base_ref = get_base_branch_ref()
+
+    log.section("Pre-commit Check Before Push")
+    log.info("Cleaning temp files before pre-commit...")
+    cleanup_temp_files(repo)
+
+    log.info(f"Running: pre-commit run --from-ref {base_ref} --to-ref HEAD")
+    try:
+        proc = subprocess.run(
+            ["pre-commit", "run", "--from-ref", base_ref, "--to-ref", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("pre-commit timed out after 300s, continuing anyway")
+        return
+    except FileNotFoundError:
+        log.warning("pre-commit not installed, skipping")
+        return
+
+    if proc.stdout:
+        log.info(proc.stdout.strip())
+    if proc.stderr:
+        log.warning(proc.stderr.strip())
+
+    status = run_git_no_check(repo, "status", "--porcelain")
+    if status.stdout.strip():
+        log.info("Pre-commit modified files, amending latest commit...")
+        # Tracked files only — temp artifacts must not enter the commit.
+        run_git(repo, "add", "-u")
+        try:
+            run_git(repo, "commit", "--amend", "--no-edit")
+            log.status(True, "Commit amended with pre-commit fixes")
+        except Exception:
+            log.info("Nothing to amend (already clean)")
+        cleanup_temp_files(repo)
+    elif proc.returncode == 0:
+        log.status(True, "Pre-commit passed, no modifications needed")
+    else:
+        log.warning(
+            "Pre-commit reported issues but no files were modified "
+            "(may need manual review)"
+        )
+
+
+def _commit_remaining_changes(repo: Path) -> None:
+    """Commit any remaining uncommitted changes before pushing.
+
+    Tracked files only (git add -u) — runtime artifacts must not enter
+    commits.  Matches the pre-refactor push flow.
+    """
+    status = run_git(repo, "status", "--porcelain").strip()
+    if not status:
+        return
+    log.section("Commit Remaining Changes Before Push")
+    run_git(repo, "add", "-u")
+    commit_msg = (
+        f"sync: upstream triton merge "
+        f"({datetime.now().strftime('%Y%m%d-%H%M%S')})"
+    )
+    try:
+        run_git(repo, "commit", "-s", "-m", commit_msg)
+        log.status(True, f"Committed: {commit_msg}")
+    except Exception:
+        log.info("Nothing to commit (already clean)")
 
 
 def _ensure_gh_auth(repo: Path) -> None:
