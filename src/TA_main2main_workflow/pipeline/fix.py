@@ -53,6 +53,15 @@ def ai_fix(
         prev_summary_path = str(prev_summary) if prev_summary.exists() else ""
     is_last_step = ctx.current_step >= ctx.total_steps - 1
     ascend_npu_ir_fix = _detect_ascend_npu_ir_errors(ascend_path, step_id)
+    if ctx.build_passed and not _detect_npu_ir_in_test_logs(ctx):
+        # Test-failure fix: the build already passed, so the build.log
+        # heuristic alone is noise ("llvm::" / "mlir::" appear in every
+        # successful build log).  Keep the npu-ir guidance only when the
+        # failure logs themselves carry strong npu-ir indicators —
+        # otherwise telling the AI the failure comes from AscendNPU-IR
+        # would steer it away from the real failing code (e.g.
+        # python/triton/extension).
+        ascend_npu_ir_fix = False
     ascend_npu_ir_compat_ref = str(
         Path(__file__).parent.parent
         / "reference"
@@ -276,3 +285,26 @@ def _detect_ascend_npu_ir_errors(ascend_path: Path, step_id: str) -> bool:
         return any(ind in content for ind in indicators)
     except Exception:
         return False
+
+
+def _detect_npu_ir_in_test_logs(ctx: WorkflowContext) -> bool:
+    """Strong npu-ir indicators in the CURRENT failure logs.
+
+    Used when the build already passed: a test failure whose root
+    cause really is AscendNPU-IR (e.g. bishengir-generated IR) will
+    mention these markers in the failure output, so the AI keeps the
+    npu-ir guidance.  Weak markers like "llvm::" are intentionally
+    NOT used — they would re-introduce false positives.
+    """
+    indicators = ["ascendnpu-ir", "bishengir", "npuir"]
+    for path in ctx.fix_errors:
+        p = Path(path)
+        if not p.is_file():
+            continue
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace").lower()
+        except Exception:
+            continue
+        if any(ind in content for ind in indicators):
+            return True
+    return False
