@@ -430,7 +430,14 @@ def _run_pytest(
 
 
 def detect_oom_in_tests(ctx: WorkflowContext) -> bool:
-    """Check test output for Out-Of-Memory indicators."""
+    """Check test output for Out-Of-Memory indicators.
+
+    Only the JUnit files written by THIS workflow's pytest suites are
+    scanned (primary / pretest / extra-N).  Other suites share the
+    test-logs dir — external operator repos (e.g.
+    pytest-junit-external-flash-linear-attention.xml) and unrelated
+    runners must NOT influence the UT OOM decision.
+    """
     test_log_dir = Path(ctx.test_log_dir) if ctx.test_log_dir else None
     if not test_log_dir or not test_log_dir.exists():
         return False
@@ -448,8 +455,17 @@ def detect_oom_in_tests(ctx: WorkflowContext) -> bool:
         "cuMemAlloc",
         "NPU error",
     ]
-    # Scan ALL JUnit XML files (each test suite writes its own)
-    for junit_xml in sorted(test_log_dir.glob("pytest-junit-*.xml")):
+    # Own-suite JUnit files only; each run overwrites these names, so
+    # no stale files from previous runs are picked up either.
+    suite_globs = [
+        "pytest-junit-primary.xml",
+        "pytest-junit-pretest.xml",
+        "pytest-junit-extra-*.xml",
+    ]
+    xml_files: list[Path] = []
+    for pattern in suite_globs:
+        xml_files.extend(test_log_dir.glob(pattern))
+    for junit_xml in sorted(set(xml_files)):
         try:
             content = junit_xml.read_text(encoding="utf-8", errors="replace").lower()
             for kw in oom_keywords:
@@ -458,7 +474,8 @@ def detect_oom_in_tests(ctx: WorkflowContext) -> bool:
                     return True
         except Exception:
             pass
-    # Also scan custom test output log
+    # Also scan custom test output log (TA_TEST_COMMAND — the workflow's
+    # own custom suite)
     output_log = test_log_dir / "test-output.log"
     if output_log.exists():
         try:
