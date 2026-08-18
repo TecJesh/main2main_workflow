@@ -106,11 +106,30 @@ def ai_fix(
         )
 
         # ── Fix validation gate ────────────────────────────────────────
-        # AscendNPU-IR files pass the third_party/ascend/ prefix naturally;
-        # their fixes are regenerated into the npuir patch afterwards.
-        is_valid, reason = validate_fix(
-            ascend_path, pre_files, result.modified_files
-        )
+        # Preferred: the AI's own report (modified_files.txt) — the
+        # git-diff based list is polluted by build-applied patch content
+        # (setup.py applies the triton-ascend patches in place) and
+        # would reject perfectly valid fixes because of files the AI
+        # never touched.
+        # AscendNPU-IR fixes pass the third_party/ascend/ prefix via the
+        # gitlink entry and are regenerated into the npuir patch later.
+        reported = _read_ai_modified_files(step_dir)
+        if reported:
+            ai_edits = reported
+            log.info(
+                f"Using AI-reported modified files ({len(ai_edits)}): "
+                f"{', '.join(ai_edits[:20])}"
+            )
+        else:
+            patch_touched = set(ctx.ta_patch_touched_files)
+            ai_edits = [
+                f for f in result.modified_files if f not in patch_touched
+            ]
+            log.info(
+                "modified_files.txt missing or empty — falling back to "
+                "git diff (patch-touched files filtered)"
+            )
+        is_valid, reason = validate_fix(ascend_path, pre_files, ai_edits)
         if not is_valid:
             log.warning(f"Fix validation FAILED: {reason}")
             log.warning("Reverting invalid changes...")
@@ -119,15 +138,15 @@ def ai_fix(
             rejection_file.write_text(
                 f"VALIDATION REJECTED: {reason}\n"
                 f"Allowed paths: {', '.join(_ALLOWED_FIX_PREFIXES)}\n"
-                f"Modified files: {result.modified_files}\n",
+                f"Modified files (AI edits): {ai_edits}\n",
                 encoding="utf-8",
             )
             _revert_illegal_changes(ascend_path)
             return ctx.copy_with(last_fix_modified_files=[])
 
         log.ai_result(
-            bool(result.modified_files),
-            result.modified_files,
+            bool(ai_edits),
+            ai_edits,
             (result.step_summary or "")[:500],
         )
         # Expand the gitlink entry (real submodule) into the individual
@@ -135,7 +154,7 @@ def ai_fix(
         sub_changed = _submodule_files_changed(
             ascend_path, pre_submodule_snapshot
         )
-        expanded = _expand_modified_files(result.modified_files, sub_changed)
+        expanded = _expand_modified_files(ai_edits, sub_changed)
         return ctx.copy_with(last_fix_modified_files=expanded)
     except Exception as e:
         log.error(f"AI fix failed: {e}")
@@ -180,6 +199,25 @@ def _list_tracked_files(repo: Path) -> set[str]:
         return set(output.strip().splitlines())
     except Exception:
         return set()
+
+
+def _read_ai_modified_files(step_dir: Path) -> list[str]:
+    """AI-reported modified files from ``modified_files.txt``.
+
+    Returns [] when the file is missing or empty — the caller falls
+    back to the git-diff based list in that case.
+    """
+    report = step_dir / "modified_files.txt"
+    if not report.exists():
+        return []
+    try:
+        return [
+            ln.strip()
+            for ln in report.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    except Exception:
+        return []
 
 
 def _submodule_path(ascend_path: Path) -> Path:
