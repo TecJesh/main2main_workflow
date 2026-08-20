@@ -15,11 +15,7 @@ from TA_main2main_workflow.utils.config import TAConfig
 from TA_main2main_workflow.utils.context import WorkflowContext
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check
-from TA_main2main_workflow.utils.submodule import (
-    SUBMODULE_DIR,
-    commit_submodule,
-    submodule_has_changes,
-)
+from TA_main2main_workflow.utils.submodule import SUBMODULE_DIR
 from TA_main2main_workflow.utils import STEPS_DIR, WORKSPACE_DIR
 from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
 from TA_main2main_workflow.pipeline.ta_patch import exclude_patch_files_from_index
@@ -31,27 +27,26 @@ def commit_step(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     """Commit all remaining changes for the current step.
 
     Called after ``restore_workspace`` so the tree holds no patch-applied
-    content.  Order:
+    content.  The AscendNPU-IR submodule is NEVER committed here —
+    npu-ir modifications live in ``npuir_adapter_to_llvm_23.patch`` (the
+    parent repo carries that file).  A merge may legitimately move the
+    submodule POINTER, which ``git add -u`` stages as a plain gitlink
+    update (no submodule commits, no submodule content).
 
-    1. Commit AscendNPU-IR submodule if it has changes (a merge may have
-       moved the submodule pointer; patch-applied dirt was restored)
-    2. Clean temp files
-    3. Stage and commit parent repo (AI whitelist when available, else
-       ``git add -A`` with patch-touched exclusion as defense)
+    Order:
+
+    1. Clean temp files
+    2. Stage and commit parent repo (AI whitelist when available, else
+       ``git add -u`` with patch-touched exclusion as defense)
     """
     ascend_path = Path(ctx.triton_ascend_path)
     step = ctx.steps[ctx.current_step]
     step_id = step["id"]
 
-    # ── 1. Submodule first ────────────────────────────────────────────
-    if submodule_has_changes(ascend_path):
-        target_short = ctx.target_commit[:12] if ctx.target_commit else "HEAD"
-        commit_submodule(ascend_path, f"[Sync](fix) AI fix for {target_short}\n")
-
-    # ── 2. Clean temp files ───────────────────────────────────────────
+    # ── 1. Clean temp files ───────────────────────────────────────────
     cleanup_temp_files(ascend_path)
 
-    # ── 3. Stage and commit parent repo ───────────────────────────────
+    # ── 2. Stage and commit parent repo ───────────────────────────────
     staged = run_git(ascend_path, "status", "--porcelain").strip()
     if not staged:
         log.info(f"[{step_id}] Nothing to commit")

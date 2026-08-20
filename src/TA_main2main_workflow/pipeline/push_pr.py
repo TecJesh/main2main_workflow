@@ -16,7 +16,6 @@ from pathlib import Path
 
 from TA_main2main_workflow.utils.logging import get_logger
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check
-from TA_main2main_workflow.utils.submodule import push_submodule
 from TA_main2main_workflow.utils import (
     WORKSPACE_DIR,
     FINAL_SUMMARY_FILE,
@@ -46,9 +45,6 @@ def push_and_create_pr(
     """
     ascend_path = Path(ascend_path)
     summary_path = Path(summary_path) if summary_path else None
-
-    # ── 0. Push submodule first ────────────────────────────────────
-    push_submodule(ascend_path)
 
     # ── 1. Determine branch ────────────────────────────────────────
     branch = work_branch or run_git(ascend_path, "branch", "--show-current").strip()
