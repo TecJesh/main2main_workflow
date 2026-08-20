@@ -1,0 +1,10 @@
+# Direct Python dependencies of TA_main2main_workflow.
+# Everything else the workflow imports is stdlib.
+
+pydantic
+
+# Runtime dependencies invoked via subprocess by the workflow:
+# pipeline/test.py runs `pytest -n <procs> --junitxml=...`
+# (pytest-xdist provides the -n parallel flag).
+pytest
+pytest-xdist
