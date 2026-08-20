@@ -262,12 +262,12 @@ def build_triton(
     build_log = step_dir / "build.log"
 
     log.section("Build Triton-Ascend")
-    log.info(f"Running: {python_exe} setup.py install")
+    log.info(f"Running: {python_exe} setup_ascend.py install")
     with open(build_log, "w", encoding="utf-8") as fh:
-        fh.write(f"=== setup.py install ===\n{' '.join(build_env.keys())}\n\n")
+        fh.write(f"=== setup_ascend.py install ===\n{' '.join(build_env.keys())}\n\n")
         fh.flush()
         rc = stream_cmd(
-            [python_exe, "setup.py", "install"],
+            [python_exe, "setup_ascend.py", "install"],
             cwd=ascend_path,
             log_fh=fh,
             timeout=1800,
