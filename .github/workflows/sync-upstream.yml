@@ -28,6 +28,11 @@ on:
         description: 'Specific upstream triton commit SHA (leave empty for latest)'
         required: false
         default: ''
+      progressive_merge:
+        description: 'Progressive merge: split commits into <=1000-line steps. Disable to skip planning and merge directly to the target commit in one step.'
+        type: boolean
+        required: false
+        default: true
       enable_codegraph:
         description: 'Enable Codegraph MCP server (code intelligence for AI)'
         type: boolean
@@ -137,6 +142,10 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+          # Merge planning: false skips the line-budget step planning and
+          # merges directly to the target commit in a single step
+          TA_PROGRESSIVE_MERGE: "${{ github.event.inputs.progressive_merge }}"
+
           # Skip build & test on CI (no NPU)
           SKIP_BUILD: "true"
           SKIP_E2E_TEST: "true"
@@ -145,8 +154,8 @@ jobs:
           AUTO_STASH: "true"
 
           # PR metadata
-          PR_AUTHOR: TA
-          PR_TYPE: sync
+          PR_AUTHOR: Sync
+          PR_TYPE: feat
         run: ta-kickoff
 
       # ── 9. Upload workspace artifacts (for debugging) ────────────────────────

@@ -25,6 +25,9 @@ HasNoNewCommits = "HasNoNewCommits"
 # ═══════════════════════════════════════════════════════════════════════════
 
 LLVM_HASH_FILE = "cmake/llvm-hash.txt"
+# Newer upstream pin format: cmake/llvm-info.json (llvm_hash field).
+# See utils/llvm_hash.py for format-agnostic helpers.
+LLVM_INFO_FILE = "cmake/llvm-info.json"
 LINE_BUDGET = 1000
 SOURCE_DIRS = ["python/triton/", "lib/", "include/"]
 ENV_SINGLE_STEP_MODE = "TA_SINGLE_STEP_MODE"
@@ -79,4 +82,9 @@ LLVM_CHANGE_ANALYSIS_DIR = "llvm_change_analysis"
 from TA_main2main_workflow.utils.config import TAConfig  # noqa: F401, E402
 from TA_main2main_workflow.utils.context import WorkflowContext  # noqa: F401, E402
 from TA_main2main_workflow.utils.git import run_git, run_git_no_check  # noqa: F401, E402
+from TA_main2main_workflow.utils.llvm_hash import (  # noqa: F401, E402
+    read_llvm_hash,
+    llvm_hash_at_rev,
+    LLVM_HASH_PATHS,
+)
 from TA_main2main_workflow.utils.logging import get_logger, TALogger  # noqa: F401, E402

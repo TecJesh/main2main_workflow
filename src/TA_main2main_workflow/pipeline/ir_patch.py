@@ -44,6 +44,7 @@ from TA_main2main_workflow.utils import (
     IR_DIAGNOSIS_FILE,
     _ASCEND_BASELINE_LLVM_HASH,
 )
+from TA_main2main_workflow.utils.llvm_hash import read_llvm_hash
 
 log = get_logger(__name__)
 _REF = str(Path(__file__).parent.parent / "reference")
@@ -70,13 +71,12 @@ def build_baseline_llvm(ctx: WorkflowContext, config: TAConfig) -> WorkflowConte
     llvm_project = config.llvm_project
     llvm_install = config.llvm_install
 
-    hash_file = ascend_path / "cmake" / "llvm-hash.txt"
-    if not hash_file.exists():
-        log.info("No llvm-hash.txt — skipping baseline LLVM build")
-        return ctx
-
-    required_hash = hash_file.read_text(encoding="utf-8").strip()
+    required_hash = read_llvm_hash(ascend_path)
     if not required_hash:
+        log.info(
+            "No LLVM pin (cmake/llvm-hash.txt / cmake/llvm-info.json) "
+            "— skipping baseline LLVM build"
+        )
         return ctx
 
     log.header("Build Baseline LLVM (pre-merge)")
@@ -1088,11 +1088,8 @@ def _clean_checkout_apply_patch(
 
 
 def _get_current_llvm_hash(ascend_path: Path) -> str:
-    """Read the current LLVM hash from triton-ascend's cmake/llvm-hash.txt."""
-    hash_file = ascend_path / "cmake" / "llvm-hash.txt"
-    if hash_file.exists():
-        return hash_file.read_text(encoding="utf-8").strip()
-    return ""
+    """Read the current LLVM pin (cmake/llvm-hash.txt or cmake/llvm-info.json)."""
+    return read_llvm_hash(ascend_path)
 
 
 def _do_llvm_build(llvm_project: Path, llvm_install: Path, required_hash: str) -> str:

@@ -28,6 +28,7 @@ from TA_main2main_workflow.utils import (
     STEPS_DIR,
     WORKSPACE_DIR,
 )
+from TA_main2main_workflow.utils.llvm_hash import read_llvm_hash
 from TA_main2main_workflow.pipeline.fix import ai_fix
 from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
 from TA_main2main_workflow.pipeline.commit import run_commit_plan, stage_changes
@@ -86,13 +87,12 @@ def llvm_setup(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     """Clone LLVM, checkout hash, apply patch. Idempotent."""
     ascend_path = Path(ctx.triton_ascend_path)
     llvm_project = config.llvm_project
-    llvm_hash_file = ascend_path / "cmake" / "llvm-hash.txt"
-
-    if not llvm_hash_file.exists():
-        log.info("No llvm-hash.txt — skipping LLVM rebuild")
-        return ctx
-    required_hash = llvm_hash_file.read_text(encoding="utf-8").strip()
+    required_hash = read_llvm_hash(ascend_path)
     if not required_hash:
+        log.info(
+            "No LLVM pin (cmake/llvm-hash.txt / cmake/llvm-info.json) "
+            "— skipping LLVM rebuild"
+        )
         return ctx
 
     if not llvm_project.exists():
@@ -131,9 +131,7 @@ def build_llvm(ctx: WorkflowContext, num_procs: int = 32) -> WorkflowContext:
         os.path.expanduser(os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync"))
     )
     ascend_path = Path(ctx.triton_ascend_path)
-    required_hash = (
-        (ascend_path / "cmake" / "llvm-hash.txt").read_text(encoding="utf-8").strip()
-    )
+    required_hash = read_llvm_hash(ascend_path)
 
     step_id = ctx.steps[ctx.current_step]["id"] if ctx.steps else "step-0"
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
