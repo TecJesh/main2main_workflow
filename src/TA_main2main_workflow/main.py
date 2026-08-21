@@ -21,6 +21,9 @@ Environment variables:
   BUILD_PROCS          — number of parallel build workers (default: 32)
   TEST_PROCS           — number of parallel pytest workers (default: 16)
   TA_LINE_BUDGET       — max source lines per merge step (default: 1000)
+  TA_PROGRESSIVE_MERGE — set to "false" to skip line-budget step planning
+                         and merge directly to the target commit in one step
+                         (default: true)
   TA_MAX_RETRIES       — max AI fix retries (default: 10)
   TA_BASE_BRANCH       — base branch name (default: upstream_sync)
   TA_TEST_DIR          — primary test directory (default: third_party/ascend/unittest/pytest_ut)

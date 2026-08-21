@@ -67,7 +67,7 @@ Common code-bug mechanisms in Triton-Ascend:
 - CMake/build errors → upstream changed build configuration, CMake variables, or file locations
 - Compilation errors in `lib/Target/Ascend/` → upstream changed C++ interfaces that Ascend backend implements
 - **LLVM/MLIR API changes** → the most common cause of build errors. When
-  upstream bumps its pinned LLVM (`cmake/llvm-hash.txt`), the Ascend backend
+  upstream bumps its pinned LLVM (`cmake/llvm-hash.txt` or `cmake/llvm-info.json`), the Ascend backend
   (`lib/Target/Ascend/`, `third_party/ascend/`) must match the new API. For the
   full diagnosis flow, API change table, and fix patterns, see
   `reference/02-llvm-version-adaptation-and-compile-fixes.md`.

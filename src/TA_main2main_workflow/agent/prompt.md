@@ -414,8 +414,9 @@ The active mode is: {mode}
       - `lib/Target/Ascend/`      (Ascend LLVM backend)
       - `python/triton/`          (only if it contains Ascend conditionals)
       - Other project files (CMakeLists.txt, setup.py, etc.)
-  - **NEVER keep triton-ascend's version of `cmake/llvm-hash.txt` in a merge
-    conflict.** This file must ALWAYS follow upstream triton. The LLVM version
+  - **NEVER keep triton-ascend's version of the LLVM pin file
+    (`cmake/llvm-hash.txt`, or `cmake/llvm-info.json` in newer upstream code)
+    in a merge conflict.** It must ALWAYS follow upstream triton. The LLVM version
     is controlled by upstream; triton-ascend's LLVM patches are applied
     separately and do NOT depend on a different LLVM hash. In any merge
     conflict on this file, accept the upstream (incoming) version
@@ -477,7 +478,8 @@ The active mode is: {mode}
 
   Context:
     The Ascend backend OP usage is based on a fixed baseline LLVM version.
-    The target LLVM version is specified in cmake/llvm-hash.txt. OPs must
+    The target LLVM version is specified in cmake/llvm-hash.txt (or the
+    `llvm_hash` field of cmake/llvm-info.json in newer upstream code). OPs must
     be checked for compatibility across these two versions.
 
     Baseline LLVM hash (source): {baseline_llvm_hash}

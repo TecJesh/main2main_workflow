@@ -131,6 +131,7 @@ Layer 3: 实际验证
 | `SKIP_AI_ANALYSIS` | `false` | 跳过 AI 调用 |
 | `TA_MAX_RETRIES` | 10 | AI 修复最大重试次数 |
 | `TA_LINE_BUDGET` | 1000 | 每步最大源码行数 |
+| `TA_PROGRESSIVE_MERGE` | `true` | 按行数预算分步合并；`false` 时跳过规划，一步直接合并到目标 commit |
 
 ### PR
 | 变量 | 默认值 | 说明 |

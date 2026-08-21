@@ -16,8 +16,12 @@ from TA_main2main_workflow.utils import (
     WORKSPACE_DIR,
     STEPS_FILE,
     STEPS_DIR,
-    LLVM_HASH_FILE,
     SOURCE_DIRS,
+)
+from TA_main2main_workflow.utils.llvm_hash import (
+    read_llvm_hash,
+    llvm_hash_at_rev,
+    LLVM_HASH_PATHS,
 )
 from TA_main2main_workflow.utils.git import run_git
 from TA_main2main_workflow.utils.logging import get_logger
@@ -123,35 +127,24 @@ def plan_steps(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
 
 
 def llvm_hash_changed_after_merge(ctx: WorkflowContext) -> bool:
-    """Check if the merge changed cmake/llvm-hash.txt in triton-ascend.
+    """Check if the merge changed triton-ascend's LLVM pin.
 
-    Compares the current hash with the pre-step ascend HEAD.
-    Should be called AFTER a merge step completes.
+    Resolves the pin (legacy cmake/llvm-hash.txt or cmake/llvm-info.json)
+    at the pre-step ascend HEAD and in the current working tree, then
+    compares the resolved hashes — so a format migration mid-range is
+    still detected.  Should be called AFTER a merge step completes.
     """
     ascend_path = Path(ctx.triton_ascend_path)
-    hash_file = ascend_path / LLVM_HASH_FILE
-    if not hash_file.exists():
+    if not ctx.step_start_ascend_head:
         return False
-    current_hash = hash_file.read_text(encoding="utf-8").strip()
-
-    # Compare with pre-step state
-    if ctx.step_start_ascend_head:
-        try:
-            old_content = run_git(
-                ascend_path, "show", f"{ctx.step_start_ascend_head}:{LLVM_HASH_FILE}"
-            ).strip()
-            return old_content != current_hash
-        except Exception:
-            pass
-    return False
+    old_hash = llvm_hash_at_rev(ascend_path, ctx.step_start_ascend_head)
+    new_hash = read_llvm_hash(ascend_path)
+    return bool(new_hash) and old_hash != new_hash
 
 
 def get_current_llvm_hash(ascend_path: Path) -> str:
-    """Read the current LLVM hash from triton-ascend's cmake/llvm-hash.txt."""
-    hash_file = ascend_path / LLVM_HASH_FILE
-    if hash_file.exists():
-        return hash_file.read_text(encoding="utf-8").strip()
-    return ""
+    """Read the current LLVM pin (cmake/llvm-hash.txt or cmake/llvm-info.json)."""
+    return read_llvm_hash(ascend_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -191,7 +184,7 @@ def _source_lines_for_commit(repo: Path, sha: str) -> int:
 def _commit_changed_llvm_hash(repo: Path, sha: str) -> bool:
     try:
         output = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
-        return LLVM_HASH_FILE in output
+        return any(p in output for p in LLVM_HASH_PATHS)
     except Exception:
         return False
 
