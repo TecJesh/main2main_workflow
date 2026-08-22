@@ -32,9 +32,17 @@ from pydantic import BaseModel, Field
 
 _PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
-_TIMEOUT_MINUTES = 30
-_STALE_SECONDS = 1200
-_MAX_STALE_RETRIES = 3
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_TIMEOUT_MINUTES = _env_int("TA_AI_TIMEOUT_MINUTES", 60)
+_STALE_SECONDS = _env_int("TA_AI_STALE_SECONDS", 3600)
+_MAX_STALE_RETRIES = _env_int("TA_AI_MAX_STALE_RETRIES", 5)
 _HEARTBEAT_INTERVAL = 15  # print "." every 15s of silence (claude only)
 
 
