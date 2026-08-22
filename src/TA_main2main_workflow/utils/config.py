@@ -30,9 +30,9 @@ class TAConfig:
 
     # ── AI Backend ────────────────────────────────────────────────────────
     ai_backend: AIBackendChoice = "auto"
-    ai_timeout_minutes: int = 30
-    ai_stale_seconds: int = 1200
-    ai_max_stale_retries: int = 3
+    ai_timeout_minutes: int = 60
+    ai_stale_seconds: int = 3600
+    ai_max_stale_retries: int = 5
 
     # ── Retry / Budget ────────────────────────────────────────────────────
     max_retries: int = 10
@@ -121,9 +121,9 @@ class TAConfig:
                 AIBackendChoice,
                 _env_choice("AI_BACKEND", ["opencode", "claude", "auto"], "auto"),
             ),
-            ai_timeout_minutes=_env_int("TA_AI_TIMEOUT_MINUTES", 30),
-            ai_stale_seconds=_env_int("TA_AI_STALE_SECONDS", 1200),
-            ai_max_stale_retries=_env_int("TA_AI_MAX_STALE_RETRIES", 3),
+            ai_timeout_minutes=_env_int("TA_AI_TIMEOUT_MINUTES", 60),
+            ai_stale_seconds=_env_int("TA_AI_STALE_SECONDS", 3600),
+            ai_max_stale_retries=_env_int("TA_AI_MAX_STALE_RETRIES", 5),
             max_retries=_env_int("TA_MAX_RETRIES", 10),
             line_budget=_env_int("TA_LINE_BUDGET", 1000),
             llvm_install_prefix=os.getenv("LLVM_INSTALL_PREFIX", ""),
