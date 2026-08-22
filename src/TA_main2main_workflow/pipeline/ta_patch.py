@@ -145,6 +145,16 @@ def adjust_patches(
             log.status(True, f"{patch_file.name} applies cleanly")
             ready.append(str(patch_file))
             continue
+        # Only reach here when `git apply --check` failed — capture the
+        # failure so the log shows the check-then-adjust chain explicitly.
+        check = run_git_no_check(
+            ascend_path, "apply", "--check", *_check_args(patch_file)
+        )
+        log.warning(
+            f"{patch_file.name} does NOT apply (git apply --check failed): "
+            f"{(check.stderr or check.stdout or '').strip()[-200:]}"
+        )
+        log.info("AI will adjust hunk positions only (semantics preserved)")
         _adjust_patch_with_ai(ctx, config, ascend_path, patch_file)
         if _check_applies(ascend_path, patch_file):
             log.status(True, f"{patch_file.name} applies after adjustment")
