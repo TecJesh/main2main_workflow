@@ -320,6 +320,13 @@ def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
     # ── 3. Ask the AI for the file whitelist + commit subject ──────────
     run_commit_plan(ctx, config)
 
+    # ── 3b. Hard-include the regenerated npuir patch ───────────────────
+    # The AI's AscendNPU-IR fixes exist only inside the regenerated
+    # npuir patch file (the touched sources were restored).  If the
+    # commit whitelist missed it, append it so the accumulated fixes
+    # are never silently dropped.
+    _ensure_npuir_patch_in_commit(ascend_path, step_dir)
+
     # ── 4. Build commit message (AI-authored priority) ─────────────────
     commit_subject = _read_ai_commit_subject(step_dir, target_short)
     commit_msg = (
@@ -356,6 +363,41 @@ def commit_fixes(ctx: WorkflowContext, config: TAConfig) -> None:
             log.info("Nothing to commit (AI made no changes)")
         else:
             log.warning(f"Failed to commit fixes: {stderr[-200:]}")
+
+
+def _ensure_npuir_patch_in_commit(ascend_path: Path, step_dir: Path) -> None:
+    """Append dirty npuir patch file(s) the AI's commit whitelist missed.
+
+    The commit whitelist path in ``stage_changes`` only stages files
+    the AI listed; if it omitted the regenerated npuir patch, the
+    accumulated AscendNPU-IR fixes would be left uncommitted.  When no
+    whitelist exists, ``stage_changes`` falls back to ``git add -u``
+    which picks the patch up anyway — nothing to do here.
+    """
+    from TA_main2main_workflow.pipeline.ta_patch import dirty_npuir_patch_paths
+
+    whitelist_file = step_dir / "commit_files.txt"
+    if not whitelist_file.exists():
+        return
+    try:
+        listed = [
+            ln.strip()
+            for ln in whitelist_file.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    except Exception:
+        return
+    missing = [
+        p for p in dirty_npuir_patch_paths(ascend_path) if p not in listed
+    ]
+    if missing:
+        with open(whitelist_file, "a", encoding="utf-8") as fh:
+            for p in missing:
+                fh.write(p + "\n")
+        log.info(
+            "Appended regenerated npuir patch file(s) to commit whitelist: "
+            f"{', '.join(missing)}"
+        )
 
 
 def _read_ai_commit_subject(step_dir: Path, target_short: str) -> str:

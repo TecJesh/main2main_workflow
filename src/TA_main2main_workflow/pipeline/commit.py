@@ -181,9 +181,25 @@ def stage_changes(
 
     whitelist = _read_commit_whitelist(step_dir) if use_whitelist else []
     if whitelist:
+        # Hard gate: patch-touched sources, the submodule gitlink, AND
+        # submodule-internal paths never reach `git add`.  A path inside
+        # the gitlink makes `git add` in the parent repo fail outright
+        # (exit 128, "Pathspec ... is in submodule"), which would abort
+        # the whole fix commit — submodule content can never enter a
+        # parent commit anyway; it lives in the regenerated npuir patch.
         filtered = [
-            f for f in whitelist if f not in touched_set and f != SUBMODULE_DIR
+            f
+            for f in whitelist
+            if f not in touched_set
+            and f != SUBMODULE_DIR
+            and not f.startswith(SUBMODULE_DIR + "/")
         ]
+        dropped = [f for f in whitelist if f not in filtered]
+        if dropped:
+            log.info(
+                "Dropped submodule/patch-touched path(s) from whitelist: "
+                f"{sorted(set(dropped))}"
+            )
         if filtered:
             run_git(ascend_path, "add", "--", *filtered)
             staged = set(

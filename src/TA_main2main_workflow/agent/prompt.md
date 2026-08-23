@@ -264,12 +264,15 @@ The active mode is: {mode}
   Rules:
     - Fixes in ANY file under third_party/ascend/AscendNPU-IR/ (the
       npuir patch currently touches: {patch_touched_submodule}) stay
-      in the source ONLY as an intermediate step: after the build
-      passes, the workflow moves your edits into
+      in the source ONLY as an intermediate step: before the next
+      build the workflow moves your edits into
       third_party/ascend/patch/npuir_adapter_to_llvm_23.patch (new
       files get a new section appended) and restores the source
-      files.  Such source edits are NEVER committed directly — if
-      you leave them uncommitted the next build wipes them.
+      files; the build itself applies the updated patch.  The patch
+      update is committed only after the build/tests pass.  Your
+      earlier npuir fixes accumulate through the patch — on a later
+      attempt they are already applied to the tree, so do NOT redo
+      them.  Such source edits are NEVER committed directly.
     - Keep such fixes minimal and localized so they regenerate
       cleanly into the patch; note in your summary which
       AscendNPU-IR files you edited.

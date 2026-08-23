@@ -14,6 +14,9 @@ the code line positions drift, so this module:
 3. Regenerates patch content from working-tree diffs after AI fixes
    (fix-then-regenerate: the AI fixes source code, the fix flows back
    into the ``.patch`` file, and the touched source is restored).
+   The regenerated patch is only validated with ``git apply --check``
+   here — the build applies it itself, and the patch-file edit is
+   committed only after build/test passes.
 4. Restores touched source files to HEAD so commits stay clean.
 
 The npuir patch is special: its internal paths are relative to the
@@ -129,7 +132,7 @@ def adjust_patches(
     # patch that is actually fine.
     touched = parse_patches(patch_files)
     if touched.parent:
-        run_git_no_check(ascend_path, "checkout", "-f", "--", *touched.parent)
+        _restore_from_head(ascend_path, touched.parent, "parent repo")
         log.info(
             f"Restored {len(touched.parent)} patch-touched file(s) to HEAD "
             "before patch checks"
@@ -245,7 +248,7 @@ def parse_patches(patch_files: list[Path]) -> PatchTouchInfo:
     return info
 
 
-def regenerate_and_reapply(
+def regenerate_npuir_patch(
     ascend_path: Path,
     patch_files: list[Path],
     ctx: WorkflowContext,
@@ -270,14 +273,21 @@ def regenerate_and_reapply(
     1. its ``git diff HEAD`` is captured in the submodule repo and
        merged into the npuir patch (the diff naturally contains old
        patch content + the AI fix),
-    2. the hit files are restored to HEAD,
-    3. the updated npuir patch is re-checked and re-applied so build/
-       test continue to see the patched code.
+    2. the touched files are restored to HEAD,
+    3. the updated npuir patch is validated with ``git apply --check``.
+
+    The workflow NEVER applies the npuir patch itself — the next build
+    (setup.py) applies it, and the patch-file edit stays uncommitted
+    until the build/tests pass, when ``commit_fixes`` commits it
+    together with the other fixes.  Fixes therefore accumulate across
+    fix attempts: each round's regeneration builds on the previous
+    rounds' patch content, and only the final passing state is
+    committed.
 
     Returns the context with ``ta_patch_submodule_files`` extended by
     any newly covered files (so later restore/exclusion covers them).
-    On failure the patch-file edits are reverted, the tree is restored,
-    and the context is returned unchanged.
+    On validation failure the patch-file edits are reverted, the tree
+    is restored, and the context is returned unchanged.
     """
     if not patch_files:
         return ctx
@@ -323,9 +333,9 @@ def regenerate_and_reapply(
             "AscendNPU-IR file(s)"
         )
 
-    # The whole npuir patch is re-applied, so EVERY file it touches must
-    # be restored first — not just the AI's hits — otherwise sections
-    # for already-patched files fail the check spuriously.
+    # Restore EVERY file the npuir patch touches — not just the AI's
+    # hits — otherwise sections for already-patched files fail the
+    # check spuriously.  The next build applies the updated patch.
     to_restore = list(dict.fromkeys(ctx.ta_patch_submodule_files + hits_submodule))
     restore_workspace(ascend_path, [], to_restore)
     if untracked_new:
@@ -335,49 +345,32 @@ def regenerate_and_reapply(
         for f in untracked_new:
             (sub_path / f).unlink(missing_ok=True)
         run_git_no_check(sub_path, "reset", "--", *untracked_new)
-    if not apply_patches(ascend_path, npuir_patches):
+
+    # Validation gate: a patch that cannot apply here would fail the
+    # build's own apply too, so fail fast with the real error output.
+    check_failed: list[str] = []
+    for patch_file in npuir_patches:
+        ok, err = _check_applies_with_error(ascend_path, patch_file)
+        if not ok:
+            check_failed.append(f"{patch_file.name}:\n{err}")
+    if check_failed:
         log.error(
-            "npuir patch check/apply failed after regeneration — "
+            "npuir patch does not apply cleanly after regeneration — "
             "discarding the fix"
         )
+        for detail in check_failed:
+            log.error(f"git apply --check failure:\n{detail}")
         revert_patch_files(ascend_path, npuir_patches)
         restore_workspace(ascend_path, [], to_restore)
         return ctx
     log.status(
-        True, f"Regenerated {len(npuir_patches)} npuir patch file(s) and re-applied"
+        True,
+        f"Regenerated {len(npuir_patches)} npuir patch file(s) — "
+        "the next build will apply them",
     )
     # Extend the touched list so the step-end restore and commit
     # exclusion also cover files the npuir patch did not cover before.
     return ctx.copy_with(ta_patch_submodule_files=to_restore)
-
-
-def apply_patches(ascend_path: Path, patch_files: list[Path]) -> bool:
-    """``git apply --check`` then ``git apply`` every patch.
-
-    Assumes the touched files are at HEAD (restored) — checking against
-    an already-patched tree always fails.  npuir patches are applied
-    with ``--directory <submodule>`` exactly like setup.py does.
-    """
-    for patch_file in patch_files:
-        if not _check_applies(ascend_path, patch_file):
-            log.error(
-                f"Patch {patch_file.name} does not apply cleanly — "
-                "cannot (re)apply patch set"
-            )
-            return False
-    for patch_file in patch_files:
-        args = ["apply"]
-        if patch_file.name.startswith(_NPUIR_PATCH_PREFIX):
-            args += ["--directory", SUBMODULE_DIR]
-        args.append(str(patch_file))
-        result = run_git_no_check(ascend_path, *args)
-        if result.returncode != 0:
-            log.error(
-                f"Failed to apply {patch_file.name}: "
-                f"{(result.stderr or '').strip()[-400:]}"
-            )
-            return False
-    return True
 
 
 def regen_ai_fixes(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
@@ -390,6 +383,11 @@ def regen_ai_fixes(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     checks those files out to HEAD before applying the patch, which
     wipes fixes left in the source tree.
 
+    The patch-file edit stays in the working tree (scratchpad) until
+    the build/tests pass; the workflow never applies the patch itself
+    and never commits it from here — ``commit_fixes`` does that with
+    the regular fix-commit rules.
+
     Returns the context with the npuir touched list extended when the
     AI fixed submodule files the npuir patch did not cover before.
     """
@@ -399,7 +397,7 @@ def regen_ai_fixes(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     patch_files = resolve_source_patches(ascend_path, config)
     if not patch_files:
         return ctx
-    return regenerate_and_reapply(
+    return regenerate_npuir_patch(
         ascend_path, patch_files, ctx, ctx.last_fix_modified_files
     )
 
@@ -415,27 +413,12 @@ def restore_workspace(
     next build re-applies the patches automatically.
     """
     if touched_parent:
-        run_git_no_check(ascend_path, "checkout", "--", *touched_parent)
+        _restore_from_head(ascend_path, touched_parent, "parent repo")
         log.info(f"Restored {len(touched_parent)} patch-touched file(s)")
     if touched_submodule:
         sub_path = ascend_path / SUBMODULE_DIR
         if sub_path.is_dir():
-            tracked = set(
-                run_git_no_check(sub_path, "ls-files").stdout.split()
-            )
-            tracked_hits = [f for f in touched_submodule if f in tracked]
-            untracked_hits = [f for f in touched_submodule if f not in tracked]
-            # A pathspec that is not in HEAD (e.g. a file that exists
-            # only via a new-file patch section) makes `git checkout`
-            # abort for the whole command — restore tracked files only.
-            if tracked_hits:
-                run_git_no_check(sub_path, "checkout", "--", *tracked_hits)
-            # Files that exist only via the applied patch are removed
-            # so the tree truly returns to HEAD.
-            for f in untracked_hits:
-                (sub_path / f).unlink(missing_ok=True)
-            # Drop any intent-to-add index entries left by regeneration.
-            run_git_no_check(sub_path, "reset", "-q", "--", *touched_submodule)
+            _restore_from_head(sub_path, touched_submodule, "AscendNPU-IR submodule")
             log.info(
                 f"Restored {len(touched_submodule)} patch-touched "
                 "file(s) in submodule"
@@ -444,6 +427,63 @@ def restore_workspace(
         from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
 
         cleanup_temp_files(ascend_path)
+
+
+def _restore_from_head(repo: Path, paths: list[str], label: str) -> None:
+    """Restore *paths* to HEAD in *repo* — explicitly, never via the index.
+
+    ``git checkout -- <paths>`` restores from the INDEX, not HEAD:
+    stale staged content or leftover ``git add -N`` intent-to-add
+    entries silently restore the wrong content, and patches then fail
+    their ``git apply --check`` against that stale tree (the fix is
+    discarded even though it was mechanically sound).  Restoring with
+    an explicit ``HEAD`` also heals the index back to HEAD.
+
+    Paths absent from HEAD (files that exist only via a new-file patch
+    section) are removed from the working tree instead — a pathspec
+    missing from HEAD makes ``git checkout`` abort the whole command.
+    """
+    if not paths:
+        return
+    tracked = set(
+        run_git_no_check(repo, "ls-tree", "-r", "--name-only", "HEAD").stdout.split()
+    )
+    tracked_hits = [f for f in paths if f in tracked]
+    missing_hits = [f for f in paths if f not in tracked]
+    if tracked_hits:
+        result = run_git_no_check(repo, "checkout", "HEAD", "--", *tracked_hits)
+        if result.returncode != 0:
+            # Loud, not silent: a failed restore leaves stale content
+            # that makes every later patch check / commit misbehave.
+            log.error(
+                f"{label}: restore to HEAD failed — files may still carry "
+                f"patch content and later checks will see a stale tree: "
+                f"{(result.stderr or result.stdout or '').strip()[-400:]}"
+            )
+    for f in missing_hits:
+        try:
+            (repo / f).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning(f"{label}: could not remove {f}: {e}")
+    # Drop any intent-to-add / stale index entries left by regeneration.
+    run_git_no_check(repo, "reset", "-q", "--", *paths)
+
+
+def dirty_npuir_patch_paths(ascend_path: Path) -> list[str]:
+    """Repo-root-relative npuir patch files with uncommitted edits.
+
+    Used by ``commit_fixes`` to make sure the accumulated AI fixes
+    (which live only in the regenerated npuir patch) land in the fix
+    commit even when the AI's commit whitelist missed them.
+    """
+    changed = _diff_names(ascend_path)
+    return sorted(
+        f
+        for f in changed
+        if f.startswith(_TA_PATCH_DIR + "/")
+        and Path(f).name.startswith(_NPUIR_PATCH_PREFIX)
+        and (ascend_path / f).is_file()
+    )
 
 
 def revert_patch_files(ascend_path: Path, patch_files: list[Path]) -> None:
@@ -495,12 +535,18 @@ def exclude_patch_files_from_index(
 
 def _check_applies(ascend_path: Path, patch_file: Path) -> bool:
     """Return True if *patch_file* applies cleanly to the current tree."""
+    ok, _ = _check_applies_with_error(ascend_path, patch_file)
+    return ok
+
+
+def _check_applies_with_error(ascend_path: Path, patch_file: Path) -> tuple[bool, str]:
+    """Like ``_check_applies`` but also returns git's error output."""
     args = ["apply", "--check"]
     if patch_file.name.startswith(_NPUIR_PATCH_PREFIX):
         args += ["--directory", SUBMODULE_DIR]
     args.append(str(patch_file))
     result = run_git_no_check(ascend_path, *args)
-    return result.returncode == 0
+    return result.returncode == 0, (result.stderr or result.stdout or "").strip()
 
 
 def _sync_submodule(ascend_path: Path) -> bool:
