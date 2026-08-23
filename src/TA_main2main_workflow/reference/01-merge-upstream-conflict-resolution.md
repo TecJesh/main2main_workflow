@@ -241,6 +241,7 @@ git commit -m "merge: upstream Triton <version>"
 | `third_party/ascend/triton_ascend.cc` | IR 构建器参数变更 | 添加新的 static 参数 | Backend |
 | `CMakeLists.txt` | 构建选项变更 | 保留上游 + Ascend 扩展宏 | Build |
 | `setup.py` | 依赖版本更新 | 采用上游新依赖版本 | Build |
+| `setup_ascend.py` | Ascend 构建入口（TA 侧 fork，上游无此文件） | 无上游冲突；合并后由 workflow 同步上游 setup.py 变更，保留 Ascend 特有逻辑；解决编译报错时允许修改 | Build |
 | `cmake/llvm-hash.txt` | LLVM 版本号变更（旧格式） | **直接采用上游版本**（该文件由上游维护） | Build |
 | `cmake/llvm-info.json` | LLVM 版本号变更（新格式，取 `llvm_hash` 字段） | **直接采用上游版本**（该文件由上游维护） | Build |
 

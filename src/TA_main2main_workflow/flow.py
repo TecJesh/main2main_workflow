@@ -44,6 +44,7 @@ from TA_main2main_workflow.pipeline.detect import run_detect
 from TA_main2main_workflow.pipeline.plan import run_plan, llvm_hash_changed_after_merge
 from TA_main2main_workflow.pipeline.merge import merge_upstream_commit
 from TA_main2main_workflow.pipeline.resolve import resolve_conflicts
+from TA_main2main_workflow.pipeline.setup_sync import sync_setup_ascend
 from TA_main2main_workflow.pipeline.build import build_and_fix_loop
 from TA_main2main_workflow.pipeline.test import test_and_fix_loop
 from TA_main2main_workflow.pipeline.commit import commit_step
@@ -146,6 +147,13 @@ class TA_Main2MainFlow:
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
                 log.status(True, "Conflicts resolved")
+
+            # ── Step B2: Sync setup_ascend.py with setup.py ──────
+            # triton-ascend builds via `setup_ascend.py install`; upstream
+            # setup.py changes merged this step must be ported into
+            # setup_ascend.py (AI edits only setup_ascend.py).
+            with timed("setup-sync"):
+                ctx = sync_setup_ascend(ctx, self.config)
 
             # ── Step C: Source patches (all merge modes) ─────────
             # The build applies third_party/ascend/patch/*.patch itself,

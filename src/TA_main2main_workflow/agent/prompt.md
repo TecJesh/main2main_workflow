@@ -160,6 +160,39 @@ The active mode is: {mode}
     - Only edit {patch_file}.  Do NOT touch source files.
     - Do not merge or split hunks; do not change the changed lines.
 
+── setup_sync mode ───────────────────────────────────────────────
+
+  Trigger: {mode} is "setup_sync" (this merge step changed setup.py —
+  upstream modifications must be ported into setup_ascend.py).
+
+  Context: triton-ascend builds with `python setup_ascend.py install`.
+  setup_ascend.py is the Ascend fork of setup.py — it starts from
+  upstream setup.py and adds Ascend-specific build logic.  When the
+  merged upstream code changes setup.py, setup_ascend.py must carry
+  the same changes WITHOUT losing its Ascend-specific parts.
+
+  Your task:
+    1. Read {step_dir}/setup_diff.txt — the upstream diff of setup.py
+       for this step.
+    2. Read {ascend_path}/setup_ascend.py.
+    3. Port EVERY upstream change into setup_ascend.py:
+       - new/changed/removed dependencies, version strings, build
+         flags, CMake args, package data, entry points, install
+         requirements — anything setup.py gained, changed, or lost
+       - adapt each change to setup_ascend.py's structure while
+         preserving ALL Ascend-specific logic (Ascend backend wiring,
+         LLVM paths, patch application, wheel name, etc.)
+    4. NEVER edit setup.py itself — upstream owns it.
+    5. Verify: re-read both files and confirm setup_ascend.py now
+       reflects every upstream setup.py change.
+    6. Write a short summary to {step_dir}/step_summary.md and list the
+       files you modified in {step_dir}/modified_files.txt.
+
+  Constraints:
+    - Only edit {ascend_path}/setup_ascend.py.
+    - If you determine NO sync is needed, make no edits and say so in
+      the summary.
+
 ── commit_plan mode ────────────────────────────────────────────────
 
   Trigger: {mode} is "commit_plan" (AI fixes exist in the working tree
@@ -413,7 +446,7 @@ The active mode is: {mode}
       - `python/triton_ascend/`   (Ascend Python bindings)
       - `lib/Target/Ascend/`      (Ascend LLVM backend)
       - `python/triton/`          (only if it contains Ascend conditionals)
-      - Other project files (CMakeLists.txt, setup.py, etc.)
+      - Other project files (CMakeLists.txt, setup.py, setup_ascend.py, etc.)
   - **NEVER keep triton-ascend's version of the LLVM pin file
     (`cmake/llvm-hash.txt`, or `cmake/llvm-info.json` in newer upstream code)
     in a merge conflict.** It must ALWAYS follow upstream triton. The LLVM version
@@ -423,6 +456,11 @@ The active mode is: {mode}
     unconditionally — do not preserve the triton-ascend side.
   - When unsure about an upstream change's impact, search the triton-ascend
     codebase for references to the changed symbol/file
+  - setup_ascend.py is the Ascend build entry (`python setup_ascend.py
+    install`) — the TA-side fork of setup.py. It MAY be modified when
+    fixing build errors, but it must carry the upstream setup.py changes
+    merged in this step (the workflow syncs it automatically; preserve
+    all Ascend-specific logic it contains).
 
 ── ir_analyze_ops mode ────────────────────────────────────────────────
 
