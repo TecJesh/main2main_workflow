@@ -162,11 +162,14 @@ def ai_fix(
 
 
 # Paths AI is allowed to modify when fixing test failures.
-# Build fixes are restricted to third_party/ascend/ only.
+# Build fixes are restricted to third_party/ascend/ plus the Ascend
+# build entry (setup_ascend.py) — triton-ascend builds via
+# `setup_ascend.py install`, so build fixes may legitimately touch it.
 _ALLOWED_FIX_PREFIXES = [
     "third_party/ascend/",
     "python/triton/extension",
     "python/triton/runtime/libentry.py",
+    "setup_ascend.py",
 ]
 
 

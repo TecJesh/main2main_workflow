@@ -65,3 +65,4 @@ to likely triton-ascend files.
 | `third_party/nvidia/` | `third_party/ascend/` | Backend structure |
 | `CMakeLists.txt` | `CMakeLists.txt`, `cmake/` | Build targets |
 | `setup.py` | `setup.py` | Python package config |
+| `setup_ascend.py` | `setup_ascend.py` | Ascend build entry — fork of setup.py, built via `python setup_ascend.py install`; keep in sync with upstream setup.py changes |
