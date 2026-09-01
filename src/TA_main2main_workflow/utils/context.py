@@ -102,6 +102,15 @@ class WorkflowContext:
     llvm_hash_changed: bool = False
     ir_loop_details: list[dict] = field(default_factory=list)
 
+    # ── LLVM20Compat FileCheck guard ────────────────────────────────────────
+    # Set by ``run_llvm20compat_guard``: True when all OpCompat/*.mlir
+    # FileCheck tests pass (or the guard was skipped).  A False value
+    # after ``llvm20compat_and_fix`` fails the step.
+    llvm20compat_passed: bool = False
+    # OpCompat test file paths (repo-root relative) that failed the
+    # latest guard run.
+    llvm20compat_failures: list[str] = field(default_factory=list)
+
     # ── Step tracking / reporting ─────────────────────────────────────────
     step_details: list[dict] = field(default_factory=list)
     step_pr_descriptions: list[str] = field(default_factory=list)

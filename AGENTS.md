@@ -51,6 +51,8 @@ All `git add` calls use `git add -u` (tracked-only) to avoid staging test artifa
 | `SKIP_AI_ANALYSIS=true` | Bypass AI entirely; only deterministic ops run. Useful for debugging the Flow plumbing. |
 | `SKIP_BUILD=true` | Skip the build step (treat as passed). |
 | `SKIP_E2E_TEST=true` | `_do_test` returns None (treat as passed). |
+| `SKIP_LLVM20COMPAT=true` | Skip the LLVM20Compat FileCheck guard (hard gate). |
+| `TA_LLVM20COMPAT_MAX_RETRIES` | Guard fix-loop retries: adjust LLVM patch → rebuild LLVM → rebuild TA (default 3, each costs an LLVM rebuild). |
 | `PUSH_TO_GITHUB=true` + `GITHUB_REPO=owner/name` | Enables `push_to_github`; requires `gh` logged in. |
 | `AI_BACKEND=opencode\|claude` | Force AI backend; default auto-detects. |
 | `LLVM_INSTALL_PREFIX` | Path to LLVM for building triton-ascend. |

@@ -73,6 +73,8 @@ IR_OPS_REPORT_FILE = "ops_report.json"
 IR_CHANGES_REPORT_FILE = "changes_report.json"
 IR_DIAGNOSIS_FILE = "diagnosis.json"
 IR_MAX_ITERATIONS = 3
+LLVM20COMPAT_LOG_FILE = "llvm20compat.log"
+LLVM20COMPAT_RESULT_FILE = "llvm20compat_result.json"
 LLVM_CHANGE_ANALYSIS_DIR = "llvm_change_analysis"
 
 # ═══════════════════════════════════════════════════════════════════════════

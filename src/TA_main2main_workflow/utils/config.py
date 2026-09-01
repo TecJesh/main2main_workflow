@@ -54,6 +54,14 @@ class TAConfig:
         False  # skip initial baseline LLVM build at workflow start
     )
     skip_ir_patch: bool = False  # skip entire IR patch phase (SKIP_IR_PATCH)
+    skip_llvm20compat: bool = False  # skip LLVM20Compat FileCheck guard
+
+    # ── LLVM20Compat FileCheck guard ───────────────────────────────────────
+    # OpCompat/*.mlir FileCheck tests validating that the patched LLVM
+    # prints LLVM-20-compatible IR.  On failure the loop adjusts the
+    # LLVM patch and rebuilds LLVM + TA — each iteration costs an LLVM
+    # rebuild (~hours), so the retry cap is deliberately small.
+    llvm20compat_max_retries: int = 3
 
     # ── Git / Branch ──────────────────────────────────────────────────────
     base_branch: str = "upstream_sync"
@@ -139,6 +147,8 @@ class TAConfig:
             skip_llvm_rebuild=_env_bool("SKIP_LLVM_REBUILD", False),
             skip_baseline_llvm=_env_bool("SKIP_BASELINE_LLVM", False),
             skip_ir_patch=_env_bool("SKIP_IR_PATCH", False),
+            skip_llvm20compat=_env_bool("SKIP_LLVM20COMPAT", False),
+            llvm20compat_max_retries=_env_int("TA_LLVM20COMPAT_MAX_RETRIES", 3),
             base_branch=os.getenv("TA_BASE_BRANCH", "upstream_sync"),
             work_branch_base=os.getenv("TA_WORK_BRANCH_BASE", "upstream-ascend"),
             progressive_merge=_env_bool("TA_PROGRESSIVE_MERGE", True),
