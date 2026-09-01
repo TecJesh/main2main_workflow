@@ -857,6 +857,20 @@ The active mode is: {mode}
         * Missing includes or forward declarations
       Fix the relevant section of the patch while keeping all OTHER
       sections intact — do NOT drop OPs that were correctly patched.
+    - **filecheck failure**: the patch applied and LLVM + Triton-Ascend
+      built successfully, but the LLVM20Compat FileCheck guard failed —
+      the printed IR text does not match the LLVM 20 baseline.  Read
+      the failing test file(s) and FileCheck error output to find which
+      OP prints LLVM 23-only fields/syntax, then fix the corresponding
+      section of the patch (print elision, backward-compatible
+      printer/parser, restoring removed ops such as ToMemrefOp, etc.).
+      The compatibility table in
+      {ascend_path}/third_party/ascend/unittest/Conversion/LLVM20Compat/README.md
+      lists all 21 patched ops with the expected LLVM 20 text, the
+      actual LLVM 23 print, and the intended approach — match it.
+      Also consult {reference_dir}/05-ir-patch-generation-guide.md.
+      Keep all OTHER sections intact — do NOT drop OPs that were
+      correctly patched.
 
 
   ═══ PATCH SUPPLEMENT (adjust_mode=supplement) ═══════════════════════════

@@ -42,6 +42,8 @@ from TA_main2main_workflow.utils import (
     IR_OPS_REPORT_FILE,
     IR_CHANGES_REPORT_FILE,
     IR_DIAGNOSIS_FILE,
+    LLVM20COMPAT_LOG_FILE,
+    LLVM20COMPAT_RESULT_FILE,
     _ASCEND_BASELINE_LLVM_HASH,
 )
 from TA_main2main_workflow.utils.llvm_hash import read_llvm_hash
@@ -53,6 +55,17 @@ _REF = str(Path(__file__).parent.parent / "reference")
 _MAX_LLVM_RETRIES = 10
 # Maximum retries for applying existing patch
 _MAX_PATCH_APPLY_RETRIES = 3
+
+# ── LLVM20Compat FileCheck guard ─────────────────────────────────────────
+# Test files validate that the patched LLVM prints LLVM-20-compatible IR
+# text (triton-opt %s | FileCheck %s).  The lit batch runner would need
+# -DTRITON_BUILD_UT=ON (disabled in workflow builds), so the guard runs
+# each file directly.
+_LLVM20COMPAT_TEST_DIR = (
+    "third_party/ascend/unittest/Conversion/LLVM20Compat/OpCompat"
+)
+_FILECHECK_OPTS = {"FILECHECK_OPTS": "--enable-var-scope"}
+_GUARD_TIMEOUT = 120  # per-file seconds
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -155,7 +168,11 @@ def per_step_ir_patch(
 
     if config.skip_ir_patch:
         log.header(f"IR Patch Pipeline — {step_id} — SKIPPED (SKIP_IR_PATCH=true)")
-        return ctx.copy_with(build_passed=True, test_passed=True)
+        # The LLVM20Compat guard still runs — the hard gate in flow.py
+        # checks llvm20compat_passed regardless of the IR patch skip.
+        return llvm20compat_and_fix(
+            ctx.copy_with(build_passed=True, test_passed=True), config, step
+        )
 
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
     step_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +191,16 @@ def per_step_ir_patch(
     build_ctx = _do_ta_build_with_fix(ctx, config, step)
     if not build_ctx.build_passed:
         log.error(f"TA build failed for {step_id}")
+        return build_ctx
+
+    # ── Phase 2.5: LLVM20Compat FileCheck guard ────────────────────
+    # Validate the LLVM patch prints LLVM-20-compatible IR before
+    # entering the pytest flow.  On failure the guard adjusts the LLVM
+    # patch and rebuilds LLVM + TA (see llvm20compat_and_fix).
+    log.section(f"LLVM20Compat FileCheck Guard — {step_id}")
+    build_ctx = llvm20compat_and_fix(build_ctx, config, step)
+    if not build_ctx.llvm20compat_passed:
+        log.error(f"LLVM20Compat FileCheck guard failed for {step_id}")
         return build_ctx
 
     # ── Phase 3: Test + IR supplement loop ─────────────────────────
@@ -370,6 +397,340 @@ def _do_test_and_fix_with_ir_retry(
                 return ctx
 
     return ctx.copy_with(test_passed=False, pytest_passed=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LLVM20Compat FileCheck guard (all merge modes, every step)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def run_llvm20compat_guard(
+    ctx: WorkflowContext, config: TAConfig
+) -> WorkflowContext:
+    """Run the LLVM20Compat OpCompat FileCheck guard.
+
+    Validates that the patched LLVM prints LLVM-20-compatible IR text:
+    for every ``OpCompat/*.mlir`` test file, runs ``triton-opt <file>``
+    and pipes the printed IR into ``FileCheck <file>`` — mirroring each
+    file's RUN line.  lit is not used: its test suite is only added to
+    the build with ``-DTRITON_BUILD_UT=ON``, which workflow builds
+    disable.
+
+    Writes ``llvm20compat.log`` / ``llvm20compat_result.json`` into the
+    step dir.  Returns the context with ``llvm20compat_passed`` and
+    ``llvm20compat_failures`` set; on failure ``fix_errors`` carries the
+    guard log path.
+    """
+    ascend_path = Path(ctx.triton_ascend_path)
+    step = ctx.steps[ctx.current_step] if ctx.steps else {"id": "step-0"}
+    step_dir = WORKSPACE_DIR / STEPS_DIR / step["id"]
+    step_dir.mkdir(parents=True, exist_ok=True)
+
+    test_dir = ascend_path / _LLVM20COMPAT_TEST_DIR
+    if not test_dir.is_dir():
+        # Older TA branches may not carry the guard tests yet — absence
+        # must not fail the whole sync.
+        log.warning(
+            f"LLVM20Compat test dir missing: {test_dir} — "
+            "treating guard as passed"
+        )
+        return ctx.copy_with(llvm20compat_passed=True, llvm20compat_failures=[])
+
+    triton_opt = _find_triton_opt(ascend_path, config)
+    filecheck = _find_filecheck(config)
+    if triton_opt is None or filecheck is None:
+        log.error(
+            "LLVM20Compat guard cannot run — missing tools: "
+            f"triton-opt={triton_opt}, FileCheck={filecheck}"
+        )
+        return ctx.copy_with(llvm20compat_passed=False, llvm20compat_failures=[])
+
+    log.section(f"LLVM20Compat FileCheck Guard — {test_dir}")
+    log.key_value("triton-opt", str(triton_opt))
+    log.key_value("FileCheck", str(filecheck))
+
+    results: list[dict] = []
+    failures: list[str] = []
+    log_path = step_dir / LLVM20COMPAT_LOG_FILE
+    with open(log_path, "w", encoding="utf-8") as lf:
+        for f in sorted(test_dir.glob("*.mlir")):
+            rel = str(f.relative_to(ascend_path))
+            ok, detail = _run_one_filecheck(triton_opt, filecheck, f, lf)
+            results.append({"file": rel, "passed": ok, "detail": detail})
+            if not ok:
+                failures.append(rel)
+            log.status(ok, f"{rel}" if ok else f"{rel}: {detail[:120]}")
+
+    passed = not failures
+    (step_dir / LLVM20COMPAT_RESULT_FILE).write_text(
+        json.dumps(
+            {
+                "passed": passed,
+                "total": len(results),
+                "failed": failures,
+                "results": results,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    log.status(
+        passed,
+        f"LLVM20Compat FileCheck: "
+        f"{len(results) - len(failures)}/{len(results)} passed",
+    )
+    if not passed:
+        log.error(f"Failed files: {', '.join(failures[:10])}")
+        if len(failures) > 10:
+            log.error(f"  ... and {len(failures) - 10} more")
+    return ctx.copy_with(
+        llvm20compat_passed=passed,
+        llvm20compat_failures=failures,
+        fix_errors=[str(log_path)] if not passed else ctx.fix_errors,
+    )
+
+
+def llvm20compat_and_fix(
+    ctx: WorkflowContext, config: TAConfig, step: dict
+) -> WorkflowContext:
+    """LLVM20Compat FileCheck guard with an LLVM patch fix loop.
+
+    Runs the guard; on failure the AI adjusts the LLVM patch from the
+    FileCheck errors, then the flow re-applies the patch, rebuilds LLVM,
+    rebuilds Triton-Ascend, and re-runs the guard — until the guard
+    passes or ``llvm20compat_max_retries`` fix iterations are exhausted.
+    Each iteration costs an LLVM rebuild, so the retry cap is small.
+
+    Returns the context with ``llvm20compat_passed`` set.  The caller
+    treats False as a hard step failure.
+    """
+    if config.skip_llvm20compat:
+        log.header(
+            "LLVM20Compat FileCheck Guard — SKIPPED (SKIP_LLVM20COMPAT=true)"
+        )
+        return ctx.copy_with(llvm20compat_passed=True, llvm20compat_failures=[])
+
+    ascend_path = Path(ctx.triton_ascend_path)
+    max_iter = config.llvm20compat_max_retries
+    for it in range(max_iter + 1):
+        if it > 0:
+            log.header(f"LLVM20Compat Fix Iteration {it}/{max_iter}")
+        ctx = run_llvm20compat_guard(ctx, config)
+        if ctx.llvm20compat_passed:
+            return ctx
+        if not ctx.llvm20compat_failures:
+            # Guard infrastructure error (missing tools etc.) — a patch
+            # fix + LLVM rebuild cannot help; fail immediately.
+            log.error(
+                "LLVM20Compat guard failed without per-file failures "
+                "(missing tools?) — skipping the patch fix loop"
+            )
+            break
+        if it >= max_iter:
+            log.error(
+                f"LLVM20Compat FileCheck guard failed after {max_iter} "
+                "fix iteration(s)"
+            )
+            break
+
+        log.info("FileCheck failures detected — AI adjusts the LLVM patch")
+        _ai_fix_patch_for_filecheck(ctx, config, step)
+
+        target_hash = _get_current_llvm_hash(ascend_path)
+        if config.skip_llvm_rebuild:
+            log.status(
+                True,
+                "SKIP_LLVM_REBUILD set — skipping LLVM rebuild after patch fix",
+            )
+        else:
+            try:
+                _clean_checkout_apply_patch(
+                    config.llvm_project,
+                    ascend_path,
+                    target_hash,
+                    reason=f"LLVM20Compat fix iter {it + 1}",
+                )
+                _do_llvm_build(
+                    config.llvm_project, config.llvm_install, target_hash
+                )
+            except Exception as e:
+                log.error(f"LLVM rebuild after LLVM20Compat patch fix failed: {e}")
+                break
+        ctx = _do_ta_build_with_fix(ctx, config, step)
+        if not ctx.build_passed:
+            log.error("TA rebuild after LLVM20Compat patch fix failed")
+            break
+
+    return ctx.copy_with(llvm20compat_passed=False)
+
+
+def _ai_fix_patch_for_filecheck(
+    ctx: WorkflowContext, config: TAConfig, step: dict
+) -> None:
+    """AI adjusts the LLVM patch from LLVM20Compat FileCheck failures.
+
+    Mirrors ``_ai_adjust_patch_for_failure`` but for guard failures:
+    the patch applied and LLVM + TA built, yet the printed IR text does
+    not match the LLVM 20 baseline.  The AI is given the failing test
+    files and the guard log and told to fix the corresponding patch
+    sections (mode ``ir_patch_fix``, patch_error_type ``filecheck``).
+    """
+    step_id = step["id"]
+    ir_dir = WORKSPACE_DIR / STEPS_DIR / step_id / IR_ANALYSIS_DIR
+    ir_dir.mkdir(parents=True, exist_ok=True)
+
+    ascend_path = Path(ctx.triton_ascend_path)
+    patch_dir = ascend_path / "third_party/ascend/patch"
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch"))
+        if patch_dir.exists()
+        else []
+    )
+    ascend_patch_file = str(patch_files[0]) if patch_files else ""
+    target_llvm_hash = _get_current_llvm_hash(ascend_path)
+
+    detail_parts = [f"Failing test files ({len(ctx.llvm20compat_failures)}):"]
+    detail_parts += ctx.llvm20compat_failures[:30]
+    log_path = WORKSPACE_DIR / STEPS_DIR / step_id / LLVM20COMPAT_LOG_FILE
+    if log_path.exists():
+        try:
+            tail = log_path.read_text(
+                encoding="utf-8", errors="replace"
+            )[-6000:]
+            detail_parts.append("---- llvm20compat.log tail ----")
+            detail_parts.append(tail)
+        except OSError:
+            pass
+    error_msg = "\n".join(detail_parts)[:5000]
+
+    run_opencode_adapter(
+        _ir_ai_base(
+            ctx,
+            config,
+            step_id,
+            ir_dir,
+            "ir_patch_fix",
+            error_logs=json.dumps({"error": error_msg}, ensure_ascii=False),
+            extra={
+                "baseline_llvm_hash": _ASCEND_BASELINE_LLVM_HASH,
+                "target_llvm_hash": target_llvm_hash,
+                "ascend_patch_file": ascend_patch_file,
+                "adjust_mode": "filecheck_failure",
+                "patch_error_type": "filecheck",
+                "patch_error_msg": error_msg[:2000],
+            },
+        )
+    )
+
+
+def _run_one_filecheck(
+    triton_opt: Path, filecheck: Path, test_file: Path, log_fh
+) -> tuple[bool, str]:
+    """Run ``triton-opt <file> | FileCheck <file>`` for one test file.
+
+    Mirrors each .mlir file's RUN line; ``FILECHECK_OPTS`` carries
+    ``--enable-var-scope`` exactly like the lit config.  Returns
+    (passed, detail) where detail is a short error description.
+    """
+    log_fh.write(f"===== {test_file.name} =====\n")
+    log_fh.flush()
+    try:
+        opt = subprocess.run(
+            [str(triton_opt), str(test_file)],
+            capture_output=True,
+            text=True,
+            timeout=_GUARD_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        detail = f"triton-opt timed out after {_GUARD_TIMEOUT}s"
+        log_fh.write(f"[triton-opt] {detail}\n")
+        return False, detail
+    if opt.returncode != 0:
+        detail = (opt.stderr or opt.stdout or "").strip()[-400:]
+        log_fh.write(
+            f"[triton-opt exit {opt.returncode}]\n{opt.stdout}\n{opt.stderr}\n"
+        )
+        return False, f"triton-opt failed: {detail}"
+
+    log_fh.write(opt.stdout)
+    env = dict(os.environ, **_FILECHECK_OPTS)
+    try:
+        fc = subprocess.run(
+            [str(filecheck), str(test_file)],
+            input=opt.stdout,
+            capture_output=True,
+            text=True,
+            timeout=_GUARD_TIMEOUT,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        detail = f"FileCheck timed out after {_GUARD_TIMEOUT}s"
+        log_fh.write(f"[FileCheck] {detail}\n")
+        return False, detail
+    if fc.returncode != 0:
+        detail = (fc.stderr or fc.stdout or "").strip()[-400:]
+        log_fh.write(
+            f"[FileCheck exit {fc.returncode}]\n{fc.stdout}\n{fc.stderr}\n"
+        )
+        return False, f"FileCheck failed: {detail}"
+    return True, ""
+
+
+def _find_triton_opt(ascend_path: Path, config: TAConfig) -> Path | None:
+    """Locate the built triton-opt binary.
+
+    ``setup_ascend.py`` copies the CMake-built ``bin/triton-opt`` into
+    the build extdir (``build/lib.*/triton/_C/triton-opt``) and installs
+    it into the Python environment's ``triton/_C/`` package.  Tries the
+    build tree first (newest), then the installed package via the same
+    python used for the build, then PATH.
+    """
+    cands = sorted(
+        ascend_path.glob("build/lib.*/triton/_C/triton-opt"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if cands:
+        return cands[0]
+
+    python_exe = config.python_exe or os.getenv("PYTHON", "python3")
+    try:
+        r = subprocess.run(
+            [
+                python_exe,
+                "-c",
+                "import triton._C, os; "
+                "print(os.path.dirname(triton._C.__file__))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        lines = [ln for ln in r.stdout.strip().splitlines() if ln.strip()]
+        if lines:
+            p = Path(lines[-1]) / "triton-opt"
+            if p.is_file():
+                return p
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    found = shutil.which("triton-opt")
+    return Path(found) if found else None
+
+
+def _find_filecheck(config: TAConfig) -> Path | None:
+    """Locate FileCheck — LLVM builds copy it into the LLVM install."""
+    if config.llvm_install.exists():
+        p = config.llvm_install / "bin" / "FileCheck"
+        if p.is_file():
+            return p
+    p = WORKSPACE_DIR / "llvm-build" / "bin" / "FileCheck"
+    if p.is_file():
+        return p
+    found = shutil.which("FileCheck")
+    return Path(found) if found else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

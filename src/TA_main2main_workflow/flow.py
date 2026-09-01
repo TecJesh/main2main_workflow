@@ -58,6 +58,7 @@ from TA_main2main_workflow.pipeline.finalize import finalize
 from TA_main2main_workflow.pipeline.ir_patch import (
     build_baseline_llvm,
     per_step_ir_patch,
+    llvm20compat_and_fix,
 )
 
 log = get_logger(__name__)
@@ -204,6 +205,15 @@ class TA_Main2MainFlow:
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
 
+                # LLVM20Compat FileCheck guard (before pytest)
+                log.section(f"LLVM20Compat FileCheck Guard — {step_id}")
+                with timed("llvm20compat"):
+                    ctx = llvm20compat_and_fix(ctx, self.config, step)
+                if not ctx.llvm20compat_passed:
+                    log.error(f"LLVM20Compat FileCheck guard failed for {step_id}")
+                    ctx = ctx.copy_with(final_status=UpgradeFailed)
+                    return UpgradeFailed
+
                 # Standard test + fix
                 log.section(f"Test & Fix — {step_id}")
                 with timed("test"):
@@ -212,6 +222,16 @@ class TA_Main2MainFlow:
                     log.error(f"Tests failed for {step_id}")
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
+
+            # ── Step D.5: LLVM20Compat guard hard gate (IR path) ──
+            # The IR patch pipeline runs the guard internally
+            # (per_step_ir_patch, Phase 2.5); the standard path checked
+            # it right after the guard above and returned on failure.
+            # A False value here fails the step.
+            if not ctx.llvm20compat_passed:
+                log.error(f"LLVM20Compat FileCheck guard failed for {step_id}")
+                ctx = ctx.copy_with(final_status=UpgradeFailed)
+                return UpgradeFailed
 
             # ── Step E: Restore workspace, then commit ──────────
             # Drop the build-applied patch content (parent + submodule)

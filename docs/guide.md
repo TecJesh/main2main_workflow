@@ -68,6 +68,8 @@ Phase Push:          (可选) push + gh pr create
 | `SKIP_E2E_TEST` | 跳过测试 | false |
 | `SKIP_LLVM_REBUILD` | 跳过 LLVM 重编译 | false |
 | `SKIP_IR_PATCH` | 跳过 IR 补丁阶段 | false |
+| `SKIP_LLVM20COMPAT` | 跳过 LLVM20Compat FileCheck 守卫 | false |
+| `TA_LLVM20COMPAT_MAX_RETRIES` | FileCheck 守卫失败时调 patch + 重建 LLVM/TA 的重试上限 | 3 |
 | `PUSH_TO_GITHUB` | 成功后创建 PR | false |
 | `GITHUB_REPO` | PR 目标仓库 owner/name | triton-lang/triton-ascend |
 | `GH_TOKEN` | GitHub token (PR 创建) | -- |
@@ -176,6 +178,27 @@ Round 1-N: AI fix → validate_fix → build
 4. 测试失败时 AI 分类：IR 问题则重新生成补丁（最多 3 次），代码问题则 AI 修复
 
 **负责模块**: `pipeline/ir_patch.py`
+
+#### Step C.5: LLVM20Compat FileCheck 守卫 (每条路径、每个 step)
+
+编译 TA 成功后、pytest 用例前运行。逐文件执行
+`third_party/ascend/unittest/Conversion/LLVM20Compat/OpCompat/*.mlir` 的
+RUN 行(`triton-opt %s | FileCheck %s`,env `FILECHECK_OPTS=--enable-var-scope`),
+验证打了 `llvm_patch_*.patch` 的 LLVM 打印出的 IR 文本与 LLVM 20 基线一致。
+不走 lit(需 `-DTRITON_BUILD_UT=ON`,workflow 构建关闭)。
+
+失败时进入修复循环(最多 `TA_LLVM20COMPAT_MAX_RETRIES`,默认 3):
+
+```
+FileCheck 失败 → AI 按报错调整 llvm_patch_*.patch (ir_patch_fix / patch_error_type=filecheck,
+                 参考 LLVM20Compat/README.md 的 21-op 对照表)
+→ 重新应用 patch → 编译 LLVM → 编译 TA → 重跑 FileCheck
+```
+
+全部通过才进入 Step D;重试耗尽则 step 失败(硬门禁)。
+`SKIP_LLVM20COMPAT=true` 跳过。产物:`llvm20compat.log` / `llvm20compat_result.json`。
+
+**负责模块**: `pipeline/ir_patch.py` (`run_llvm20compat_guard` / `llvm20compat_and_fix`)
 
 #### Step D: Test + Fix (测试修复循环)
 
