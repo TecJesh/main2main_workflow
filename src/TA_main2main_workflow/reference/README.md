@@ -58,6 +58,14 @@
 - [BC-breaking] 上游变更速查
 - IR 兼容性问题诊断流程
 
+### [06-deleted-frontend-op-strategy.md](./06-deleted-frontend-op-strategy.md)
+**上游删除前端 TritonOp（.td 定义）的处置策略**
+- 保留 Ascend 后端对应代码，不跟随删除
+- 合并前的 op 定义恢复进 `triton-ascend-*.patch`（fix-then-regenerate 机制）
+- 对应测试用例 skip 并写明原因（规范格式）
+- op 变更点写入 PR 描述 "Manual Adaptation Required"，标注需人工适配
+- 边界场景速查表（op 重命名、Ascend 特有 API 删除等不适用本策略）
+
 ---
 
 ## 核心发现摘要

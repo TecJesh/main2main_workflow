@@ -80,6 +80,11 @@ class WorkflowContext:
     # Files modified by the most recent successful ai_fix call (repo-root
     # relative).  Used to decide which touched files need patch regeneration.
     last_fix_modified_files: list[str] = field(default_factory=list)
+    # Files the AI restored from the pre-merge state under the deleted
+    # frontend op strategy (AI-reported op_restore_files.txt, repo-root
+    # relative).  Regenerated into the TA source patches and restored to
+    # HEAD — never committed directly.
+    last_fix_op_restore_files: list[str] = field(default_factory=list)
     test_fix_count: int = 0
     conflict_files_resolved: int = 0
     retry_count: int = 0

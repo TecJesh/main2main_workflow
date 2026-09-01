@@ -129,7 +129,12 @@ def ai_fix(
                 "modified_files.txt missing or empty — falling back to "
                 "git diff (patch-touched files filtered)"
             )
-        is_valid, reason = validate_fix(ascend_path, pre_files, ai_edits)
+        # Op restorations reported under the deleted-frontend-op
+        # strategy — these flow into the TA source patches instead of
+        # being committed directly.
+        op_restore = _read_ai_op_restore_files(step_dir)
+
+        is_valid, reason = validate_fix(ascend_path, pre_files, ai_edits, op_restore)
         if not is_valid:
             log.warning(f"Fix validation FAILED: {reason}")
             log.warning("Reverting invalid changes...")
@@ -138,27 +143,39 @@ def ai_fix(
             rejection_file.write_text(
                 f"VALIDATION REJECTED: {reason}\n"
                 f"Allowed paths: {', '.join(_ALLOWED_FIX_PREFIXES)}\n"
+                f"Op-restore paths: {', '.join(_OP_RESTORE_PREFIXES)}\n"
                 f"Modified files (AI edits): {ai_edits}\n",
                 encoding="utf-8",
             )
             _revert_illegal_changes(ascend_path)
-            return ctx.copy_with(last_fix_modified_files=[])
+            return ctx.copy_with(
+                last_fix_modified_files=[], last_fix_op_restore_files=[]
+            )
 
         log.ai_result(
             bool(ai_edits),
             ai_edits,
             (result.step_summary or "")[:500],
         )
+        if op_restore:
+            log.info(
+                f"Op-restore files ({len(op_restore)}): {', '.join(op_restore)}"
+            )
         # Expand the gitlink entry (real submodule) into the individual
         # AscendNPU-IR files the AI actually changed.
         sub_changed = _submodule_files_changed(
             ascend_path, pre_submodule_snapshot
         )
         expanded = _expand_modified_files(ai_edits, sub_changed)
-        return ctx.copy_with(last_fix_modified_files=expanded)
+        return ctx.copy_with(
+            last_fix_modified_files=expanded,
+            last_fix_op_restore_files=op_restore,
+        )
     except Exception as e:
         log.error(f"AI fix failed: {e}")
-        return ctx.copy_with(last_fix_modified_files=[])
+        return ctx.copy_with(
+            last_fix_modified_files=[], last_fix_op_restore_files=[]
+        )
 
 
 # Paths AI is allowed to modify when fixing test failures.
@@ -172,24 +189,59 @@ _ALLOWED_FIX_PREFIXES = [
     "setup_ascend.py",
 ]
 
+# Frontend TritonOp definition paths where the AI may RESTORE deleted
+# op code under the deleted-frontend-op strategy (upstream deleted a
+# TritonOp from its .td file).  Only files the AI lists in
+# op_restore_files.txt are allowed here — the workflow regenerates
+# those edits into the TA source patches and restores the sources, so
+# they are never committed directly.
+_OP_RESTORE_PREFIXES = [
+    "include/triton/Dialect/Triton/IR/",
+    "lib/Dialect/Triton/IR/",
+]
+
 
 def validate_fix(
     ascend_path: Path,
     pre_fix_files: set[str],
     modified_files: list[str],
+    op_restore_files: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Validate that AI fixes only touch allowed paths.
 
+    *op_restore_files*: files the AI reported as restored deleted
+    frontend op code (``op_restore_files.txt``).  They are allowed
+    ONLY under the op-restore prefixes — the workflow regenerates
+    them into the TA source patches instead of committing them.
+
     Returns (is_valid, reason).
     """
-    if not modified_files:
+    restore_set = set(op_restore_files or [])
+    if not modified_files and not restore_set:
         return False, "No files were modified"
 
     for f in modified_files:
+        if f in restore_set:
+            if not any(f.startswith(p) for p in _OP_RESTORE_PREFIXES):
+                return False, (
+                    f"Op-restore file '{f}' is outside the frontend op "
+                    f"paths. Allowed: {', '.join(_OP_RESTORE_PREFIXES)}"
+                )
+            continue
         if not any(f.startswith(p) for p in _ALLOWED_FIX_PREFIXES):
             return False, (
                 f"File '{f}' is outside allowed paths. "
                 f"Allowed: {', '.join(_ALLOWED_FIX_PREFIXES)}"
+            )
+
+    # Op-restore claims that were not reported as modified are
+    # suspicious too — reject them so patch regeneration never picks
+    # up stray paths.
+    for f in restore_set:
+        if not any(f.startswith(p) for p in _OP_RESTORE_PREFIXES):
+            return False, (
+                f"Op-restore file '{f}' is outside the frontend op paths. "
+                f"Allowed: {', '.join(_OP_RESTORE_PREFIXES)}"
             )
 
     return True, "all changes within allowed paths"
@@ -211,6 +263,25 @@ def _read_ai_modified_files(step_dir: Path) -> list[str]:
     back to the git-diff based list in that case.
     """
     report = step_dir / "modified_files.txt"
+    if not report.exists():
+        return []
+    try:
+        return [
+            ln.strip()
+            for ln in report.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    except Exception:
+        return []
+
+
+def _read_ai_op_restore_files(step_dir: Path) -> list[str]:
+    """AI-reported restored files from ``op_restore_files.txt``.
+
+    Written only when the deleted-frontend-op strategy was applied.
+    Returns [] when the file is missing or empty.
+    """
+    report = step_dir / "op_restore_files.txt"
     if not report.exists():
         return []
     try:

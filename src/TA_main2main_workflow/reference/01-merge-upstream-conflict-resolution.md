@@ -277,7 +277,8 @@ git log --oneline <upstream-3.2-ref>..<upstream-3.5-ref> -- <file>
 1. **不要直接 git merge 上游 main** — 上游 main 可能包含不稳定的 API
 2. **不要删除上游的测试用例** — 用 `pytest.mark.skip` 标记暂时不支持的
 3. **不要随意回退上游变更** — 仅在 Ascend 后端无法适配时使用 revert
-4. **不要跳过中间版本** — 3.2→3.5 直接跳会导致大量冲突难以定位
+4. **不要跟随上游删除前端 op 定义** — 上游删除 `.td` 中定义的 TritonOp、而 Ascend 后端仍依赖时，按 [06-deleted-frontend-op-strategy.md](./06-deleted-frontend-op-strategy.md) 处置（保留后端 + op 恢复进 TA source patch + skip 测试 + PR 记录待人工适配）
+5. **不要跳过中间版本** — 3.2→3.5 直接跳会导致大量冲突难以定位
 
 ### 5.3 冲突预防
 

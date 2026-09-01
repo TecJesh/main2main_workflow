@@ -464,6 +464,17 @@ import pytest
 @pytest.mark.xfail(reason="known issue: output precision mismatch")
 ```
 
+上游删除前端 op（`.td` 定义）导致测试失败的场景，skip reason 必须写明 op 名与
+"后端经 TA source patch 保留、待人工适配"，完整处置流程见
+[06-deleted-frontend-op-strategy.md](./06-deleted-frontend-op-strategy.md) §2.4：
+
+```python
+@pytest.mark.skip(
+    reason="upstream removed <OpName>; Ascend backend keeps it "
+           "via TA source patch — manual adaptation required"
+)
+```
+
 ### 5.3 测试参数化
 
 ```python

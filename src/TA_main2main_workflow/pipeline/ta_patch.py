@@ -14,8 +14,11 @@ the code line positions drift, so this module:
 3. Regenerates patch content from working-tree diffs after AI fixes
    (fix-then-regenerate: the AI fixes source code, the fix flows back
    into the ``.patch`` file, and the touched source is restored).
-   The regenerated patch is only validated with ``git apply --check``
-   here — the build applies it itself, and the patch-file edit is
+   AscendNPU-IR fixes flow into the npuir patch; restored frontend op
+   files (the deleted-frontend-op strategy) and fixes on parent
+   patch-touched files flow into ``triton-ascend-*.patch``.  The
+   regenerated patches are only validated with ``git apply --check``
+   here — the build applies them itself, and the patch-file edits are
    committed only after build/test passes.
 4. Restores touched source files to HEAD so commits stay clean.
 
@@ -373,30 +376,146 @@ def regenerate_npuir_patch(
     return ctx.copy_with(ta_patch_submodule_files=to_restore)
 
 
+def regenerate_source_patch(
+    ascend_path: Path,
+    patch_files: list[Path],
+    ctx: WorkflowContext,
+    parent_files: list[str],
+) -> WorkflowContext:
+    """fix-then-regenerate for parent-repo TA source patches.
+
+    Mirrors ``regenerate_npuir_patch`` for the parent repository:
+    restored frontend op files (the deleted-frontend-op strategy) and
+    AI fixes on files the parent patches already touch are regenerated
+    into the matching ``triton-ascend-*.patch``, the touched sources
+    are restored to HEAD, and the updated patches are validated with
+    ``git apply --check``.  The workflow NEVER applies the patches
+    itself — the next build (setup.py) does, and the patch-file edits
+    stay uncommitted until the build/tests pass.
+
+    Returns the context with ``ta_patch_touched_files`` extended by
+    any newly covered files (so later restore/exclusion covers them).
+    On validation failure the patch-file edits are reverted, the tree
+    is restored, and the context is returned unchanged.
+    """
+    if not patch_files or not parent_files:
+        return ctx
+
+    parent_patches = [
+        p
+        for p in patch_files
+        if not p.name.startswith(_NPUIR_PATCH_PREFIX)
+        and not p.name.startswith(_LLVM_PATCH_PREFIX)
+    ]
+    if not parent_patches:
+        log.warning(
+            "AI restored frontend op files but no parent source patch is "
+            "managed — the restored code cannot be preserved via a patch"
+        )
+        return ctx
+
+    log.section("Regenerate TA Source Patch From AI Fixes")
+    sections: dict[Path, dict[str, str]] = {}
+    untracked_new: list[str] = []
+    for f in parent_files:
+        patch_file = _pick_parent_patch(parent_patches, f)
+        if patch_file is None:
+            continue
+        diff = run_git_no_check(ascend_path, "diff", "HEAD", "--", f).stdout
+        if not diff.strip():
+            # Likely a brand-new (untracked) file: intent-to-add so the
+            # diff shows it as a new-file section.
+            run_git_no_check(ascend_path, "add", "-N", "--", f)
+            diff = run_git_no_check(ascend_path, "diff", "HEAD", "--", f).stdout
+            if diff.strip():
+                untracked_new.append(f)
+        if diff.strip():
+            sections.setdefault(patch_file, {})[f] = diff
+
+    for patch_file, secs in sections.items():
+        _replace_patch_sections(patch_file, secs)
+        log.info(
+            f"Regenerated {patch_file.name} from {len(secs)} parent file(s)"
+        )
+
+    # Restore EVERY file the parent patches touch — not just the hits —
+    # otherwise sections for already-patched files fail the check
+    # spuriously.  The next build applies the updated patches.
+    to_restore = list(dict.fromkeys(ctx.ta_patch_touched_files + parent_files))
+    restore_workspace(ascend_path, to_restore, [])
+    if untracked_new:
+        # New-file sections cannot apply while the untracked file still
+        # exists — drop the file and its intent-to-add index entry so
+        # `git apply` can create it fresh from the patch.
+        for f in untracked_new:
+            (ascend_path / f).unlink(missing_ok=True)
+        run_git_no_check(ascend_path, "reset", "--", *untracked_new)
+
+    # Validation gate: a patch that cannot apply here would fail the
+    # build's own apply too, so fail fast with the real error output.
+    check_failed: list[str] = []
+    for patch_file in sections:
+        ok, err = _check_applies_with_error(ascend_path, patch_file)
+        if not ok:
+            check_failed.append(f"{patch_file.name}:\n{err}")
+    if check_failed:
+        log.error(
+            "TA source patch does not apply cleanly after regeneration — "
+            "discarding the fix"
+        )
+        for detail in check_failed:
+            log.error(f"git apply --check failure:\n{detail}")
+        revert_patch_files(ascend_path, list(sections))
+        restore_workspace(ascend_path, to_restore, [])
+        return ctx
+    log.status(
+        True,
+        f"Regenerated TA source patch section(s) — "
+        "the next build will apply them",
+    )
+    # Extend the touched list so the step-end restore and commit
+    # exclusion also cover files the patches did not cover before.
+    return ctx.copy_with(ta_patch_touched_files=to_restore)
+
+
 def regen_ai_fixes(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
-    """Flow the latest AI fixes on AscendNPU-IR files into the npuir patch.
+    """Flow the latest AI fixes into the managed patches.
 
-    Per the project's scheme, npu-ir modifications live in
-    ``npuir_adapter_to_llvm_23.patch``; fixes anywhere else are
-    committed normally.  No-op when the last ai_fix did not modify an
-    AscendNPU-IR file.  Must run BEFORE the next build — setup.py
-    checks those files out to HEAD before applying the patch, which
-    wipes fixes left in the source tree.
+    Per the project's scheme, AscendNPU-IR fixes live in
+    ``npuir_adapter_to_llvm_23.patch``, and restored frontend op files
+    (the deleted-frontend-op strategy) live in ``triton-ascend-*.patch``;
+    fixes anywhere else are committed normally.  No-op when the last
+    ai_fix modified no patch-relevant file.  Must run BEFORE the next
+    build — setup.py checks the touched files out to HEAD before
+    applying the patches, which wipes fixes left in the source tree.
 
-    The patch-file edit stays in the working tree (scratchpad) until
-    the build/tests pass; the workflow never applies the patch itself
-    and never commits it from here — ``commit_fixes`` does that with
+    The patch-file edits stay in the working tree (scratchpad) until
+    the build/tests pass; the workflow never applies the patches itself
+    and never commits them from here — ``commit_fixes`` does that with
     the regular fix-commit rules.
 
-    Returns the context with the npuir touched list extended when the
-    AI fixed submodule files the npuir patch did not cover before.
+    Returns the context with the touched lists extended when the AI
+    fixed files the patches did not cover before.
     """
-    if not ctx.last_fix_modified_files:
+    if not ctx.last_fix_modified_files and not ctx.last_fix_op_restore_files:
         return ctx
     ascend_path = Path(ctx.triton_ascend_path)
     patch_files = resolve_source_patches(ascend_path, config)
     if not patch_files:
         return ctx
+
+    # ── Parent-repo source patch regeneration ──────────────────────────
+    # Op restorations always regenerate; AI edits on files the parent
+    # patches already touch do too (setup.py wipes them otherwise).
+    parent_hits = list(ctx.last_fix_op_restore_files)
+    touched_set = set(ctx.ta_patch_touched_files)
+    for f in ctx.last_fix_modified_files:
+        if f in touched_set and f not in parent_hits:
+            parent_hits.append(f)
+    if parent_hits:
+        ctx = regenerate_source_patch(ascend_path, patch_files, ctx, parent_hits)
+
+    # ── npuir patch regeneration (submodule files) ─────────────────────
     return regenerate_npuir_patch(
         ascend_path, patch_files, ctx, ctx.last_fix_modified_files
     )
@@ -469,19 +588,23 @@ def _restore_from_head(repo: Path, paths: list[str], label: str) -> None:
     run_git_no_check(repo, "reset", "-q", "--", *paths)
 
 
-def dirty_npuir_patch_paths(ascend_path: Path) -> list[str]:
-    """Repo-root-relative npuir patch files with uncommitted edits.
+def dirty_source_patch_paths(ascend_path: Path) -> list[str]:
+    """Repo-root-relative managed source patch files with uncommitted edits.
 
-    Used by ``commit_fixes`` to make sure the accumulated AI fixes
-    (which live only in the regenerated npuir patch) land in the fix
-    commit even when the AI's commit whitelist missed them.
+    All ``third_party/ascend/patch/*.patch`` files except the LLVM
+    patches (those are managed exclusively by the IR patch flow and are
+    never regenerated here).  Used by ``commit_fixes`` to make sure the
+    accumulated AI fixes (which live only in the regenerated npuir /
+    triton-ascend patches) land in the fix commit even when the AI's
+    commit whitelist missed them.
     """
     changed = _diff_names(ascend_path)
     return sorted(
         f
         for f in changed
         if f.startswith(_TA_PATCH_DIR + "/")
-        and Path(f).name.startswith(_NPUIR_PATCH_PREFIX)
+        and Path(f).name.endswith(".patch")
+        and not Path(f).name.startswith(_LLVM_PATCH_PREFIX)
         and (ascend_path / f).is_file()
     )
 
@@ -605,6 +728,22 @@ def _parse_patch_paths(patch_file: Path) -> list[str]:
             if m.group(1) != "/dev/null":
                 paths.append(m.group(1))
     return paths
+
+
+def _pick_parent_patch(parent_patches: list[Path], path: str) -> Path | None:
+    """Choose the parent patch that should carry *path*'s section.
+
+    Prefers the patch that already has a section for the path; otherwise
+    the main patch (a non-dev ``triton-ascend-*.patch``); otherwise the
+    first candidate.
+    """
+    for p in parent_patches:
+        if path in _parse_patch_paths(p):
+            return p
+    for p in parent_patches:
+        if "-dev" not in p.name:
+            return p
+    return parent_patches[0] if parent_patches else None
 
 
 def _replace_patch_sections(patch_file: Path, sections: dict[str, str]) -> None:
