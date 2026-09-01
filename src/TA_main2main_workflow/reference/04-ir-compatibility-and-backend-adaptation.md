@@ -342,6 +342,11 @@ LLVM_MAJOR_VERSION_20_COMPATIBLE=ON  →  启用:
 
 ## 7. Ascend 特有 API 的移除与适配
 
+> 本节针对"上游移除了 Ascend 特有 API/私有参数"的场景。若是**上游删除前端
+> `.td` 中定义的 TritonOp、而 Ascend 后端仍依赖该 op**,处置策略不同(保留后端 +
+> op 恢复进 TA source patch + skip 测试 + PR 记录待人工适配),见
+> [06-deleted-frontend-op-strategy.md](./06-deleted-frontend-op-strategy.md)。
+
 ### 7.1 已移除的 Ascend 私有参数
 
 | 参数/功能 | 所在接口 | 移除原因 | 相关提交 |

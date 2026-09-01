@@ -238,7 +238,10 @@ config 作为第二个参数，不再散落各处的 `os.getenv()` 调用。
 ### 修复评价三层防护
 
 1. **AI 自检** (prompt.md)：提交前自查文件路径和修复根因
-2. **代码硬校验** (validate_fix)：检查修改文件路径，不通过则 revert + 反馈
+2. **代码硬校验** (validate_fix)：检查修改文件路径，不通过则 revert + 反馈；
+   上游删除前端 op 的恢复文件经 `op_restore_files.txt` 报告，仅允许
+   `include/triton/Dialect/Triton/IR/` 与 `lib/Dialect/Triton/IR/`（回流 TA
+   source patch，不直接提交）
 3. **实际验证**：编译/测试结果
 
 详见 [fix-validation-flow.md](fix-validation-flow.md)
@@ -252,6 +255,27 @@ merge → (无冲突) → build → test → pass → commit → DONE
 
 ### 有冲突需修复
 merge → conflict → AI resolve → build fail → AI fix → build pass → test fail → AI fix → test pass → commit → DONE
+
+### 上游删除前端 TritonOp（.td 定义）
+
+上游合并代码删除了 `.td` 中定义的 TritonOp（如 `TritonOps.td`），而 Ascend 后端
+仍在使用该 op 时，**不跟随删除**：
+
+1. **保留后端代码** — `third_party/ascend/`、`lib/Target/Ascend/` 中对该 op 的
+   处理逻辑不删
+2. **恢复合并前的 op 定义** — AI 从 merge commit 的第一父提交
+   （`git show HEAD^1:<path>`）取出被删 op，恢复到 `.td`/Ops.cpp 源码中，并把
+   文件清单写入 `op_restore_files.txt`；workflow 机械回流进
+   `third_party/ascend/patch/triton-ascend-*.patch`（fix-then-regenerate，与
+   npuir 回流同构），还原源码、`git apply --check` 验证——构建时 setup.py 自动
+   apply patch，后端因此编译通过
+3. **skip 对应测试用例** — 加 `pytest.mark.skip`，reason 写明 op 名 +
+   "后端经 TA source patch 保留、待人工适配"，不删除测试
+4. **PR 描述体现 op 变更点** — report mode 收集 step_summary 中的
+   "Manual adaptation required" 条目，进入 PR 描述，后续由人工适配（移除
+   patch 恢复 section、适配后端、取消 skip）
+
+完整策略见 `reference/06-deleted-frontend-op-strategy.md`。
 
 ### LLVM 版本变更
 merge → IR Patch Phase 1: build LLVM → fix compile errors → Phase 2: OP 分析 → 生成补丁 → 编译 LLVM → build TA → pytest → commit → DONE
