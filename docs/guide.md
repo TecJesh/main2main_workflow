@@ -204,6 +204,12 @@ FileCheck 失败 → AI 按报错调整 llvm_patch_*.patch
 全部通过才进入 Step D;重试耗尽则 step 失败(硬门禁)。
 `SKIP_LLVM20COMPAT=true` 跳过。产物:`llvm20compat.log` / `llvm20compat_result.json`。
 
+**工作区保证**:每次 `build_triton` 前,workflow 先把源码 patch 触碰的文件显式
+还原到 HEAD 并愈合 index(`checkout HEAD --` + `reset`,不依赖 index)——setup.py
+自身的 `git checkout --` 是从 index 还原的,index 被污染会还原出旧 patch 内容
+导致 "patch does not apply"。`ir_patch_fix` 模式的 AI 改动也有门禁:仅允许改
+`llvm_patch_*.patch`,其余新改动 HEAD-based 回退并删除新产生的未跟踪文件。
+
 **负责模块**: `pipeline/ir_patch.py` (`run_llvm20compat_guard` / `llvm20compat_and_fix`)
 
 #### Step D: Test + Fix (测试修复循环)

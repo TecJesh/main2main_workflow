@@ -32,7 +32,7 @@ from TA_main2main_workflow.utils.llvm_hash import read_llvm_hash
 from TA_main2main_workflow.pipeline.fix import ai_fix
 from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
 from TA_main2main_workflow.pipeline.commit import run_commit_plan, stage_changes
-from TA_main2main_workflow.pipeline.ta_patch import regen_ai_fixes
+from TA_main2main_workflow.pipeline.ta_patch import regen_ai_fixes, restore_workspace
 
 log = get_logger(__name__)
 
@@ -258,6 +258,22 @@ def build_triton(
     step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
     step_dir.mkdir(parents=True, exist_ok=True)
     build_log = step_dir / "build.log"
+
+    # ── Restore patch targets BEFORE every build ────────────────────────
+    # setup.py checks the source-patch targets out with `git checkout --`
+    # (INDEX-based) and then applies the patches.  A tree or index that
+    # still carries previous build-applied patch content makes that
+    # checkout restore the wrong base and the apply fails with
+    # "patch does not apply" on exactly the touched files.  Restore the
+    # touched files explicitly from HEAD (healing the index via reset)
+    # right before the build so the apply always starts from a clean
+    # base.  Idempotent — step-start adjust_patches / loop regen already
+    # restore the same files.
+    restore_workspace(
+        ascend_path,
+        ctx.ta_patch_touched_files,
+        ctx.ta_patch_submodule_files,
+    )
 
     log.section("Build Triton-Ascend")
     log.info(f"Running: {python_exe} setup_ascend.py install")
