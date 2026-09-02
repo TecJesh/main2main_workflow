@@ -609,6 +609,16 @@ def _ai_fix_patch_for_filecheck(
             pass
     error_msg = "\n".join(detail_parts)[:5000]
 
+    # ── Modification gate: the AI may change ONLY the LLVM patch ──────
+    # fix mode has validate_fix; this mode has no validation gate, and a
+    # stray AI edit to the source tree (or a polluted index) makes the
+    # next TA build apply the source patches onto a dirty base.  Snapshot
+    # the dirty set before the call and revert anything newly changed
+    # that is not the LLVM patch file — HEAD-based, healing the index.
+    patch_rel = str(patch_file.relative_to(ascend_path)) if patch_file else ""
+    pre_dirty = set(_worktree_dirty_names(ascend_path))
+    pre_untracked = set(_untracked_names(ascend_path))
+
     run_opencode_adapter(
         _ir_ai_base(
             ctx,
@@ -628,6 +638,24 @@ def _ai_fix_patch_for_filecheck(
         )
     )
 
+    illegal = sorted(
+        f
+        for f in set(_worktree_dirty_names(ascend_path)) - pre_dirty
+        if f != patch_rel
+    )
+    stray_untracked = sorted(
+        set(_untracked_names(ascend_path)) - pre_untracked
+    )
+    if illegal or stray_untracked:
+        log.warning(
+            "AI modified files outside the LLVM patch during guard fix — "
+            f"reverting: {illegal or '(none)'}, "
+            f"removing untracked: {stray_untracked or '(none)'}"
+        )
+        _revert_to_head(ascend_path, illegal)
+        for f in stray_untracked:
+            (ascend_path / f).unlink(missing_ok=True)
+
 
 def _llvm_patch_file(ascend_path: Path) -> Path | None:
     """The managed LLVM patch file (llvm_patch_*.patch), if any."""
@@ -636,6 +664,38 @@ def _llvm_patch_file(ascend_path: Path) -> Path | None:
         return None
     patch_files = sorted(patch_dir.glob("llvm_patch_*.patch"))
     return patch_files[0] if patch_files else None
+
+
+def _worktree_dirty_names(ascend_path: Path) -> set[str]:
+    """Repo-root-relative paths with uncommitted changes (tracked only)."""
+    raw = run_git_no_check(ascend_path, "diff", "--name-only").stdout
+    return {f for f in raw.splitlines() if f}
+
+
+def _untracked_names(ascend_path: Path) -> set[str]:
+    """Repo-root-relative untracked paths (excluding ignored)."""
+    raw = run_git_no_check(
+        ascend_path, "ls-files", "--others", "--exclude-standard"
+    ).stdout
+    return {f for f in raw.splitlines() if f}
+
+
+def _revert_to_head(repo: Path, paths: list[str]) -> None:
+    """Revert *paths* to HEAD — explicitly, never via the index.
+
+    ``git checkout -- <paths>`` restores from the INDEX; a polluted index
+    restores stale content.  ``checkout HEAD -- <paths>`` plus a ``reset``
+    both restores the tree and heals the index entries.
+    """
+    if not paths:
+        return
+    tracked = set(
+        run_git_no_check(repo, "ls-tree", "-r", "--name-only", "HEAD").stdout.split()
+    )
+    tracked_hits = [f for f in paths if f in tracked]
+    if tracked_hits:
+        run_git_no_check(repo, "checkout", "HEAD", "--", *tracked_hits)
+    run_git_no_check(repo, "reset", "-q", "--", *paths)
 
 
 def _run_one_filecheck(
