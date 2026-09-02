@@ -75,6 +75,7 @@ _MODE_LABELS: dict[str, str] = {
     "ir_analyze_ops": "IR OP ANALYSIS",
     "ir_analyze_changes": "IR OP CHANGE ANALYSIS",
     "ir_generate_patch": "IR PATCH GENERATION",
+    "ir_patch_fix": "IR PATCH FIX",
     "ir_diagnose": "IR FAILURE DIAGNOSIS",
     "setup_sync": "SETUP_ASCEND.PY SYNC",
 }
