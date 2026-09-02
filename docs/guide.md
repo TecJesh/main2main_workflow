@@ -190,9 +190,15 @@ RUN 行(`triton-opt %s | FileCheck %s`,env `FILECHECK_OPTS=--enable-var-scope`),
 失败时进入修复循环(最多 `TA_LLVM20COMPAT_MAX_RETRIES`,默认 3):
 
 ```
-FileCheck 失败 → AI 按报错调整 llvm_patch_*.patch (ir_patch_fix / patch_error_type=filecheck,
-                 参考 LLVM20Compat/README.md 的 21-op 对照表)
-→ 重新应用 patch → 编译 LLVM → 编译 TA → 重跑 FileCheck
+FileCheck 失败 → AI 按报错调整 llvm_patch_*.patch
+                 (ir_patch_fix / patch_error_type=filecheck;
+                 必须参照知识库: 05 号文档 §2.2 patch 策略 + §3 检查清单 + §4 组织规范,
+                 02 号文档 §7.2 patch 机制, LLVM20Compat/README.md 的 21-op 对照表;
+                 禁止胡乱改写,保持其余 section 不变)
+→ 重新应用 patch → 编译 LLVM
+  (apply/编译失败时 AI 按报错修复 patch 后重试,复用 Phase 1 机制;
+   AI 未改动 patch 则直接终止,不白烧 LLVM 重建)
+→ 编译 TA → 重跑 FileCheck
 ```
 
 全部通过才进入 Step D;重试耗尽则 step 失败(硬门禁)。

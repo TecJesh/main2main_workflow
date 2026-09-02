@@ -536,28 +536,37 @@ def llvm20compat_and_fix(
             break
 
         log.info("FileCheck failures detected — AI adjusts the LLVM patch")
+        patch_file = _llvm_patch_file(ascend_path)
+        patch_before = (
+            patch_file.read_text(encoding="utf-8", errors="replace")
+            if patch_file
+            else ""
+        )
         _ai_fix_patch_for_filecheck(ctx, config, step)
 
-        target_hash = _get_current_llvm_hash(ascend_path)
-        if config.skip_llvm_rebuild:
-            log.status(
-                True,
-                "SKIP_LLVM_REBUILD set — skipping LLVM rebuild after patch fix",
+        # A no-op AI fix cannot change the guard result — rebuilding LLVM
+        # on an unchanged patch only wastes ~2h and fails identically.
+        if patch_file and (
+            patch_file.read_text(encoding="utf-8", errors="replace")
+            == patch_before
+        ):
+            log.error(
+                "AI made no change to the LLVM patch — aborting the "
+                "guard fix loop"
             )
-        else:
-            try:
-                _clean_checkout_apply_patch(
-                    config.llvm_project,
-                    ascend_path,
-                    target_hash,
-                    reason=f"LLVM20Compat fix iter {it + 1}",
-                )
-                _do_llvm_build(
-                    config.llvm_project, config.llvm_install, target_hash
-                )
-            except Exception as e:
-                log.error(f"LLVM rebuild after LLVM20Compat patch fix failed: {e}")
-                break
+            break
+
+        target_hash = _get_current_llvm_hash(ascend_path)
+        # Re-apply the adjusted patch and rebuild LLVM.  Reuse the Phase 1
+        # helper: when the adjusted patch fails to apply or LLVM fails to
+        # compile, it repairs the patch via AI (knowledge-base-guided
+        # ir_patch_fix, patch_error_type apply_or_build) and retries.
+        if not _do_apply_existing_patch(ctx, config, step, target_hash):
+            log.error(
+                "LLVM patch apply/build failed after AI repair — "
+                "aborting the guard fix loop"
+            )
+            break
         ctx = _do_ta_build_with_fix(ctx, config, step)
         if not ctx.build_passed:
             log.error("TA rebuild after LLVM20Compat patch fix failed")
@@ -582,13 +591,8 @@ def _ai_fix_patch_for_filecheck(
     ir_dir.mkdir(parents=True, exist_ok=True)
 
     ascend_path = Path(ctx.triton_ascend_path)
-    patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = (
-        sorted(patch_dir.glob("llvm_patch_*.patch"))
-        if patch_dir.exists()
-        else []
-    )
-    ascend_patch_file = str(patch_files[0]) if patch_files else ""
+    patch_file = _llvm_patch_file(ascend_path)
+    ascend_patch_file = str(patch_file) if patch_file else ""
     target_llvm_hash = _get_current_llvm_hash(ascend_path)
 
     detail_parts = [f"Failing test files ({len(ctx.llvm20compat_failures)}):"]
@@ -623,6 +627,15 @@ def _ai_fix_patch_for_filecheck(
             },
         )
     )
+
+
+def _llvm_patch_file(ascend_path: Path) -> Path | None:
+    """The managed LLVM patch file (llvm_patch_*.patch), if any."""
+    patch_dir = ascend_path / "third_party/ascend/patch"
+    if not patch_dir.is_dir():
+        return None
+    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch"))
+    return patch_files[0] if patch_files else None
 
 
 def _run_one_filecheck(

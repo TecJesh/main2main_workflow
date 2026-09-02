@@ -862,15 +862,31 @@ The active mode is: {mode}
       the printed IR text does not match the LLVM 20 baseline.  Read
       the failing test file(s) and FileCheck error output to find which
       OP prints LLVM 23-only fields/syntax, then fix the corresponding
-      section of the patch (print elision, backward-compatible
-      printer/parser, restoring removed ops such as ToMemrefOp, etc.).
-      The compatibility table in
-      {ascend_path}/third_party/ascend/unittest/Conversion/LLVM20Compat/README.md
-      lists all 21 patched ops with the expected LLVM 20 text, the
-      actual LLVM 23 print, and the intended approach — match it.
-      Also consult {reference_dir}/05-ir-patch-generation-guide.md.
-      Keep all OTHER sections intact — do NOT drop OPs that were
-      correctly patched.
+      section of the patch.
+
+      ⚠️  FOLLOW THE KNOWLEDGE BASE — do NOT rewrite the patch
+      arbitrarily.  Before editing, read and follow the established
+      LLVM patch adjustment strategy:
+        - {reference_dir}/05-ir-patch-generation-guide.md — §2.2 the
+          canonical per-change-type patch strategies (compat alias for
+          renamed ops, dual-format assemblyFormat, alias getters,
+          overloads with defaults, pass-option aliases), §3 the OP
+          definition check list, §4 patch organization rules
+          (git format-patch style, only mlir/ .td/.cpp files)
+        - {reference_dir}/02-llvm-version-adaptation-and-compile-fixes.md
+          — §7.2 the LLVM patch mechanism and how existing patches are
+          structured; check for conflicts with the AscendNPU-IR-side
+          patches
+        - {ascend_path}/third_party/ascend/unittest/Conversion/LLVM20Compat/README.md
+          — the 21-op compatibility table: expected LLVM 20 text vs
+          actual LLVM 23 print vs the intended approach — match it
+
+      Apply the strategy that fits the failing OP (print elision,
+      backward-compatible printer/parser, restoring removed ops such as
+      ToMemrefOp, etc.), mirror the existing patch's style, and make
+      MINIMAL targeted edits.  Keep all OTHER sections intact — do NOT
+      drop or reformat OPs that were correctly patched.  Do not invent
+      new mechanisms when the guide already defines one.
 
 
   ═══ PATCH SUPPLEMENT (adjust_mode=supplement) ═══════════════════════════
