@@ -38,6 +38,11 @@ on:
         type: boolean
         required: false
         default: false
+      enable_triton_report:
+        description: 'Enable triton-report MCP server (upstream commit analysis knowledge base for AI)'
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
@@ -106,6 +111,44 @@ jobs:
           else
             echo "Codegraph disabled — skipping"
           fi
+
+      # ── 6c. Set up triton-report MCP server (optional) ─────────────────
+      # Clones the triton-report knowledge base (daily upstream commit
+      # analyses, architecture knowledge, adaptation lessons) and wires
+      # its stdio MCP server into Claude Code (~/.claude.json, merged
+      # with any existing MCP servers).  The main2main AI prompt tells
+      # the agent these tools exist; the agent decides whether to call
+      # them (tools: mcp__triton-report__*).
+      - name: Set up triton-report MCP
+        if: ${{ github.event.inputs.enable_triton_report == 'true' }}
+        run: |
+          git clone --depth 1 https://github.com/zhudada0120/triton-report.git /tmp/triton-report
+          pip install -q -r /tmp/triton-report/requirements.txt
+          python3 - <<'EOF'
+          import json, os
+          path = os.path.expanduser("~/.claude.json")
+          cfg = {}
+          if os.path.exists(path):
+              try:
+                  with open(path, encoding="utf-8") as fh:
+                      cfg = json.load(fh)
+              except Exception:
+                  cfg = {}
+          servers = cfg.setdefault("mcpServers", {})
+          servers["triton-report"] = {
+              "type": "stdio",
+              "command": "python",
+              "args": [
+                  "-m", "src.mcp_server_app",
+                  "--data-dir", "/tmp/triton-report/data",
+                  "--ascend-repo-path", os.environ["GITHUB_WORKSPACE"],
+              ],
+              "cwd": "/tmp/triton-report",
+          }
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump(cfg, fh, indent=2)
+          print("Claude Code MCP servers:", json.dumps(cfg, indent=2))
+          EOF
 
       # ── 7. Resolve target commit ────────────────────────────────────────────
       - name: Set target commit

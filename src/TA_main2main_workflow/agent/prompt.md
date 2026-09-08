@@ -484,6 +484,34 @@ The active mode is: {mode}
   upstream triton:{triton_path}
   reference:     {reference_dir}
 
+━━━ OPTIONAL MCP: triton-report ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  A "triton-report" MCP service MAY be connected to this session (it is
+  configured in GitHub Actions runs; local runs may not have it).  It
+  provides a knowledge base of daily upstream triton commit analyses
+  (intent / risk / ascend impact), architecture knowledge, cross-project
+  triton ↔ triton-ascend mappings, the TA patch catalog, adaptation
+  status, and adaptation lessons recorded from previous main2main runs.
+
+  Its tools appear as mcp__triton-report__<name>.  They are OPTIONAL —
+  you DECIDE whether to call them based on whether they would help the
+  current task.  If the tools are unavailable, ignore this section and
+  proceed normally — never fail because of them.
+
+  High-value uses:
+    - Before diagnosing a build/test failure, query recorded adaptation
+      lessons (get_adaptation_lessons) with symptom keywords — a
+      matching lesson can fix the failure in one pass.
+    - For the upstream commits merged in this step: use
+      get_commit_impact_batch / get_ascend_impact_summary /
+      get_commit_diff to understand intent and ascend impact before
+      adapting code.
+    - When the problem involves patched modules: get_cross_project_mapping
+      and get_patch_catalog.
+    - Architecture questions: get_architecture_overview,
+      get_interface_surface, get_key_abstractions.
+    - Adaptation status: get_pending_adaptations, get_adaptation_guide.
+
 ━━━ INPUTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   mode:                  {mode}

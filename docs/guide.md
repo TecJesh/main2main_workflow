@@ -281,6 +281,19 @@ config 作为第二个参数，不再散落各处的 `os.getenv()` 调用。
 
 详见 [fix-validation-flow.md](fix-validation-flow.md)
 
+### triton-report MCP 知识库(可选)
+
+GitHub Action(`sync-upstream.yml` step 6c,默认开启,可用 dispatch 参数
+`enable_triton_report` 关闭)会 clone [triton-report](https://github.com/zhudada0120/triton-report)
+并把它的 stdio MCP server 写入 `~/.claude.json`(与 Codegraph 等已有 server 合并)。
+ta-kickoff 启动的 AI 会话自动获得 29 个知识库工具(`mcp__triton-report__*`):
+上游每日 commit 影响分析、架构知识、跨项目映射、patch catalog、历史适配经验
+(`get_adaptation_lessons`——修 E2E 失败前先查它)等。prompt 已告知 AI 这些工具
+的存在与推荐用法,**由 AI 自行决定是否调用**,工具不可用时 AI 忽略即可。
+
+本地用 opencode 后端时,按 triton-report README 在 `opencode.json` 里配置同样的
+MCP server 即可获得相同能力。
+
 ---
 
 ## 常见场景
