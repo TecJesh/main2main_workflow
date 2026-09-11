@@ -75,6 +75,17 @@ The active mode is: {mode}
       patch, and a human must adapt/remove them later — do NOT claim
       they are resolved.
 
+    ## Known Issues / Skipped Tests
+    - Collect every "Known Issues / Skipped Tests" entry from
+      the step summaries (tests skipped at the FINAL fix retry): list
+      every skipped test with its node id, file path, and skip reason.
+    - State clearly that these tests were still FAILING after the
+      maximum number of fix retries and were skipped at the final
+      retry — they are KNOWN ISSUES pending manual follow-up, they do
+      NOT pass.  Say "all tests pass with N case(s) skipped (known
+      issues below)"; do NOT claim a fully green suite.
+    - Omit this section when no step summary contains such entries.
+
     ## Additional Notes
     - Any known limitations or follow-up work needed
     - Recommendations for reviewers
@@ -308,6 +319,42 @@ The active mode is: {mode}
 
   Trigger: {mode} is "fix" (build or tests failed).
 
+  ══════ FINAL RETRY (attempt {attempt}/{max_retries}): SKIP FAILING TESTS ══════
+
+  This block applies ONLY when {attempt} equals {max_retries} (the very
+  last fix retry — if the tests do not pass now, the whole sync fails)
+  AND the failures are TEST failures (pytest/UT).  Do NOT try to fix
+  the failing tests any further.  Instead:
+
+    1. Read the failing test names from the failure logs in {error_logs}
+       (the JUnit XML files list each failing testcase).
+    2. For EVERY still-failing test case, add
+         @pytest.mark.skip(reason="<specific root-cause summary>")
+       to the failing test function.  The reason must be specific (the
+       error message / root cause, e.g. "AssertionError: expected 4,
+       got 2 after upstream sync") and must state that this is a
+       last-retry skip pending manual follow-up, e.g.
+         @pytest.mark.skip(
+             reason="fails after upstream sync (AssertionError: "
+                    "expected 4, got 2) — skipped at final retry, "
+                    "manual follow-up required")
+       Skip markers go into test files under
+       {ascend_path}/third_party/ascend/unittest/ ONLY (same path rule
+       as the deleted-frontend-op strategy).  Keep existing decorators
+       and the test body unchanged.
+    3. Build errors are NOT covered by this rule — if the failure is a
+       compile/build error, keep fixing it normally.
+    4. In {step_dir}/step_summary.md, add a
+       "Known Issues / Skipped Tests" heading listing EVERY
+       skipped test: node id, file path, and the skip reason.  The
+       report mode copies these entries into the PR description so
+       reviewers know exactly which tests do not pass.
+    5. Then continue with the normal fix-mode workflow below (file
+       lists, commit message, summary).
+
+  When {attempt} is below {max_retries}, ignore this block and fix the
+  failures normally.
+
   ═══ AscendNPU-IR compile errors (ascend_npu_ir_fix=true) ═══════════
 
   When `ascend_npu_ir_fix` is "true", the build failure originates from
@@ -419,8 +466,9 @@ The active mode is: {mode}
            {ascend_path}/third_party/ascend/
            {ascend_path}/python/triton/extension/
            {ascend_path}/python/triton/runtime/libentry.py
-       - For test skips (deleted frontend op strategy), verify the test
-         file is under {ascend_path}/third_party/ascend/unittest/
+       - For test skips (deleted frontend op strategy or FINAL-RETRY
+         skip), verify the test file is under
+         {ascend_path}/third_party/ascend/unittest/
        - For op restorations (deleted frontend op strategy), verify the
          file is listed in {step_dir}/op_restore_files.txt AND is under
          one of:
