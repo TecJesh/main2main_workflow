@@ -94,6 +94,11 @@ def ai_fix(
                 "error_logs": json.dumps(ctx.fix_errors, ensure_ascii=False),
                 "target_commit": ctx.target_commit,
                 "step_index": f"{ctx.current_step + 1}/{ctx.total_steps}",
+                # Fix-attempt position — the prompt uses these to detect
+                # the FINAL retry (attempt == max_retries) and skip
+                # still-failing tests instead of fixing them.
+                "attempt": str(attempt),
+                "max_retries": str(config.max_retries),
                 "ascend_npu_ir_fix": str(ascend_npu_ir_fix).lower(),
                 "ascend_npu_ir_compat_ref": ascend_npu_ir_compat_ref,
                 "patch_touched_parent": json.dumps(
