@@ -233,7 +233,8 @@ Round 1-N: [OOM? → 降并发重跑] → AI fix → validate_fix → rebuild �
 
 ### Phase 4 -- Finalize (收尾)
 
-1. 生成 `final_summary.md`
+1. 生成 `final_summary.md`（AI report mode 生成的 PR 描述，含
+   "Ascend Backend Adaptation" 小节，见下方"后端适配点总结"）
 2. 生成累积 patch (`final_target.patch`)
 3. 生成 PR body (`pr_body.md`)
 
@@ -324,6 +325,24 @@ merge → conflict → AI resolve → build fail → AI fix → build pass → t
    patch 恢复 section、适配后端、取消 skip）
 
 完整策略见 `reference/06-deleted-frontend-op-strategy.md`。
+
+### 后端适配点总结（Ascend Backend Adaptation）
+
+上游每次同步都会迫使 Ascend 后端做随上游变化的适配（API/签名变更、op 改名、
+删除前端 op、LLVM 版本升级、setup.py 同步、patch hunk 漂移等）。为让 PR
+reviewer 一次看清本次同步的全部适配点：
+
+1. **step 级记录** — conflict / fix / setup_sync / patch_fix 模式要求 AI 把每个
+   适配点以 `## Ascend Backend Adaptation` 标题记入 `step_summary.md`
+   （格式：`<上游变化（commit SHA 或文件/API）> → <Ascend 侧改动（文件+说明）>`），
+   放在文件靠前位置
+2. **report 汇总** — report mode 收集所有 step 的适配条目，按类型分组写入
+   PR 描述的 "Ascend Backend Adaptation" 小节，并补充从 `[Sync](fix)` 提交与
+   `third_party/ascend/`、`lib/Target/Ascend/`、`python/triton_ascend/`、
+   `third_party/ascend/patch/*.patch` 扫描到的遗漏点；仅当本次同步无需任何
+   Ascend 侧适配时才省略该小节
+3. **确定性兜底** — `SKIP_AI_ANALYSIS=true` 时 finalize 的 fallback 从各
+   step_summary.md 机械提取该小节条目，仍会出现在 PR 描述中
 
 ### LLVM 版本变更
 merge → IR Patch Phase 1: build LLVM → fix compile errors → Phase 2: OP 分析 → 生成补丁 → 编译 LLVM → build TA → pytest → commit → DONE
