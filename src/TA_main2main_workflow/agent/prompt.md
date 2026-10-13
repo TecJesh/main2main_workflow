@@ -31,6 +31,19 @@ The active mode is: {mode}
     1. Merge conflicts — files with <<<<<<< / ======= / >>>>>>> markers
     2. Test failures — build errors or pytest failures caused by the merge
 
+  Ascend Backend Adaptation tracking — in conflict, fix, setup_sync, and
+  patch_fix modes, whenever you adapt Ascend-side code or patches to
+  follow upstream changes (API/signature updates, attribute or op
+  renames, deleted frontend ops, LLVM version changes, setup.py syncs,
+  patch hunk adjustments), record EACH adaptation point in
+  {step_dir}/step_summary.md under the heading "Ascend Backend
+  Adaptation", one line per entry, near the TOP of the file:
+
+    ## Ascend Backend Adaptation
+    - <upstream change: commit SHA or file/API> → <ascend-side change: files + what was adapted>
+
+  The report mode collects these entries into the final PR description.
+
 ── report mode ────────────────────────────────────────────────────
 
   Trigger: {mode} is "report" (sync complete, generate PR description).
@@ -58,6 +71,25 @@ The active mode is: {mode}
     - Per-step breakdown: commits merged, source lines changed, modules affected
     - Any LLVM version changes and IR compatibility patches applied
     - List key files modified by AI fixes (from commit history or fix_errors)
+
+    ## Ascend Backend Adaptation
+    - Collect every "Ascend Backend Adaptation" entry from the step
+      summaries and group them by adaptation type (upstream API /
+      signature changes, attribute / op renames, deleted frontend ops,
+      LLVM version changes, setup.py syncs, patch adjustments).
+    - For each entry list: the upstream change that triggered it
+      (commit SHA or file/API), the Ascend-side files changed, and the
+      adaptation made.
+    - Also scan the sync commits for [Sync](fix) commits and changes
+      under third_party/ascend/, lib/Target/Ascend/,
+      python/triton_ascend/, and third_party/ascend/patch/*.patch for
+      adaptation points the step summaries may have missed.
+    - Adaptation points that still require human work (ops temporarily
+      preserved via the TA source patch) are detailed in "Manual
+      Adaptation Required" — mention them here briefly and point to
+      that section for details.
+    - Omit this section only when the sync required no Ascend-side
+      adaptation.
 
     ## Impact
     - Which Ascend backend modules are affected (python/triton_ascend/,
@@ -121,7 +153,9 @@ The active mode is: {mode}
        - When both sides modified the same code, integrate both changes
        - Preserving Ascend-specific paths (python/triton_ascend/, third_party/ascend/)
     5. Check that resolved files are syntactically correct
-    6. Write conflict resolution summary to {step_dir}/step_summary.md
+    6. Write conflict resolution summary to {step_dir}/step_summary.md —
+       include "Ascend Backend Adaptation" entries (shared rule above)
+       for every conflict where Ascend code was adapted to upstream changes
     7. Stage resolved files with `git add <file>` for each resolved file
 
   Key principles for conflict resolution:
@@ -242,7 +276,8 @@ The active mode is: {mode}
     5. Verify: run `git apply --check {patch_file}` in {ascend_path}.
        Repeat step 4 until it passes.
     6. Write a short summary to {step_dir}/step_summary.md describing which
-       hunks were re-positioned.
+       hunks were re-positioned, under the "Ascend Backend Adaptation"
+       heading (shared rule above).
 
   Constraints:
     - Only edit {patch_file}.  Do NOT touch source files.
@@ -274,7 +309,10 @@ The active mode is: {mode}
     5. Verify: re-read both files and confirm setup_ascend.py now
        reflects every upstream setup.py change.
     6. Write a short summary to {step_dir}/step_summary.md and list the
-       files you modified in {step_dir}/modified_files.txt.
+       files you modified in {step_dir}/modified_files.txt.  In the
+       summary, add an "Ascend Backend Adaptation" entry (shared rule
+       above): which upstream setup.py changes were ported into
+       setup_ascend.py.
 
   Constraints:
     - Only edit {ascend_path}/setup_ascend.py.
@@ -491,7 +529,9 @@ The active mode is: {mode}
        restored deleted frontend op code.  The workflow regenerates
        those files into the TA source patches (they are never
        committed directly).
-    8. Write fix summary to {step_dir}/step_summary.md
+    8. Write fix summary to {step_dir}/step_summary.md — include
+       "Ascend Backend Adaptation" entries (shared rule above) for
+       every upstream change you adapted the Ascend backend to
     9. Write a ONE-LINE commit subject to {step_dir}/commit_message.txt
        - Describe WHAT was fixed, be specific (file/module and change)
        - Keep under 72 characters

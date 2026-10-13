@@ -150,7 +150,7 @@ def _build_report_context(ctx: WorkflowContext) -> dict:
         summary_file = step_dir / "step_summary.md"
         if summary_file.exists():
             try:
-                sd["summary"] = summary_file.read_text(encoding="utf-8")[:4000]
+                sd["summary"] = summary_file.read_text(encoding="utf-8")[:8000]
             except Exception:
                 pass
         # Include commit list
@@ -203,8 +203,39 @@ def _write_summary_fallback(ctx: WorkflowContext, summary_path: Path) -> None:
         for desc in ctx.step_pr_descriptions:
             parts.append(f"- {desc}")
 
+    adaptation_entries = _collect_adaptation_entries(ctx)
+    if adaptation_entries:
+        parts.append("\n## Ascend Backend Adaptation\n")
+        parts.extend(adaptation_entries)
+
     summary_path.write_text("\n".join(parts) + "\n", encoding="utf-8")
     log.info(f"PR description (fallback): {summary_path}")
+
+
+def _collect_adaptation_entries(ctx: WorkflowContext) -> list[str]:
+    """Collect 'Ascend Backend Adaptation' bullets from step summaries."""
+    entries: list[str] = []
+    steps_dir = WORKSPACE_DIR / STEPS_DIR
+    for s in ctx.steps:
+        summary_file = steps_dir / s["id"] / "step_summary.md"
+        if not summary_file.exists():
+            continue
+        try:
+            lines = summary_file.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+        in_section = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#") and "Ascend Backend Adaptation" in stripped:
+                in_section = True
+                continue
+            if in_section:
+                if stripped.startswith("#"):
+                    break
+                if stripped.startswith("- "):
+                    entries.append(f"- {s['id']}: {stripped[2:]}")
+    return entries
 
 
 def _write_sync_report(ctx: WorkflowContext) -> None:
