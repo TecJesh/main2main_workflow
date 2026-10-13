@@ -116,9 +116,9 @@ def run_commit_plan(ctx: WorkflowContext, config: TAConfig) -> None:
     status_summary = run_git(ascend_path, "status", "--porcelain").strip()
     if not status_summary:
         return
-    diff_summary = run_git_no_check(
-        ascend_path, "diff", "--stat"
-    ).stdout.strip()[-6000:]
+    diff_summary = run_git_no_check(ascend_path, "diff", "--stat").stdout.strip()[
+        -6000:
+    ]
 
     fix_dir = WORKSPACE_DIR / "fixes" / f"{step_id}-commit-plan"
     fix_dir.mkdir(parents=True, exist_ok=True)
@@ -213,17 +213,13 @@ def stage_changes(
                 log.warning(
                     f"Dropped patch-touched file(s) from whitelist: {sorted(banned)}"
                 )
-        return bool(
-            run_git(ascend_path, "diff", "--cached", "--name-only").strip()
-        )
+        return bool(run_git(ascend_path, "diff", "--cached", "--name-only").strip())
 
     # Fallback: stage tracked changes only (never untracked files —
     # runtime artifacts like fusion_result.json must not enter commits),
     # then unstage patch-touched changes.
     run_git(ascend_path, "add", "-u")
-    exclude_patch_files_from_index(
-        ascend_path, touched_parent, touched_submodule
-    )
+    exclude_patch_files_from_index(ascend_path, touched_parent, touched_submodule)
     return bool(run_git(ascend_path, "diff", "--cached", "--name-only").strip())
 
 

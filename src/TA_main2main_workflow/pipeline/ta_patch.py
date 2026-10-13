@@ -95,9 +95,7 @@ def resolve_source_patches(ascend_path: Path, config: TAConfig) -> list[Path]:
             if p.name.startswith(_LLVM_PATCH_PREFIX):
                 # LLVM patches are managed exclusively by the IR patch
                 # flow (build.py / ir_patch.py) — never here.
-                log.warning(
-                    f"Skipping LLVM patch in TA_SOURCE_PATCHES: {name}"
-                )
+                log.warning(f"Skipping LLVM patch in TA_SOURCE_PATCHES: {name}")
                 continue
             patches.append(p)
         return patches
@@ -297,16 +295,12 @@ def regenerate_npuir_patch(
 
     sub_prefix = f"{SUBMODULE_DIR}/"
     hits_submodule = [
-        f[len(sub_prefix):]
-        for f in ai_modified_files
-        if f.startswith(sub_prefix)
+        f[len(sub_prefix) :] for f in ai_modified_files if f.startswith(sub_prefix)
     ]
     if not hits_submodule:
         return ctx
 
-    npuir_patches = [
-        p for p in patch_files if p.name.startswith(_NPUIR_PATCH_PREFIX)
-    ]
+    npuir_patches = [p for p in patch_files if p.name.startswith(_NPUIR_PATCH_PREFIX)]
     if not npuir_patches:
         log.warning(
             "AI modified AscendNPU-IR files but no npuir patch is managed — "
@@ -332,8 +326,7 @@ def regenerate_npuir_patch(
                 sections[f] = diff
         _replace_patch_sections(patch_file, sections)
         log.info(
-            f"Regenerated {patch_file.name} from {len(sections)} "
-            "AscendNPU-IR file(s)"
+            f"Regenerated {patch_file.name} from {len(sections)} AscendNPU-IR file(s)"
         )
 
     # Restore EVERY file the npuir patch touches — not just the AI's
@@ -358,8 +351,7 @@ def regenerate_npuir_patch(
             check_failed.append(f"{patch_file.name}:\n{err}")
     if check_failed:
         log.error(
-            "npuir patch does not apply cleanly after regeneration — "
-            "discarding the fix"
+            "npuir patch does not apply cleanly after regeneration — discarding the fix"
         )
         for detail in check_failed:
             log.error(f"git apply --check failure:\n{detail}")
@@ -434,9 +426,7 @@ def regenerate_source_patch(
 
     for patch_file, secs in sections.items():
         _replace_patch_sections(patch_file, secs)
-        log.info(
-            f"Regenerated {patch_file.name} from {len(secs)} parent file(s)"
-        )
+        log.info(f"Regenerated {patch_file.name} from {len(secs)} parent file(s)")
 
     # Restore EVERY file the parent patches touch — not just the hits —
     # otherwise sections for already-patched files fail the check
@@ -470,8 +460,7 @@ def regenerate_source_patch(
         return ctx
     log.status(
         True,
-        f"Regenerated TA source patch section(s) — "
-        "the next build will apply them",
+        "Regenerated TA source patch section(s) — the next build will apply them",
     )
     # Extend the touched list so the step-end restore and commit
     # exclusion also cover files the patches did not cover before.
@@ -539,8 +528,7 @@ def restore_workspace(
         if sub_path.is_dir():
             _restore_from_head(sub_path, touched_submodule, "AscendNPU-IR submodule")
             log.info(
-                f"Restored {len(touched_submodule)} patch-touched "
-                "file(s) in submodule"
+                f"Restored {len(touched_submodule)} patch-touched file(s) in submodule"
             )
     if touched_parent or touched_submodule:
         from TA_main2main_workflow.pipeline.pre_ci import cleanup_temp_files
@@ -694,9 +682,7 @@ def _sync_submodule(ascend_path: Path) -> bool:
             ascend_path, "submodule", "update", "--init", "--", SUBMODULE_DIR
         )
     if not (sub / ".git").exists():
-        log.error(
-            "AscendNPU-IR submodule unavailable — npuir patch checks will fail"
-        )
+        log.error("AscendNPU-IR submodule unavailable — npuir patch checks will fail")
         return False
     status = run_git_no_check(sub, "status", "--porcelain")
     if status.stdout.strip():
@@ -783,9 +769,7 @@ def _adjust_patch_with_ai(
     patch applies to the merged tree — never the semantic content.
     """
     if config.skip_ai_analysis:
-        log.warning(
-            f"SKIP_AI_ANALYSIS=true — cannot adjust patch {patch_file.name}"
-        )
+        log.warning(f"SKIP_AI_ANALYSIS=true — cannot adjust patch {patch_file.name}")
         return
 
     step = ctx.steps[ctx.current_step] if ctx.current_step < len(ctx.steps) else None
@@ -794,14 +778,15 @@ def _adjust_patch_with_ai(
     step_dir.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1, _MAX_ADJUST_RETRIES + 1):
-        check = run_git_no_check(ascend_path, "apply", "--check", *_check_args(patch_file))
+        check = run_git_no_check(
+            ascend_path, "apply", "--check", *_check_args(patch_file)
+        )
         if check.returncode == 0:
             log.status(True, f"{patch_file.name} applies after adjustment")
             return
 
         log.header(
-            f"Adjust Patch {patch_file.name} — attempt "
-            f"{attempt}/{_MAX_ADJUST_RETRIES}"
+            f"Adjust Patch {patch_file.name} — attempt {attempt}/{_MAX_ADJUST_RETRIES}"
         )
         fix_dir = (
             WORKSPACE_DIR / "fixes" / f"{step_id}-patch-{patch_file.stem}-{attempt}"

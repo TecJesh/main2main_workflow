@@ -174,9 +174,7 @@ class TA_Main2MainFlow:
                     )
                     ctx = ctx.copy_with(final_status=UpgradeFailed)
                     return UpgradeFailed
-                commit_patch_adjustments(
-                    ascend_path, step_id, ctx.target_commit
-                )
+                commit_patch_adjustments(ascend_path, step_id, ctx.target_commit)
 
             # ── Step D: Build/Test — IR patch or standard ───────
             llvm_hash_changed = reason == "llvm_version"

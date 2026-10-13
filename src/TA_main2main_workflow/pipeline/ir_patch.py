@@ -61,9 +61,7 @@ _MAX_PATCH_APPLY_RETRIES = 3
 # text (triton-opt %s | FileCheck %s).  The lit batch runner would need
 # -DTRITON_BUILD_UT=ON (disabled in workflow builds), so the guard runs
 # each file directly.
-_LLVM20COMPAT_TEST_DIR = (
-    "third_party/ascend/unittest/Conversion/LLVM20Compat/OpCompat"
-)
+_LLVM20COMPAT_TEST_DIR = "third_party/ascend/unittest/Conversion/LLVM20Compat/OpCompat"
 _FILECHECK_OPTS = {"FILECHECK_OPTS": "--enable-var-scope"}
 _GUARD_TIMEOUT = 120  # per-file seconds
 
@@ -121,7 +119,9 @@ def build_baseline_llvm(ctx: WorkflowContext, config: TAConfig) -> WorkflowConte
 
     # Apply existing Ascend patch
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    )
     if patch_files:
         patch_file = patch_files[0]
         log.info(f"Applying existing patch: {patch_file.name}")
@@ -231,7 +231,9 @@ def _do_apply_existing_patch(
     _ = step["id"]
 
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    )
 
     if not patch_files:
         log.info("No existing patch — building LLVM directly")
@@ -404,9 +406,7 @@ def _do_test_and_fix_with_ir_retry(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def run_llvm20compat_guard(
-    ctx: WorkflowContext, config: TAConfig
-) -> WorkflowContext:
+def run_llvm20compat_guard(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext:
     """Run the LLVM20Compat OpCompat FileCheck guard.
 
     Validates that the patched LLVM prints LLVM-20-compatible IR text:
@@ -431,8 +431,7 @@ def run_llvm20compat_guard(
         # Older TA branches may not carry the guard tests yet — absence
         # must not fail the whole sync.
         log.warning(
-            f"LLVM20Compat test dir missing: {test_dir} — "
-            "treating guard as passed"
+            f"LLVM20Compat test dir missing: {test_dir} — treating guard as passed"
         )
         return ctx.copy_with(llvm20compat_passed=True, llvm20compat_failures=[])
 
@@ -478,8 +477,7 @@ def run_llvm20compat_guard(
     )
     log.status(
         passed,
-        f"LLVM20Compat FileCheck: "
-        f"{len(results) - len(failures)}/{len(results)} passed",
+        f"LLVM20Compat FileCheck: {len(results) - len(failures)}/{len(results)} passed",
     )
     if not passed:
         log.error(f"Failed files: {', '.join(failures[:10])}")
@@ -507,9 +505,7 @@ def llvm20compat_and_fix(
     treats False as a hard step failure.
     """
     if config.skip_llvm20compat:
-        log.header(
-            "LLVM20Compat FileCheck Guard — SKIPPED (SKIP_LLVM20COMPAT=true)"
-        )
+        log.header("LLVM20Compat FileCheck Guard — SKIPPED (SKIP_LLVM20COMPAT=true)")
         return ctx.copy_with(llvm20compat_passed=True, llvm20compat_failures=[])
 
     ascend_path = Path(ctx.triton_ascend_path)
@@ -530,8 +526,7 @@ def llvm20compat_and_fix(
             break
         if it >= max_iter:
             log.error(
-                f"LLVM20Compat FileCheck guard failed after {max_iter} "
-                "fix iteration(s)"
+                f"LLVM20Compat FileCheck guard failed after {max_iter} fix iteration(s)"
             )
             break
 
@@ -547,12 +542,10 @@ def llvm20compat_and_fix(
         # A no-op AI fix cannot change the guard result — rebuilding LLVM
         # on an unchanged patch only wastes ~2h and fails identically.
         if patch_file and (
-            patch_file.read_text(encoding="utf-8", errors="replace")
-            == patch_before
+            patch_file.read_text(encoding="utf-8", errors="replace") == patch_before
         ):
             log.error(
-                "AI made no change to the LLVM patch — aborting the "
-                "guard fix loop"
+                "AI made no change to the LLVM patch — aborting the guard fix loop"
             )
             break
 
@@ -600,9 +593,7 @@ def _ai_fix_patch_for_filecheck(
     log_path = WORKSPACE_DIR / STEPS_DIR / step_id / LLVM20COMPAT_LOG_FILE
     if log_path.exists():
         try:
-            tail = log_path.read_text(
-                encoding="utf-8", errors="replace"
-            )[-6000:]
+            tail = log_path.read_text(encoding="utf-8", errors="replace")[-6000:]
             detail_parts.append("---- llvm20compat.log tail ----")
             detail_parts.append(tail)
         except OSError:
@@ -639,13 +630,9 @@ def _ai_fix_patch_for_filecheck(
     )
 
     illegal = sorted(
-        f
-        for f in set(_worktree_dirty_names(ascend_path)) - pre_dirty
-        if f != patch_rel
+        f for f in set(_worktree_dirty_names(ascend_path)) - pre_dirty if f != patch_rel
     )
-    stray_untracked = sorted(
-        set(_untracked_names(ascend_path)) - pre_untracked
-    )
+    stray_untracked = sorted(set(_untracked_names(ascend_path)) - pre_untracked)
     if illegal or stray_untracked:
         log.warning(
             "AI modified files outside the LLVM patch during guard fix — "
@@ -744,9 +731,7 @@ def _run_one_filecheck(
         return False, detail
     if fc.returncode != 0:
         detail = (fc.stderr or fc.stdout or "").strip()[-400:]
-        log_fh.write(
-            f"[FileCheck exit {fc.returncode}]\n{fc.stdout}\n{fc.stderr}\n"
-        )
+        log_fh.write(f"[FileCheck exit {fc.returncode}]\n{fc.stdout}\n{fc.stderr}\n")
         return False, f"FileCheck failed: {detail}"
     return True, ""
 
@@ -774,8 +759,7 @@ def _find_triton_opt(ascend_path: Path, config: TAConfig) -> Path | None:
             [
                 python_exe,
                 "-c",
-                "import triton._C, os; "
-                "print(os.path.dirname(triton._C.__file__))",
+                "import triton._C, os; print(os.path.dirname(triton._C.__file__))",
             ],
             capture_output=True,
             text=True,
@@ -995,7 +979,9 @@ def _run_ir_generate_patches(
 
     ascend_path = Path(ctx.triton_ascend_path)
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    )
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
 
     run_opencode_adapter(
@@ -1040,7 +1026,9 @@ def _ai_adjust_patch_for_failure(
 
     ascend_path = Path(ctx.triton_ascend_path)
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    )
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
     target_llvm_hash = _get_current_llvm_hash(ascend_path)
 
@@ -1255,7 +1243,9 @@ def _ir_supplement_patch(
 
     ascend_path = Path(ctx.triton_ascend_path)
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    )
     ascend_patch_file = str(patch_files[0]) if patch_files else ""
 
     # Collect actual test failure logs
@@ -1509,7 +1499,9 @@ def _clean_checkout_apply_patch(
     run_git(llvm_project, "clean", "-fd")
 
     patch_dir = ascend_path / "third_party/ascend/patch"
-    patch_files = sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    patch_files = (
+        sorted(patch_dir.glob("llvm_patch_*.patch")) if patch_dir.exists() else []
+    )
     if not patch_files:
         log.info("No Ascend patch found — building clean LLVM")
         return False
