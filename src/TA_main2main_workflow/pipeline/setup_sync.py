@@ -56,11 +56,7 @@ def sync_setup_ascend(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
             log.info(f"{SETUP_FILE} unchanged this step — sync not needed")
             return ctx
 
-    step = (
-        ctx.steps[ctx.current_step]
-        if ctx.current_step < len(ctx.steps)
-        else None
-    )
+    step = ctx.steps[ctx.current_step] if ctx.current_step < len(ctx.steps) else None
     if not step:
         return ctx
     step_id = step["id"]
@@ -125,8 +121,7 @@ def sync_setup_ascend(ctx: WorkflowContext, config: TAConfig) -> WorkflowContext
         illegal = sorted(f for f in modified if f != SETUP_ASCEND_FILE)
         if illegal:
             log.warning(
-                "AI modified disallowed files during setup sync — "
-                f"reverting: {illegal}"
+                f"AI modified disallowed files during setup sync — reverting: {illegal}"
             )
             run_git_no_check(ascend_path, "checkout", "--", *illegal)
         if SETUP_ASCEND_FILE in modified:

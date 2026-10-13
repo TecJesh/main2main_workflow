@@ -166,8 +166,7 @@ def _commit_remaining_changes(repo: Path) -> None:
     log.section("Commit Remaining Changes Before Push")
     run_git(repo, "add", "-u")
     commit_msg = (
-        f"sync: upstream triton merge "
-        f"({datetime.now().strftime('%Y%m%d-%H%M%S')})"
+        f"sync: upstream triton merge ({datetime.now().strftime('%Y%m%d-%H%M%S')})"
     )
     try:
         run_git(repo, "commit", "-s", "-m", commit_msg)

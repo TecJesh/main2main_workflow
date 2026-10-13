@@ -127,9 +127,7 @@ def ai_fix(
             )
         else:
             patch_touched = set(ctx.ta_patch_touched_files)
-            ai_edits = [
-                f for f in result.modified_files if f not in patch_touched
-            ]
+            ai_edits = [f for f in result.modified_files if f not in patch_touched]
             log.info(
                 "modified_files.txt missing or empty — falling back to "
                 "git diff (patch-touched files filtered)"
@@ -163,14 +161,10 @@ def ai_fix(
             (result.step_summary or "")[:500],
         )
         if op_restore:
-            log.info(
-                f"Op-restore files ({len(op_restore)}): {', '.join(op_restore)}"
-            )
+            log.info(f"Op-restore files ({len(op_restore)}): {', '.join(op_restore)}")
         # Expand the gitlink entry (real submodule) into the individual
         # AscendNPU-IR files the AI actually changed.
-        sub_changed = _submodule_files_changed(
-            ascend_path, pre_submodule_snapshot
-        )
+        sub_changed = _submodule_files_changed(ascend_path, pre_submodule_snapshot)
         expanded = _expand_modified_files(ai_edits, sub_changed)
         return ctx.copy_with(
             last_fix_modified_files=expanded,
@@ -178,9 +172,7 @@ def ai_fix(
         )
     except Exception as e:
         log.error(f"AI fix failed: {e}")
-        return ctx.copy_with(
-            last_fix_modified_files=[], last_fix_op_restore_files=[]
-        )
+        return ctx.copy_with(last_fix_modified_files=[], last_fix_op_restore_files=[])
 
 
 # Paths AI is allowed to modify when fixing test failures.

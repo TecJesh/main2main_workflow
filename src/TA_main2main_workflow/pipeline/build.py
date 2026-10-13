@@ -404,9 +404,7 @@ def _ensure_source_patches_in_commit(ascend_path: Path, step_dir: Path) -> None:
         ]
     except Exception:
         return
-    missing = [
-        p for p in dirty_source_patch_paths(ascend_path) if p not in listed
-    ]
+    missing = [p for p in dirty_source_patch_paths(ascend_path) if p not in listed]
     if missing:
         with open(whitelist_file, "a", encoding="utf-8") as fh:
             for p in missing:
