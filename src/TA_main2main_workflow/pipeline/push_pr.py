@@ -36,8 +36,12 @@ def push_and_create_pr(
     summary_path: str | Path | None = None,
     target_commit: str = "",
     work_branch: str = "",
+    title: str = "",
 ) -> str:
     """Push work branch to fork (via proxy) and create a GitHub PR.
+
+    *title* overrides the default merge-sync PR title (used by the
+    pipeline-test flow); empty means the default ``_build_pr_title``.
 
     Returns the PR URL on success.
 
@@ -85,6 +89,7 @@ def push_and_create_pr(
         token,
         summary_file,
         target_commit,
+        title,
     )
 
     return pr_url
@@ -354,16 +359,19 @@ def _create_pr(
     token: str,
     summary_file: Path,
     target_commit: str,
+    title: str = "",
 ) -> str:
     """Create PR via gh CLI (with fork-aware origin swap).
 
     Temporarily sets origin to the fork URL so ``gh`` can detect the
     GitHub host, creates the PR from ``fork_owner:branch`` to the
     upstream repo, then restores the saved origin.
+
+    *title* overrides the default ``_build_pr_title``; empty means default.
     """
     pr_body = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
 
-    title = _build_pr_title(target_commit)
+    title = title or _build_pr_title(target_commit)
     head = f"{fork_owner}:{branch}" if fork_owner else branch
     base_branch = os.getenv("TA_PR_BASE_BRANCH", "upstream-sync")
 

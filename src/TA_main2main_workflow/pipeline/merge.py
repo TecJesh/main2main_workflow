@@ -120,15 +120,23 @@ def merge_upstream_commit(ctx: WorkflowContext, config: TAConfig) -> WorkflowCon
     )
 
 
-def _create_work_branch(repo: Path, config: TAConfig) -> None:
+def _create_work_branch(
+    repo: Path, config: TAConfig, branch_prefix: str = "sync/main2main"
+) -> str:
     """Create a work branch from the configured base ref.
 
-    Cleans the working tree before branching: aborts stale merges,
-    resets to a pristine state, then creates the work branch.
+    The base ref is ``{TA_WORK_BRANCH_BASE}/{TA_BASE_BRANCH}`` (with an
+    ``origin/{TA_BASE_BRANCH}`` fallback).  Cleans the working tree
+    before branching: aborts stale merges, resets to a pristine state,
+    then creates the work branch.  *branch_prefix* lets other flows
+    reuse the same base semantics under their own branch namespace
+    (the pipeline-test flow uses ``fix/pipeline-test``).
+
+    Returns the branch name.
     """
     base_ref = get_base_branch_ref(config.work_branch_base)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    branch_name = f"sync/main2main-{timestamp}"
+    branch_name = f"{branch_prefix}-{timestamp}"
 
     # ── 1. Abort any stale merge ────────────────────────────────────
     if (repo / ".git" / "MERGE_HEAD").exists():
@@ -169,3 +177,4 @@ def _create_work_branch(repo: Path, config: TAConfig) -> None:
         run_git(repo, "checkout", "-B", branch_name, fallback)
 
     log.info(f"Created work branch: {branch_name}")
+    return branch_name

@@ -112,6 +112,17 @@ class TAConfig:
     # ── IR patch ──────────────────────────────────────────────────────────
     ir_max_iterations: int = 3
 
+    # ── Pipeline test (ta-pipeline-test) ──────────────────────────────────
+    # Independent full-test flow: a human-configured shell script clones
+    # test repos into test_workspace and runs pytest, logs land in
+    # <test_workspace>/test_log/<repo>_test_log/.  The workflow analyzes
+    # the logs with AI, fixes failing cases per category, and re-runs.
+    pipeline_test_script: str = ""  # TA_PIPELINE_TEST_SCRIPT (required)
+    test_workspace: str = "~/test_workspace"  # TA_TEST_WORKSPACE
+    pipeline_test_max_retries: int = 5  # per-case fix attempts
+    pipeline_test_rounds: int = 3  # full-test rerun rounds
+    pipeline_test_timeout: int = 28800  # script timeout (seconds)
+
     # ═══════════════════════════════════════════════════════════════════════
     @classmethod
     def from_env(cls) -> TAConfig:
@@ -171,6 +182,13 @@ class TAConfig:
             skip_test_keywords=_resolve_skip_test_keywords(),
             single_step_mode=_env_bool("TA_SINGLE_STEP_MODE", True),
             ir_max_iterations=_env_int("TA_IR_MAX_ITERATIONS", 3),
+            pipeline_test_script=os.getenv("TA_PIPELINE_TEST_SCRIPT", ""),
+            test_workspace=os.getenv("TA_TEST_WORKSPACE", "~/test_workspace"),
+            pipeline_test_max_retries=_env_int(
+                "TA_PIPELINE_TEST_MAX_RETRIES", 5
+            ),
+            pipeline_test_rounds=_env_int("TA_PIPELINE_TEST_ROUNDS", 3),
+            pipeline_test_timeout=_env_int("TA_PIPELINE_TEST_TIMEOUT", 28800),
         )
 
     @property
@@ -190,6 +208,10 @@ class TAConfig:
                 os.getenv("LLVM_INSTALL_PREFIX_SYNC", "~/llvm-install-sync")
             )
         )
+
+    @property
+    def test_workspace_dir(self) -> Path:
+        return Path(os.path.expanduser(self.test_workspace))
 
 
 def _env_bool(name: str, default: bool) -> bool:

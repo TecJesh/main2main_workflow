@@ -4,7 +4,7 @@ CrewAI Flow that automates triton-ascend's main2main upstream sync against upstr
 
 ## Run
 
-Install once: `pip install -e .` (registers `ta-kickoff` and `ta-plot` console scripts).
+Install once: `pip install -e .` (registers `ta-kickoff`, `ta-pipeline-test` and `ta-plot` console scripts).
 
 Real entrypoint is `TA_Main2MainFlow` in `src/TA_main2main_workflow/flow.py`. Use:
 
@@ -13,6 +13,48 @@ ta-kickoff --triton-ascend-path <path> --triton-path <path> [--target-commit SHA
 ```
 
 Both repos must be real git checkouts. triton HEAD is the implicit target unless `--target-commit` is given.
+
+### Pipeline test (`ta-pipeline-test`)
+
+A separate full-test-pipeline flow, independent of the main2main sync:
+
+```bash
+ta-pipeline-test --triton-ascend-path <path>
+```
+
+`TA_PIPELINE_TEST_SCRIPT` (required) points at a human-configured shell
+script that clones external test repos (e.g. Q3TritonKernel) into
+`~/test_workspace` (`TA_TEST_WORKSPACE`) and runs pytest, logging to
+`~/test_workspace/test_log/<repo>_test_log/`. The flow first creates
+the work branch (`fix/pipeline-test-<ts>`, base
+`{TA_WORK_BRANCH_BASE}/{TA_BASE_BRANCH}`) and **compiles + installs
+triton-ascend via `build_and_fix_loop` BEFORE running any test**
+(`SKIP_BUILD=true` skips) — the test script runs against the installed
+package. Then it: collects logs → AI analyzes (`pipeline_test_analyze`
+mode) → writes two Excel reports (`~/test_workspace/analysis/错误信息总览表.xlsx`
++ `错误信息汇总表.xlsx`) → fixes failing cases one by one
+(`pipeline_test_fix` mode, category: operator / triton_ascend / npu_ir;
+rebuild + AI-generated precise rerun command; **one commit per fixed
+case**) → reruns the full script until green (bounded by
+`TA_PIPELINE_TEST_ROUNDS` + one final verification run) → PR via
+`pipeline_test_report` mode only when code changed. Tests pass as-is →
+no PR, empty work branch deleted, exit 0. Rounds exhausted with
+failures → PR lists them as Known Issues, exit 1. See `docs/guide.md`
+for the full spec and the env-var table.
+
+The flow lives in `src/TA_main2main_workflow/pipeline_test/` (flow /
+logs / script_runner / analyze / fix_loop) with the CLI in
+`pipeline_test_main.py`. It reuses the main flow's machinery and config
+semantics where they apply: work branch base
+`{TA_WORK_BRANCH_BASE}/{TA_BASE_BRANCH}` (via
+`merge._create_work_branch`), PR base `TA_PR_BASE_BRANCH`, plus
+`build_triton`, `commit_fixes`, `regen_ai_fixes`, `parse_patches`,
+`validate_fix`-style validation, and `push_and_create_pr` (new optional
+`title` param — backward compatible). Pipeline-test specifics: PR title
+identity is `[PipelineTest](fix) ...` (NOT the main flow's PR_AUTHOR
+"Sync"), plus `TA_PIPELINE_TEST_SCRIPT`, `TA_TEST_WORKSPACE`,
+`TA_PIPELINE_TEST_MAX_RETRIES`, `TA_PIPELINE_TEST_ROUNDS`,
+`TA_PIPELINE_TEST_TIMEOUT`, `TA_PIPELINE_TEST_PR_TITLE`.
 
 ## Layout (only the non-obvious bits)
 

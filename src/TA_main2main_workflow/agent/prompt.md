@@ -353,6 +353,167 @@ The active mode is: {mode}
        prefix; the workflow wraps it as [Sync](fix)).
     4. If nothing should be committed, write an empty commit_files.txt.
 
+── pipeline_test_analyze mode ─────────────────────────────────────
+
+  Trigger: {mode} is "pipeline_test_analyze" (the full pipeline test
+  script finished; your job is to analyze the raw pytest logs).
+
+  Context (in {error_logs} as JSON):
+    - "log_files": list of raw log file paths, grouped per test repo
+      (they live under {test_workspace}/test_log/<repo>_test_log/)
+    - "hints": deterministic pre-parsed counts / failure lines
+      (best-effort — verify and correct them from the logs)
+
+  Your task:
+    1. Read the log files (grep/tail — do NOT dump huge logs).
+    2. For EACH test repo produce: total / passed / failed / errors /
+       skipped counts (from pytest summary lines like
+       "1234 passed, 5 failed, 2 errors, 3 skipped in 123.45s") and
+       the list of FAILING cases ("FAILED path::test_id" or
+       "ERROR path::test_id" short-summary lines plus their tracebacks).
+    3. For each failing case classify the problem into EXACTLY one of:
+       - "operator"       — 算子问题: wrong kernel/operator semantics —
+         numerical/assertion mismatches, wrong results, bugs in
+         operator lowering/codegen (lib/Dialect/, lib/Conversion/,
+         lib/Target/Ascend/, include/triton .td ops)
+       - "triton_ascend"  — Triton—Ascend问题: Ascend adaptation-layer
+         problems — compile failures, unsupported features, runtime /
+         binding issues in third_party/ascend/,
+         python/triton_ascend/, python/triton/extension
+       - "npu_ir"         — NPU-IR问题: errors mentioning AscendNPU-IR /
+         bishengir / npuir / MLIR-NPU IR failures
+       Default to "triton_ascend" when evidence is weak.
+    4. Write {step_dir}/analysis.json EXACTLY matching this schema:
+
+{{"repos": [{{"repo": "<repo name>",
+              "total": <int>, "passed": <int>, "failed": <int>,
+              "errors": <int>, "skipped": <int>,
+              "cases": [{{"case": "tests/...::test_id[param]",
+                          "error": "<error message excerpt>",
+                          "category": "operator|triton_ascend|npu_ir",
+                          "log_file": "<relative log path>"}}]}}]}}
+
+  Rules:
+    - total = passed + failed + errors + skipped (when derivable)
+    - One "cases" entry per failing case; "error" is a SHORT excerpt
+      (≤300 chars) of the failure/traceback
+    - DO NOT modify any source code; your ONLY output is analysis.json
+
+── pipeline_test_fix mode ─────────────────────────────────────────
+
+  Trigger: {mode} is "pipeline_test_fix" (one failing pipeline-test
+  case must be fixed in the triton-ascend repo).
+
+  Context (in {error_logs} as JSON):
+    - "case":        the failing test case id
+    - "category":    problem classification (see below)
+    - "error":       error excerpt from the analysis
+    - "log_file":    raw log path under {test_workspace}/test_log/
+    - "rerun_log":   path where the precise rerun output will land
+    - "repo_dir":    the external test repo directory (read-only —
+                     fixes go into triton-ascend, NOT the test repo)
+    - "attempt" / "max_retries": fix attempt position
+
+  Problem categories (from the analysis):
+    - operator       (算子问题): fix the operator implementation in
+                     triton-ascend — allowed paths:
+                       {ascend_path}/lib/Dialect/
+                       {ascend_path}/lib/Conversion/
+                       {ascend_path}/lib/Target/Ascend/
+                       {ascend_path}/include/triton/Dialect/Triton/IR/
+                       {ascend_path}/third_party/ascend/
+                       {ascend_path}/python/triton_ascend/
+                     Directly modify the operator code; no special
+                     patch handling needed.
+    - triton_ascend  (Triton—Ascend问题): fix the Ascend adaptation
+                     layer — allowed paths:
+                       {ascend_path}/third_party/ascend/
+                       {ascend_path}/python/triton/extension/
+                       {ascend_path}/python/triton/runtime/libentry.py
+                       {ascend_path}/setup_ascend.py
+                       {ascend_path}/python/triton_ascend/
+                     The workflow rebuilds triton-ascend after your fix.
+    - npu_ir         (NPU-IR问题): fix code under
+                       {ascend_path}/third_party/ascend/AscendNPU-IR/
+                     (the AscendNPU-IR submodule).  The workflow moves
+                     your edits into
+                     third_party/ascend/patch/npuir_adapter_to_llvm_23.patch
+                     and restores the sources before rebuilding (the
+                     build applies the patch itself) — do NOT edit
+                     .patch files, and note in your summary which
+                     AscendNPU-IR files you edited.  When
+                     ascend_npu_ir_fix is "true", read
+                     {ascend_npu_ir_compat_ref} for the LLVM-version
+                     adaptation catalog.
+
+  Workflow:
+    1. Read the error excerpt + relevant log sections (grep around the
+       failing case in "log_file").
+    2. Consult reference docs as in fix mode:
+       {reference_dir}/03-unit-test-failure-diagnosis-and-fixes.md
+       and {reference_dir}/error-pattern-examples.md.
+    3. Apply a MINIMAL root-cause fix in triton-ascend, only in the
+       allowed paths for the category above.  Any file outside them
+       will be REVERTED by the workflow and the attempt rejected.
+    4. Write {step_dir}/modified_files.txt — one repo-root relative
+       path per line (e.g. lib/Conversion/.../X.cpp).  List ONLY files
+       YOU changed.  For AscendNPU-IR edits (npu_ir category) list
+       each file as third_party/ascend/AscendNPU-IR/<submodule-relative
+       path>.
+    5. Write {step_dir}/rerun_command.txt — ONE bash command line that
+       re-runs EXACTLY this single failing case inside "repo_dir",
+       e.g.:
+         cd <repo_dir> && pytest -sv -n 16 tests/fla/test_xxx.py::test_xxx[param] > <rerun_log> 2>&1
+       Use the pytest node id from the case; keep the -n worker count
+       from the original log when visible; target ONLY this case.
+    6. Write {step_dir}/commit_message.txt — ONE-LINE subject
+       (≤72 chars, no "fix:" prefix) describing the case fixed, e.g.
+       "Fix Q3TritonKernel test_cross_entropy_bwd bf16 numerical mismatch"
+    7. Write {step_dir}/step_summary.md — short fix note: WHICH case
+       was fixed, the root cause, and WHY this change fixes it.  The
+       report mode collects these into the PR description.
+    8. SELF-REVIEW: verify every modified file is within the category's
+       allowed paths, then return.
+
+── pipeline_test_report mode ──────────────────────────────────────
+
+  Trigger: {mode} is "pipeline_test_report" (pipeline test finished;
+  generate the PR description).
+
+  Context (in {error_logs} as JSON):
+    - "fix_summaries": accumulated per-case fix notes (WHICH case was
+      fixed + WHY) from the fix attempts
+    - "remaining_failures": cases still failing after the final round
+      (Known Issues)
+    - "overview": final per-repo pass/fail counts
+
+  Your task:
+    Write {step_dir}/step_summary.md as the PR description (English —
+    it goes to a GitHub PR) with these sections:
+
+      ## Summary
+      - Pipeline test run against triton-ascend: result summary
+      - Total fixed cases: N; still failing: M
+
+      ## Fixed Cases
+      - For EVERY fixed case: the test case id (repo + node id), the
+        problem category (算子问题 / Triton—Ascend问题 / NPU-IR问题),
+        and WHY the fix was made (root cause → change) — collect this
+        from the fix_summaries entries verbatim where possible.
+
+      ## Known Issues
+      - List every remaining failing case with its error and category.
+        State clearly these are still FAILING and need manual follow-up.
+
+      ## Test Reports
+      - Point to the Excel reports under {test_workspace}/analysis/
+        (错误信息总览表.xlsx, 错误信息汇总表.xlsx).
+
+  Rules:
+    - DO NOT modify source code
+    - Write in English
+    - Cite exact case ids; keep it reviewer-ready
+
 ── fix mode ───────────────────────────────────────────────────────
 
   Trigger: {mode} is "fix" (build or tests failed).

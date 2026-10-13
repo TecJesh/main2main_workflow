@@ -250,6 +250,85 @@ Round 1-N: [OOM? → 降并发重跑] → AI fix → validate_fix → rebuild �
 
 ---
 
+## 完整测试流水线 (ta-pipeline-test)
+
+独立于 main2main 同步流程的完整测试流水线，通过独立命令启动：
+
+```bash
+ta-pipeline-test --triton-ascend-path <path>
+```
+
+流程：人工配置的可执行脚本（`TA_PIPELINE_TEST_SCRIPT`）把外部测试仓
+（如 Q3TritonKernel）clone 到 `~/test_workspace`（`TA_TEST_WORKSPACE`）并
+运行 pytest，日志落到 `~/test_workspace/test_log/<仓名>_test_log/`。全部仓
+跑完后，workflow 的 AI 整理日志并生成两张 Excel 报表，随后按用例逐一修复。
+
+### 运行过程
+
+0. **预编译安装** — 测试脚本跑在已安装的 triton-ascend 上，所以先创建
+   工作分支（基座 `{TA_WORK_BRANCH_BASE}/{TA_BASE_BRANCH}`），再复用主
+   流程的 `build_and_fix_loop` 执行 `setup_ascend.py install` 编译安装；
+   失败则 AI 修复重建（≤ `TA_MAX_RETRIES`），修复提交落在工作分支上；
+   仍失败则中止流程。`SKIP_BUILD=true` 跳过（假定环境已编译好）。
+1. **跑测试** — `bash <TA_PIPELINE_TEST_SCRIPT>`（流式输出，超时
+   `TA_PIPELINE_TEST_TIMEOUT`，默认 28800s）。每次运行前清空并重建
+   `~/test_workspace`（临时目录，与 workspace/ 同为易失目录）。
+2. **收集日志** — 扫描 `test_log/*_test_log/` 下的原始 pytest 日志，
+   确定性地解析 `N passed, M failed, E errors, S skipped` 汇总行和
+   `FAILED/ERROR path::test` 短摘要行（兜底用）。
+3. **AI 整理** — `pipeline_test_analyze` 模式读取日志，向
+   `workspace/steps/pipeline-test/analysis.json` 写入结构化结果（各仓
+   用例计数 + 每个失败 case 的报错摘要与问题分类）。AI 不可用时退化为
+   确定性解析。
+4. **Excel 报表**（确定性生成，openpyxl）：
+   - `~/test_workspace/analysis/错误信息总览表.xlsx`
+     — 测试仓名称 / 总用例数 / 成功用例数 / 失败用例数 / 错误用例数 /
+     跳过用例数 / 失败率
+   - `~/test_workspace/analysis/错误信息汇总表.xlsx`
+     — 测试仓名称 / 失败的测试case / 报错信息 / 问题分类
+     （算子问题 / Triton—Ascend问题 / NPU-IR问题）
+5. **直接通过** → 结束（exit 0），不创建工作分支、不提 PR。
+6. **有失败** → 工作分支已在预编译阶段创建（`fix/pipeline-test-<时间戳>`，
+   基座 = `{TA_WORK_BRANCH_BASE}/{TA_BASE_BRANCH}`，fresh fetch，回退
+   `origin/{TA_BASE_BRANCH}`），按用例逐一修复：
+   - AI 修复（`pipeline_test_fix` 模式，按问题分类给出允许修改路径：
+     算子→lib/Dialect、lib/Conversion、lib/Target/Ascend 等；Triton—Ascend
+     →third_party/ascend 等；NPU-IR→AscendNPU-IR 子模块，修改经
+     `regen_ai_fixes` 流入 npuir patch）→ 分类校验 → 重编译
+     （`build_triton`）→ AI 生成精准单用例重跑命令（`rerun_command.txt`）
+     → 通过则 `commit_fixes` **每修复一个 case 提交一次**，继续下一个用例。
+   - 单用例重试上限 `TA_PIPELINE_TEST_MAX_RETRIES`（默认 5）。
+7. **重跑全部测试** — 一轮用例修完后整脚本重跑，重新分析、刷新 Excel；
+   仍有失败进入下一轮，轮数上限 `TA_PIPELINE_TEST_ROUNDS`（默认 3）；
+   末轮修复完毕后再做一次最终验证跑。
+8. **收尾** — 有代码修复提交时：AI（`pipeline_test_report` 模式）生成
+   PR 描述（哪些 error case 修复了、为什么这样修、Known Issues），复用
+   `push_and_create_pr` 提 PR（PR base = `TA_PR_BASE_BRANCH`，默认
+   upstream-sync；标题固定为 `[PipelineTest](fix) Fix N failing test
+   case(s) (时间戳)`，不复用主流程的 PR_AUTHOR，可用
+   `TA_PIPELINE_TEST_PR_TITLE` 整体覆盖）；无修复则不提 PR。最后切回原
+   分支。轮数耗尽仍有失败：PR 列出剩余失败用例为 Known Issues，进程以
+   非零码退出。其余配置（`AI_BACKEND`、`SKIP_AI_ANALYSIS`、`SKIP_BUILD`、
+   `PUSH_TO_GITHUB`、`GITHUB_REPO`、`TEST_PROCS`、`LLVM_INSTALL_PREFIX`、
+   `TA_AI_TIMEOUT_*` 等）与主流程一致，全部复用。
+
+### 环境变量
+
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| `TA_PIPELINE_TEST_SCRIPT` | 测试脚本路径（必填） | -- |
+| `TA_TEST_WORKSPACE` | 测试工作区（每次运行重建） | `~/test_workspace` |
+| `TA_PIPELINE_TEST_MAX_RETRIES` | 单用例修复重试上限 | 5 |
+| `TA_PIPELINE_TEST_ROUNDS` | 全量测试重跑轮数上限 | 3 |
+| `TA_PIPELINE_TEST_TIMEOUT` | 测试脚本超时（秒） | 28800 |
+| `TA_PIPELINE_TEST_PR_TITLE` | 覆盖 PR 标题 | `[PipelineTest](fix) Fix N failing test case(s) (时间戳)` |
+
+**负责模块**: `pipeline_test/`（flow / logs / script_runner / analyze /
+fix_loop）、`pipeline_test_main.py`、`agent/prompt.md`
+（pipeline_test_analyze / pipeline_test_fix / pipeline_test_report 模式）
+
+---
+
 ## 关键设计
 
 ### 不可变状态传递

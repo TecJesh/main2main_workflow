@@ -78,6 +78,9 @@ _MODE_LABELS: dict[str, str] = {
     "ir_patch_fix": "IR PATCH FIX",
     "ir_diagnose": "IR FAILURE DIAGNOSIS",
     "setup_sync": "SETUP_ASCEND.PY SYNC",
+    "pipeline_test_analyze": "PIPELINE TEST LOG ANALYSIS",
+    "pipeline_test_fix": "PIPELINE TEST CASE FIX",
+    "pipeline_test_report": "PIPELINE TEST REPORT",
 }
 
 

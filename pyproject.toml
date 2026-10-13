@@ -8,6 +8,7 @@ dependencies = []
 
 [project.scripts]
 ta-kickoff = "TA_main2main_workflow.main:kickoff"
+ta-pipeline-test = "TA_main2main_workflow.pipeline_test_main:main"
 
 [build-system]
 requires = ["hatchling"]

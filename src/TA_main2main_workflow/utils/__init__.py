@@ -78,6 +78,32 @@ LLVM20COMPAT_RESULT_FILE = "llvm20compat_result.json"
 LLVM_CHANGE_ANALYSIS_DIR = "llvm_change_analysis"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Pipeline test (ta-pipeline-test) file names
+# ═══════════════════════════════════════════════════════════════════════════
+
+PIPELINE_TEST_STEP_ID = "pipeline-test"
+PIPELINE_TEST_ANALYSIS_FILE = "analysis.json"
+PIPELINE_TEST_OVERVIEW_XLSX = "错误信息总览表.xlsx"
+PIPELINE_TEST_DETAIL_XLSX = "错误信息汇总表.xlsx"
+PIPELINE_TEST_RUN_LOG = "pipeline_test_run.log"
+PIPELINE_TEST_FIX_SUMMARIES = "fix_summaries.md"
+PIPELINE_TEST_LOG_DIR_NAME = "test_log"
+PIPELINE_TEST_ANALYSIS_DIR_NAME = "analysis"
+PIPELINE_TEST_RERUN_PREFIX = "rerun_"
+
+# Pipeline test problem categories (问题分类 column in the detail Excel).
+PIPELINE_TEST_CATEGORY_OPERATOR = "operator"
+PIPELINE_TEST_CATEGORY_TRITON_ASCEND = "triton_ascend"
+PIPELINE_TEST_CATEGORY_NPU_IR = "npu_ir"
+
+# Chinese labels used in the Excel reports (per spec).
+PIPELINE_TEST_CATEGORY_LABELS = {
+    PIPELINE_TEST_CATEGORY_OPERATOR: "算子问题",
+    PIPELINE_TEST_CATEGORY_TRITON_ASCEND: "Triton—Ascend问题",
+    PIPELINE_TEST_CATEGORY_NPU_IR: "NPU-IR问题",
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Re-exports
 # ═══════════════════════════════════════════════════════════════════════════
 
